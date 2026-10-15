@@ -101,7 +101,7 @@ def test_format_families_expand_to_supported_extension_universe() -> None:
 
 def test_pil_format_map_and_download_equivalences_derive_from_families() -> None:
     """PIL 格式映射与下载侧等价类从家族表派生，回退为手写表漂移时在此报警。"""
-    from seedream_mcp.utils.io.io_download import _FORMAT_EQUIVALENT_EXTENSIONS
+    from seedream_mcp.utils.io.download import _FORMAT_EQUIVALENT_EXTENSIONS
 
     assert EXTENSIONS_BY_PIL_FORMAT == {
         pil_format: frozenset(family_extensions)
@@ -166,7 +166,7 @@ def test_validate_image_input_rejects_oversized_data_uri_before_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """巨型 base64 在解码前按换算的估算字节数拒绝，超限文案经 format_file_too_large 收口。"""
-    import seedream_mcp.utils.images.image_validation as image_validation_module
+    import seedream_mcp.utils.images.validation as image_validation_module
 
     max_size = 1024 * 1024
     monkeypatch.setattr(image_validation_module, "MAX_IMAGE_FILE_SIZE", max_size)

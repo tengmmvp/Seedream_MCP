@@ -25,7 +25,7 @@ from ...utils.core.validators import (
     validate_size_for_model,
     validate_stream,
 )
-from ...utils.model.model_capabilities import get_max_reference_images
+from ...utils.model.capabilities import get_max_reference_images
 from .schemas import GenerationInputParams
 
 

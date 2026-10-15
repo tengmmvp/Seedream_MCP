@@ -15,7 +15,7 @@ import httpx
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.io.io_sse import parse_sse_response
+from seedream_mcp.utils.io.sse import parse_sse_response
 
 if TYPE_CHECKING:
     from loguru import Logger

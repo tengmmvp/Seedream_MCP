@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...config import SeedreamConfig
-from ...utils.model.model_capabilities import (
+from ...utils.model.capabilities import (
     CAPABILITY_LABELS,
     MODEL_ALIASES,
     MODEL_FAMILY_UNKNOWN,

@@ -11,7 +11,7 @@ from typing import Any, cast
 import pytest
 
 from seedream_mcp.utils.core.loop_bound import LoopKeyedInflight, loop_bound_semaphore
-from seedream_mcp.utils.images import image_prepare
+from seedream_mcp.utils.images import prepare as image_prepare
 
 from _client_fakes import _make_client
 

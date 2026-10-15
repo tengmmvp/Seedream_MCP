@@ -139,9 +139,9 @@ from .utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
-from .utils.io.io_file import open_packaged_read
-from .utils.io.io_path import get_workspace_roots
-from .utils.io.io_roots import (
+from .utils.io.files import open_packaged_read
+from .utils.io.path import get_workspace_roots
+from .utils.io.roots import (
     modern_revision_negotiated,
     read_session_roots_or_raise,
     read_session_roots_result,
@@ -152,7 +152,7 @@ from .utils.io.io_roots import (
     session_or_none,
     workspace_roots_scope_from_result,
 )
-from .utils.model.model_capabilities import (
+from .utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
     model_payloads,
 )
@@ -857,7 +857,7 @@ async def models_info_resource() -> str:
     """各模型别名与能力声明，供客户端按尺寸档位、工具、流式等选择合适模型。"""
     global _models_info_payload
     if _models_info_payload is None:
-        # 载荷派生收敛到 model_capabilities 的公共 builder，与 Web 模型清单同源；
+        # 载荷派生收敛到 capabilities 的公共 builder，与 Web 模型清单同源；
         # ModelCapabilities 新增字段自动出现在本资源，无需手工同步。
         _models_info_payload = json.dumps(
             {"models": model_payloads()}, ensure_ascii=False, indent=2

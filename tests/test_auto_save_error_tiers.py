@@ -14,8 +14,8 @@ from typing import Any
 import pytest
 
 from seedream_mcp.utils.core.executors import should_offload_size, shutdown_cpu_offload_executor
-from seedream_mcp.utils.io.io_save import AutoSaveManager
-from seedream_mcp.utils.io.io_storage import FileManager, FileManagerError
+from seedream_mcp.utils.io.save import AutoSaveManager
+from seedream_mcp.utils.io.storage import FileManager, FileManagerError
 
 from _cpu_offload_spy import saturate_cpu_offload_pool
 from _log_fakes import capture_loguru_messages

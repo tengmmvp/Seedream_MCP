@@ -13,14 +13,14 @@ from pathlib import Path
 import pytest
 
 from _log_fakes import capture_loguru_messages
-from seedream_mcp.utils.io.io_path import (
+from seedream_mcp.utils.io.path import (
     is_drive_relative,
     is_unc_path,
     is_within_resolved,
     is_windows_rooted_without_drive,
     normalize_path,
 )
-from seedream_mcp.utils.io.io_roots import _file_uri_to_path
+from seedream_mcp.utils.io.roots import _file_uri_to_path
 
 
 def _patch_resolve_exploding_only_on_unc(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,7 +162,7 @@ def test_is_windows_rooted_without_drive_posix_returns_false() -> None:
 def test_resolve_local_image_candidate_rejects_rooted_no_drive_with_message() -> None:
     """参考图候选解析入口对有根无盘符形态抛明确拒绝而非含糊的找不到文件。"""
     from seedream_mcp.utils.core.errors import SeedreamValidationError
-    from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
+    from seedream_mcp.utils.images.validation import resolve_local_image_candidate
 
     with pytest.raises(SeedreamValidationError, match="拒绝有根无盘符路径"):
         resolve_local_image_candidate("/some_dir/cat.png")
@@ -413,7 +413,7 @@ def test_resolve_images_root_rejects_unc_declaration_before_resolve(
     图片目录求值入口补齐 resolve 前拦截，保护全部消费方。
     """
     from seedream_mcp.utils.core.errors import SeedreamConfigError
-    from seedream_mcp.utils.io import io_path as io_path_module
+    from seedream_mcp.utils.io import path as io_path_module
 
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
     monkeypatch.setenv("SEEDREAM_DATA_ROOT", unc_dir)
@@ -431,7 +431,7 @@ def test_resolve_local_image_candidate_skips_unc_without_resolve(
     断言 UNC 路径未进入 resolve 而非仅断言返回 None，防止回归为先 resolve 后
     拒绝；合法根目录的 resolve 不在守卫范围。
     """
-    from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
+    from seedream_mcp.utils.images.validation import resolve_local_image_candidate
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
@@ -444,7 +444,7 @@ def test_resolve_local_image_candidate_rejects_mixed_unc_without_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """win32 下混合分隔符 UNC 输入在 resolve 前被拦截，不触发 SMB 连接。"""
-    from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
+    from seedream_mcp.utils.images.validation import resolve_local_image_candidate
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
@@ -460,7 +460,7 @@ def test_find_images_directory_rejects_mixed_separator_unc_without_resolve(
 
     被测函数的兜底 except 会吞掉爆炸守卫，拦截事实由跳过分支的告警文案锁定。
     """
-    from seedream_mcp.utils.io.io_scan import find_images_in_directory
+    from seedream_mcp.utils.io.scan import find_images_in_directory
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
@@ -480,7 +480,7 @@ def test_suggest_similar_paths_rejects_mixed_separator_unc_without_resolve(
 
     被测函数的兜底 except 会吞掉爆炸守卫，拦截事实由跳过分支的告警文案锁定。
     """
-    from seedream_mcp.utils.io.io_scan import suggest_similar_paths
+    from seedream_mcp.utils.io.scan import suggest_similar_paths
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
@@ -499,8 +499,8 @@ def test_resolves_outside_workspace_skips_unc_candidates_without_resolve(
     输入级检查覆盖 UNC 直接输入；UNC 路径的 resolve 会触发 SMB 认证。断言 UNC
     输入未进入 resolve，合法路径的 resolve 不误报。
     """
-    from seedream_mcp.utils.images.image_input import _resolves_outside_read_scope
-    from seedream_mcp.utils.io.io_path import get_read_context
+    from seedream_mcp.utils.images.inputs import _resolves_outside_read_scope
+    from seedream_mcp.utils.io.path import get_read_context
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
     _, images_root, read_scope = get_read_context()
@@ -518,7 +518,7 @@ def test_validate_image_input_rejects_unc_before_resolve(
     断言 UNC 路径未进入 resolve 而非仅断言抛错，防止回归为先解析后拒绝。
     """
     from seedream_mcp.utils.core.errors import SeedreamValidationError
-    from seedream_mcp.utils.images.image_validation import validate_image_input
+    from seedream_mcp.utils.images.validation import validate_image_input
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
@@ -540,7 +540,7 @@ def test_resolve_local_image_candidate_rejects_ads_colon_reference() -> None:
     名字形态即可触发拒绝，无需构造真实 NTFS 流。
     """
     from seedream_mcp.utils.core.errors import SeedreamValidationError
-    from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
+    from seedream_mcp.utils.images.validation import resolve_local_image_candidate
 
     with pytest.raises(SeedreamValidationError, match="备用数据流") as exc_info:
         resolve_local_image_candidate("photo.jpg:ads.png")
@@ -563,8 +563,8 @@ async def test_prepare_image_input_rejects_ads_colon_reference_before_read(
     from typing import IO
 
     from seedream_mcp.utils.core.errors import SeedreamValidationError
-    from seedream_mcp.utils.images import image_validation as image_validation_module
-    from seedream_mcp.utils.images.image_input import prepare_image_input
+    from seedream_mcp.utils.images import validation as image_validation_module
+    from seedream_mcp.utils.images.inputs import prepare_image_input
 
     def _explode_read(path: Path) -> IO[bytes]:
         raise AssertionError("ADS 形态参考图不得进入文件读取")
@@ -591,7 +591,7 @@ async def test_image_preparer_rejects_ads_colon_reference_at_signature(
     并发槽位获取与文件读取。
     """
     from seedream_mcp.utils.core.errors import SeedreamValidationError
-    from seedream_mcp.utils.images.image_prepare import ImagePreparer
+    from seedream_mcp.utils.images.prepare import ImagePreparer
 
     preparer = ImagePreparer(4, 64 * 1024 * 1024, 2)
 
@@ -611,7 +611,7 @@ async def test_prepare_image_input_posix_reads_colon_named_reference(
     """
     from PIL import Image
 
-    from seedream_mcp.utils.images.image_input import prepare_image_input
+    from seedream_mcp.utils.images.inputs import prepare_image_input
 
     # 相对路径候选仅锚定图片目录，文件须落在其中而非工作区根。
     images_dir = tmp_path / ".seedream" / "images"
@@ -633,7 +633,7 @@ async def test_prepare_image_input_rejects_non_http_scheme_with_form_diagnosis(
     会先命中冒号分量拒绝而误报为 NTFS 备用数据流。
     """
     from seedream_mcp.utils.core.errors import SeedreamValidationError
-    from seedream_mcp.utils.images.image_input import prepare_image_input
+    from seedream_mcp.utils.images.inputs import prepare_image_input
 
     with pytest.raises(SeedreamValidationError, match="仅支持图像 URL") as exc_info:
         await prepare_image_input("file:///C:/users/me/ref.png")
@@ -650,7 +650,7 @@ async def test_prepare_image_input_posix_single_letter_scheme_rejected(
     输入形态。
     """
     from seedream_mcp.utils.core.errors import SeedreamValidationError
-    from seedream_mcp.utils.images.image_input import prepare_image_input
+    from seedream_mcp.utils.images.inputs import prepare_image_input
 
     monkeypatch.setattr(sys, "platform", "linux")
 
@@ -668,7 +668,7 @@ async def test_prepare_image_input_windows_single_letter_scheme_treated_as_drive
     未走 scheme 分支的证据。
     """
     from seedream_mcp.utils.core.errors import SeedreamValidationError
-    from seedream_mcp.utils.images.image_input import prepare_image_input
+    from seedream_mcp.utils.images.inputs import prepare_image_input
 
     with pytest.raises(SeedreamValidationError, match="路径不在读取范围内"):
         await prepare_image_input("C://users/me/ref.png")

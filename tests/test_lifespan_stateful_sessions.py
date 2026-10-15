@@ -107,7 +107,7 @@ async def test_session_entering_during_cleanup_drain_keeps_resource_alive(
     drain_background_cleanup_tasks 处，期间会话 2 复用仍挂活动槽位的资源；清理
     恢复后须复检在途引用并放弃关闭。
     """
-    from seedream_mcp.utils.io import io_save
+    from seedream_mcp.utils.io import save as io_save
 
     drain_entered = asyncio.Event()
     drain_release = asyncio.Event()
@@ -159,7 +159,7 @@ async def test_new_config_session_during_drain_closes_zero_refcount_resource_imm
     会话 1 的 teardown 挂起在 drain 处，期间 config 变更的第二会话重建资源并退役
     旧槽位；旧资源 refcount 已为 0，退役即关闭而非进入退役追踪列表。
     """
-    from seedream_mcp.utils.io import io_save
+    from seedream_mcp.utils.io import save as io_save
 
     drain_entered = asyncio.Event()
     drain_release = asyncio.Event()

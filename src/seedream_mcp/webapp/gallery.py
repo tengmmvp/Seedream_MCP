@@ -20,7 +20,7 @@ from ..tools.core.common import output_channels_scope
 from ..tools.core.schemas import BrowseImagesInput
 from ..tools.runners import run_browse_images
 from ..utils.core.logs import get_logger
-from ..utils.io.io_path import (
+from ..utils.io.path import (
     is_within_resolved,
     normalize_path,
 )

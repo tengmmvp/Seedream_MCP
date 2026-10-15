@@ -57,7 +57,7 @@ _ENV_KEY_READ_EXEMPTIONS = frozenset(
     {
         "config.py:os.getenv(env_name)",
         "_config_sources.py:os.getenv(env_key)",
-        "utils/io/io_path.py:os.getenv(env_var)",
+        "utils/io/path.py:os.getenv(env_var)",
     }
 )
 
@@ -148,7 +148,7 @@ def test_optimize_mode_literal_matches_validator_whitelist() -> None:
 
 def test_unknown_family_presets_match_validator_whitelist() -> None:
     """unknown 家族的档位全集与 VALID_SIZE_PRESETS 一致，新增档位须两侧同步。"""
-    from seedream_mcp.utils.model.model_capabilities import (
+    from seedream_mcp.utils.model.capabilities import (
         MODEL_CAPABILITIES,
         MODEL_FAMILY_UNKNOWN,
     )
@@ -158,7 +158,7 @@ def test_unknown_family_presets_match_validator_whitelist() -> None:
 
 def test_family_reference_caps_fit_sequential_total_images() -> None:
     """能力表各家族 max_reference_images ≤ 组图总数上限 - 1，不留生成位的家族使组图错误指引自相矛盾。"""
-    from seedream_mcp.utils.model.model_capabilities import MODEL_CAPABILITIES
+    from seedream_mcp.utils.model.capabilities import MODEL_CAPABILITIES
 
     offenders = [
         f"{family}: {caps.max_reference_images}"
@@ -349,7 +349,7 @@ def test_context_probe_keys_match_schema_fields() -> None:
 
 def test_suggest_similar_paths_finds_close_names(tmp_path: Path) -> None:
     """相似路径建议按目标文件名子串匹配，无参调用返回空列表不扫描 CWD。"""
-    from seedream_mcp.utils.io.io_scan import suggest_similar_paths
+    from seedream_mcp.utils.io.scan import suggest_similar_paths
 
     (tmp_path / "portrait.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (tmp_path / "other.jpg").write_bytes(b"\x89PNG\r\n\x1a\n")

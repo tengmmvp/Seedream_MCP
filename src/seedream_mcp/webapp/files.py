@@ -20,9 +20,9 @@ from starlette.responses import Response
 from ..utils.core.errors import SeedreamConfigError
 from ..utils.core.executors import CpuOffloadPoolClosedError
 from ..utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS
-from ..utils.images.image_thumbnail import cached_thumbnail_bytes
-from ..utils.io.io_file import SymlinkRejectedError, open_regular_read
-from ..utils.io.io_path import (
+from ..utils.images.thumbnail import cached_thumbnail_bytes
+from ..utils.io.files import SymlinkRejectedError, open_regular_read
+from ..utils.io.path import (
     has_windows_colon_component,
     is_drive_relative,
     is_within_resolved,

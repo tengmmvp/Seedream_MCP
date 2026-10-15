@@ -32,9 +32,9 @@ from ..core.formats import (
 from ..core.logs import get_logger
 from ..core.loop_bound import loop_bound_semaphore
 from ..core.throttles import ThrottleRegistry
-from .io_download import DownloadManager, DownloadError
-from .io_url import sanitize_url
-from .io_storage import FileManager, FileManagerError, current_save_time, get_file_manager
+from .download import DownloadManager, DownloadError
+from .url import sanitize_url
+from .storage import FileManager, FileManagerError, current_save_time, get_file_manager
 
 logger = get_logger()
 
@@ -136,7 +136,7 @@ def _pixel_limit_rejection(path: Path) -> str | None:
         # 头声明像素超过 2 倍上限时 PIL 在打开阶段即抛错，具体尺寸不可得，仍按
         # 像素超限口径拒绝，交由外层删除已落盘文件并降级。
         return f"图像像素超过保存上限 {MAX_IMAGE_PIXELS}，已删除落盘文件并放弃保存"
-    # 畸形头在部分 PIL 插件抛 ValueError，捕获集与 image_validation 的解码包装同口径。
+    # 畸形头在部分 PIL 插件抛 ValueError，捕获集与 validation 的解码包装同口径。
     except (UnidentifiedImageError, ValueError, OSError, SyntaxError):
         return None
     if width * height > MAX_IMAGE_PIXELS:

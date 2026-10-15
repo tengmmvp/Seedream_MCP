@@ -26,7 +26,7 @@ CPU_OFFLOAD_THREAD_PREFIX = "seedream-cpu-offload"
 
 # 池深封顶防止调高并发配置催生无界线程数。
 _CPU_OFFLOAD_MAX_WORKERS_CAP = 32
-# 预览解码并发的单一定义点，池深加数与 image_thumbnail 的解码限流信号量共用；
+# 预览解码并发的单一定义点，池深加数与 thumbnail 的解码限流信号量共用；
 # 像素上限 36MP 的单张解码最坏逾百 MB，并发 3 封顶瞬态。
 CPU_OFFLOAD_DECODE_SLOTS = 3
 # 提供者缺失或配置不可构建时的并发回退值，对齐 SEEDREAM_GENERATE_CONCURRENCY

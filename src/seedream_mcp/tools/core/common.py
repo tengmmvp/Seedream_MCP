@@ -18,9 +18,9 @@ from mcp.types import CallToolResult, ImageContent
 
 from ...client import SeedreamClient
 from ...config import SeedreamConfig
-from ...utils.images.image_thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
-from ...utils.io.io_path import resolve_images_root
-from ...utils.io.io_save import AutoSaveResult
+from ...utils.images.thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
+from ...utils.io.path import resolve_images_root
+from ...utils.io.save import AutoSaveResult
 from ...utils.core.errors import (
     SeedreamConfigError,
     format_error_for_user,

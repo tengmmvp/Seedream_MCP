@@ -22,15 +22,15 @@ from ..core.executors import (
 )
 from ..core.formats import encode_data_uri
 from ..core.logs import get_logger
-from ..io.io_path import (
+from ..io.path import (
     get_read_context,
     is_unc_path,
     is_within_resolved,
     normalize_path,
     read_scope_denial_message,
 )
-from ..io.io_scan import suggest_similar_paths
-from .image_validation import (
+from ..io.scan import suggest_similar_paths
+from .validation import (
     LocalImageCandidate,
     iter_local_candidates,
     read_and_decode_local_image,
@@ -38,7 +38,7 @@ from .image_validation import (
     validate_image_input,
     validate_image_path,
 )
-from .image_ref import classify_image_reference, require_image_str
+from .ref import classify_image_reference, require_image_str
 
 logger = get_logger()
 

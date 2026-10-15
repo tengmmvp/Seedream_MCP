@@ -30,7 +30,7 @@ from seedream_mcp.tools.core.schemas import (
     TextToImageInput,
     _SequentialImageInput,
 )
-from seedream_mcp.utils.images.image_ref import classify_image_reference
+from seedream_mcp.utils.images.ref import classify_image_reference
 
 
 def test_prompt_accepts_max_length_boundary() -> None:

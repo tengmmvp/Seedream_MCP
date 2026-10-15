@@ -29,7 +29,7 @@ from seedream_mcp.tools.core._sanitize import _sanitize_image_errors, sanitize_e
 from seedream_mcp.tools.core.outputs import _stringify_keys
 from seedream_mcp.utils.core.errors import SeedreamAPIError, response_reports_failure
 from seedream_mcp.utils.core.sanitizers import _truncate_value_for_output
-from seedream_mcp.utils.io.io_save import AutoSaveResult
+from seedream_mcp.utils.io.save import AutoSaveResult
 
 from _generation_fixtures import make_generation_context
 

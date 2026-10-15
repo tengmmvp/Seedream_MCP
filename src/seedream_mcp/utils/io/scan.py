@@ -20,8 +20,8 @@ resolve 失败剔除不折损早停事实，不完整成因（截断/停滞/剔�
 携带 include 的调用必须配对非空读范围签名，失配拒绝。
 非递归扫描以目录 mtime 失效，捕获时已沉淀超 FAT 时间戳粒度窗口的条目
 mtime 未变即新鲜，未沉淀条目叠加 TTL 上界兜底粗粒度时间戳；递归扫描改用
-TTL 失效，接受短时陈旧换取翻页性能。组内依赖 io_scan → io_path、io_scan →
-io_file 单向。
+TTL 失效，接受短时陈旧换取翻页性能。组内依赖 scan → path、scan →
+files 单向。
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ from pathlib import Path
 
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
-from .io_file import has_reparse_attribute
-from .io_path import ResolveResultCache, is_unc_path
+from .files import has_reparse_attribute
+from .path import ResolveResultCache, is_unc_path
 
 logger = get_logger()
 
@@ -79,7 +79,7 @@ _SCAN_STALL_ZERO_PROGRESS_ROUNDS = 2
 
 # raw→resolved 的进程级复用缓存，TTL 过期重扫免逐文件重复 resolve；缓存值同时
 # 供回显与读权限判定消费，符号链接改向的陈旧窗口由 TTL 封顶在扫描条目陈旧窗口
-# 的两倍。骨架与配置根缓存共用 io_path 的 ResolveResultCache。
+# 的两倍。骨架与配置根缓存共用 path 的 ResolveResultCache。
 # 扫描 resolve 复用缓存的进程级条目上限：派生自扫描缓存单目录上限，恒容纳
 # 一个最大可缓存目录的全量条目。
 _RESOLVE_CACHE_TTL_SECONDS = 60.0

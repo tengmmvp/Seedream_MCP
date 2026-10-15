@@ -16,7 +16,7 @@ from seedream_mcp.tools.core.model_info import (
     build_model_info_text,
 )
 from seedream_mcp.utils.core.validators import VALID_OPTIMIZE_MODES, capability_gate_error
-from seedream_mcp.utils.model.model_capabilities import CAPABILITY_LABELS, ModelCapabilities
+from seedream_mcp.utils.model.capabilities import CAPABILITY_LABELS, ModelCapabilities
 
 # 能力表字段到快照键的映射全集，映射完整性断言的数据源。
 _CAPS_FIELD_TO_PAYLOAD_KEY = {

@@ -38,8 +38,8 @@ from seedream_mcp.tools.core.schemas import (
     SequentialGenerationInput,
     TextToImageInput,
 )
-from seedream_mcp.utils.io.io_storage import FileManager
-from seedream_mcp.utils.model.model_capabilities import MODEL_CAPABILITIES
+from seedream_mcp.utils.io.storage import FileManager
+from seedream_mcp.utils.model.capabilities import MODEL_CAPABILITIES
 
 # 工具名到输入模型的映射，镜像 server.py 平铺签名组装各工具时使用的输入模型。
 _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {

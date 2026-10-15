@@ -26,7 +26,7 @@ from .transport import (
 )
 from .utils.core.errors import SeedreamConfigError, format_error_for_user
 from .utils.core.logs import get_logger, setup_logging
-from .utils.io.io_path import drain_pending_start_messages, resolve_log_file_path
+from .utils.io.path import drain_pending_start_messages, resolve_log_file_path
 
 logger = get_logger()
 
@@ -46,12 +46,12 @@ def cli_main() -> int:
         print(f"配置错误: {exc.message}", file=sys.stderr)
         return 1
 
-    # 注入活动配置，server 与 io_path 经 get_active_config 共用此实例。
+    # 注入活动配置，server 与 path 经 get_active_config 共用此实例。
     set_active_config(config)
 
     # setup_logging 的目录创建等 I/O 在只读容器或受限账号下可能抛 OSError，捕获后
     # 降级为 stderr 输出与退出码 1；不经 format_error_for_user，以免未知错误标签
-    # 误导排查并回显绝对路径。日志文件路径由 io_path 单点求值，回退链整体不可
+    # 误导排查并回显绝对路径。日志文件路径由 path 单点求值，回退链整体不可
     # 解析时同此降级退出。
     try:
         setup_logging(

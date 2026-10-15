@@ -10,8 +10,8 @@ import pytest
 from PIL import Image
 
 from seedream_mcp.utils.core import formats as formats_module
-from seedream_mcp.utils.io import io_save as auto_save_module
-from seedream_mcp.utils.io.io_save import (
+from seedream_mcp.utils.io import save as auto_save_module
+from seedream_mcp.utils.io.save import (
     AutoSaveManager,
     AutoSaveResult,
     drain_background_cleanup_tasks,

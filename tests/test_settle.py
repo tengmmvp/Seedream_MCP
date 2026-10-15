@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.utils.core.settle import await_settled_op, settle_detached_op
-from seedream_mcp.utils.io.io_file import open_temp_fd
+from seedream_mcp.utils.io.files import open_temp_fd
 
 from _os_fakes import _install_close_counter
 

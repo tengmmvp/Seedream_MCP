@@ -295,7 +295,7 @@ async def test_web_browse_filters_outside_entries_at_source(
 ) -> None:
     """越界条目经 bounds_scope 在扫描源头剔除，响应不出现界外路径与计数虚高。"""
     import seedream_mcp.tools.core.browse as browse_module
-    from seedream_mcp.utils.io.io_scan import find_images_in_directory
+    from seedream_mcp.utils.io.scan import find_images_in_directory
 
     images_root = write_workspace_config(tmp_path)
     day_dir = images_root / "2026-08-20" / "text_to_image"

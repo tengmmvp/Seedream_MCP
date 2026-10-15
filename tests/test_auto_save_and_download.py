@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-from seedream_mcp.utils.io.io_save import AutoSaveManager
-from seedream_mcp.utils.io.io_download import (
+from seedream_mcp.utils.io.save import AutoSaveManager
+from seedream_mcp.utils.io.download import (
     DownloadError,
     DownloadManager,
     _is_image_compatible_content_type,
@@ -157,7 +157,7 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """节流按 base_dir 跨请求共享：同目录仅触发一次，不同目录各自触发。"""
-    from seedream_mcp.utils.io import io_save as auto_save_module
+    from seedream_mcp.utils.io import save as auto_save_module
 
     auto_save_module._cleanup_last_run.clear()
     cleanup_calls: list[int] = []
@@ -203,7 +203,7 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
     """
     import time as time_module
 
-    from seedream_mcp.utils.io import io_save as auto_save_module
+    from seedream_mcp.utils.io import save as auto_save_module
 
     auto_save_module._cleanup_last_run.clear()
     cleanup_calls: list[int] = []
@@ -255,7 +255,7 @@ async def test_maybe_cleanup_sweeps_orphan_part_with_cleanup_disabled(
     import os
     from datetime import datetime, timedelta
 
-    from seedream_mcp.utils.io import io_save as auto_save_module
+    from seedream_mcp.utils.io import save as auto_save_module
 
     auto_save_module._cleanup_last_run.clear()
     stale_part = tmp_path / "tmpabc123.png.part"
@@ -288,7 +288,7 @@ async def test_maybe_cleanup_failure_backoff_throttles_retry(
     """
     import time as time_module
 
-    from seedream_mcp.utils.io import io_save as auto_save_module
+    from seedream_mcp.utils.io import save as auto_save_module
 
     auto_save_module._cleanup_last_run.clear()
     calls: list[int] = []
@@ -333,7 +333,7 @@ async def test_close_does_not_wait_for_background_cleanup(
     清理收尾由 drain_background_cleanup_tasks 在进程级退出清理时等待；此前 close 上的
     gather 使节流触发的请求同步挂起整个清理时长，且模块级任务集合造成跨请求延迟耦合。
     """
-    from seedream_mcp.utils.io import io_save as auto_save_module
+    from seedream_mcp.utils.io import save as auto_save_module
 
     auto_save_module.reset_cleanup_state()
     release = asyncio.Event()

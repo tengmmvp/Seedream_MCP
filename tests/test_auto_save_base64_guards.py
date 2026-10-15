@@ -17,7 +17,7 @@ import pytest
 
 from seedream_mcp.utils.core import formats
 from seedream_mcp.utils.core.executors import should_offload_size
-from seedream_mcp.utils.io.io_save import (
+from seedream_mcp.utils.io.save import (
     AutoSaveError,
     AutoSaveManager,
     AutoSaveResult,
@@ -715,7 +715,7 @@ def test_build_markdown_alt_truncation_keeps_escape_pairs_intact() -> None:
 
 def test_build_save_metadata_sanitizes_content_type() -> None:
     """content_type 为下载响应头原文，净化后控制字符与凭据片段不随 metadata 外泄。"""
-    from seedream_mcp.utils.io.io_save import _build_save_metadata
+    from seedream_mcp.utils.io.save import _build_save_metadata
 
     metadata = _build_save_metadata(
         "t2i", "2026-08-16T00:00:00", 1024, "image/png\r\nX-Injected: Bearer leak", 1

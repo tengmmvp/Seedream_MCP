@@ -18,7 +18,7 @@ from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, ListRootsResult
 
 from ..config import SeedreamConfig
-from ..utils.io.io_roots import workspace_roots_scope_from_result
+from ..utils.io.roots import workspace_roots_scope_from_result
 from .core.schemas import (
     BrowseImagesInput,
     GenerationInputParams,

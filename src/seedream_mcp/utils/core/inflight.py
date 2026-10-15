@@ -1,8 +1,8 @@
 """asyncio 共享后台任务的可观测性设施。
 
 InflightEntry 提供 single-flight 在途条目与孤儿异常登记判定，经 loop_bound 的
-LoopKeyedInflight 供 io_download 的 DNS 在途解析、image_prepare 的参考图预处理
-与 image_thumbnail 的缩略图解码在途去重间接共用。消费者全部放弃且结果
+LoopKeyedInflight 供 download 的 DNS 在途解析、prepare 的参考图预处理
+与 thumbnail 的缩略图解码在途去重间接共用。消费者全部放弃且结果
 未被消费时，失败 task 经 arm_unretrieved_exception_logging 登记的兜底回调以
 warning 记录。
 """

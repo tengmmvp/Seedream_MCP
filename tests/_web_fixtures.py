@@ -135,7 +135,7 @@ def write_workspace_config(tmp_path: Path) -> Path:
 
 def make_images_root_unresolvable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """注入数据根目录不可解析的配置并顶替其解析。"""
-    import seedream_mcp.utils.io.io_path as io_path_module
+    import seedream_mcp.utils.io.path as io_path_module
 
     def _unresolvable(configured_dir: str) -> Path:
         del configured_dir

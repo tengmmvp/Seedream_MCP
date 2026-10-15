@@ -14,8 +14,8 @@ from PIL import Image
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.utils.images import image_prepare
-from seedream_mcp.utils.images.image_prepare import ImagePreparer
+from seedream_mcp.utils.images import prepare as image_prepare
+from seedream_mcp.utils.images.prepare import ImagePreparer
 
 
 async def test_prepare_image_input_cache_isolated_by_workspace_roots(
@@ -150,7 +150,7 @@ async def test_prepare_remote_inputs_skip_read_scope_evaluation(
     读权限求值先于输入分类执行时，不触本地文件系统的 URL 参考图会被无关的
     存储配置缺陷整体阻断。
     """
-    import seedream_mcp.utils.io.io_path as io_path_module
+    import seedream_mcp.utils.io.path as io_path_module
 
     def _unresolvable(configured_dir: str) -> Path:
         del configured_dir

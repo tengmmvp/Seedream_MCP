@@ -12,15 +12,15 @@ from mcp.shared.exceptions import NoBackChannelError
 from mcp.types import InputRequiredResult, ListRootsRequest, ListRootsResult
 from PIL import Image
 
-import seedream_mcp.utils.io.io_path as io_path_module
-import seedream_mcp.utils.io.io_roots as io_roots_module
+import seedream_mcp.utils.io.path as io_path_module
+import seedream_mcp.utils.io.roots as io_roots_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server import workspace_roots_resource
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
 from seedream_mcp.tools.runners import run_browse_images
-from seedream_mcp.utils.io.io_path import get_workspace_root
-from seedream_mcp.utils.io.io_roots import (
+from seedream_mcp.utils.io.path import get_workspace_root
+from seedream_mcp.utils.io.roots import (
     read_session_roots_or_raise,
     read_session_roots_result,
     workspace_roots_scope_from_result,
@@ -151,7 +151,7 @@ def test_resolve_env_workspace_root_reads_global_config(
 ) -> None:
     """活动配置就绪时，resolve_env_workspace_root 读 config.workspace_root。"""
     from seedream_mcp import config as config_module
-    from seedream_mcp.utils.io.io_path import resolve_env_workspace_root
+    from seedream_mcp.utils.io.path import resolve_env_workspace_root
 
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     config = SeedreamConfig(api_key="k", workspace_root=str(tmp_path))

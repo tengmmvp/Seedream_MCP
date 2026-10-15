@@ -13,15 +13,15 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 import pytest
 
-import seedream_mcp.utils.io.io_sse as sse_parser_module
-import seedream_mcp.utils.io.io_stream as stream_module
+import seedream_mcp.utils.io.sse as sse_parser_module
+import seedream_mcp.utils.io.stream as stream_module
 from seedream_mcp.utils.core.errors import SeedreamAPIError
 from seedream_mcp.utils.core.executors import (
     CPU_OFFLOAD_SIZE_THRESHOLD,
     CpuOffloadPoolClosedError,
     shutdown_cpu_offload_executor,
 )
-from seedream_mcp.utils.io.io_sse import (
+from seedream_mcp.utils.io.sse import (
     _parse_sse_segment_payload,
     is_sse_response,
     items_limit_for,

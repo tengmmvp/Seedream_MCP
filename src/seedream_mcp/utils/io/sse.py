@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ..core.errors import SeedreamAPIError, has_message_value
 from ..core.executors import run_in_cpu_pool, should_offload_size
 from ..core.sanitizers import truncate_upstream_message_fragment
-from .io_stream import (
+from .stream import (
     RESPONSE_BODY_LIMIT_HINT,
     STREAM_DEADLINE_HIT,
     STREAM_ENDED,

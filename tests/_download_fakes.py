@@ -16,7 +16,7 @@ from typing import Any, cast
 import aiohttp
 import pytest
 
-from seedream_mcp.utils.io.io_download import (
+from seedream_mcp.utils.io.download import (
     DownloadManager,
     _RangeClassification,
     _ResumeState,

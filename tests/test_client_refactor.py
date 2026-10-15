@@ -36,8 +36,8 @@ from seedream_mcp.utils.core.executors import (
     CpuOffloadPoolClosedError,
     shutdown_cpu_offload_executor,
 )
-from seedream_mcp.utils.images import image_validation as image_validation_module
-from seedream_mcp.utils.io.io_stream import escalate_partial_status, item_has_image_payload
+from seedream_mcp.utils.images import validation as image_validation_module
+from seedream_mcp.utils.io.stream import escalate_partial_status, item_has_image_payload
 
 from _client_fakes import _install_mock_transport
 from _cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
@@ -1170,7 +1170,7 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_prepare_image_input 命中缓存不重复调用底层，LRU 淘汰最久未用而保留近期命中。"""
-    from seedream_mcp.utils.images import image_prepare
+    from seedream_mcp.utils.images import prepare as image_prepare
 
     client = SeedreamClient(_build_config())
     client._image_preparer._prepare_cache_max = 3
@@ -1769,7 +1769,7 @@ def test_public_generation_methods_keep_prompt_first() -> None:
 
 def test_generation_method_docstrings_follow_capability_table() -> None:
     """四个生成方法 docstring 的家族清单含能力表派生的全部支持家族展示名。"""
-    from seedream_mcp.utils.model.model_capabilities import supported_family_display_names
+    from seedream_mcp.utils.model.capabilities import supported_family_display_names
 
     for method in (
         SeedreamClient.text_to_image,

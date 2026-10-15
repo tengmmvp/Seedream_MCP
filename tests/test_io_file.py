@@ -17,8 +17,8 @@ from typing import IO, Any
 
 import pytest
 
-from seedream_mcp.utils.io import io_file
-from seedream_mcp.utils.io.io_file import (
+from seedream_mcp.utils.io import files as io_file
+from seedream_mcp.utils.io.files import (
     NonRegularFileError,
     SymlinkRejectedError,
     atomic_replace_from_fd_sync,
@@ -29,7 +29,7 @@ from seedream_mcp.utils.io.io_file import (
     open_regular_read,
     open_temp_fd,
 )
-from seedream_mcp.utils.io.io_path import ResolveResultCache, resolve_rejecting_cycle
+from seedream_mcp.utils.io.path import ResolveResultCache, resolve_rejecting_cycle
 
 from _os_fakes import (
     _install_close_counter,
@@ -318,7 +318,7 @@ def test_open_regular_read_permission_error_on_regular_file_propagates(
     import errno
     from typing import IO
 
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
 
     path = tmp_path / "plain.bin"
     path.write_bytes(b"data")
@@ -339,7 +339,7 @@ def test_open_regular_read_permission_error_stat_failure_keeps_original(
     import errno
     from typing import IO
 
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
 
     def _denied(target: object, **_kwargs: object) -> tuple[IO[bytes], os.stat_result]:
         raise PermissionError(errno.EACCES, "simulated EACCES", str(target))

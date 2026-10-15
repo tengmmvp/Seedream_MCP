@@ -9,7 +9,7 @@ import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.images import image_prepare
+from seedream_mcp.utils.images import prepare as image_prepare
 
 
 async def test_prepare_image_input_invalidates_cache_when_local_file_size_changes(

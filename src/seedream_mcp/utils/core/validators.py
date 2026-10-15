@@ -5,10 +5,10 @@
 
 设计要点：
 - 模型能力数据驱动校验：与模型相关的规则，含尺寸档位、像素区间、输出格式、联网
-  工具、流式输出、参考图上限、组图支持等，统一委托 model_capabilities
+  工具、流式输出、参考图上限、组图支持等，统一委托 capabilities
   的能力声明判定，新增模型只需扩展能力表而无需改动校验代码。
 - 布尔字符串解析 parse_bool 与宽高比上下限常量由本模块单一持有，config 的
-  _pick_bool 与 image_validation 的维度校验均为消费方。
+  _pick_bool 与 validation 的维度校验均为消费方。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any, NamedTuple
 
 from .errors import SeedreamConfigError, SeedreamValidationError
 from .logs import get_logger
-from ..model.model_capabilities import (
+from ..model.capabilities import (
     capability_param_label,
     get_max_reference_images,
     get_model_capabilities,
@@ -44,7 +44,7 @@ FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
 # 整数字面量的严格语法：可选正负号加 ASCII 十进制数字，全角数字与下划线分隔
 # 等 int() 宽松写法一律拒绝。
 INT_TEXT_PATTERN = re.compile(r"[+-]?[0-9]+")
-# 图像宽高比上下限，输入参考图与输出尺寸校验共用；image_validation 由此导入，维持单一来源。
+# 图像宽高比上下限，输入参考图与输出尺寸校验共用；validation 由此导入，维持单一来源。
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
 # 生成工具类型白名单，目前仅支持联网搜索；schemas.GenerationToolType 枚举的取值
@@ -474,7 +474,7 @@ def _resolve_size_token(
 def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bool = False) -> str:
     """验证图像尺寸与模型的兼容性。
 
-    尺寸规则由 model_capabilities 能力声明驱动：预设档位白名单 allowed_presets
+    尺寸规则由 capabilities 能力声明驱动：预设档位白名单 allowed_presets
     与像素总区间 min/max_size_pixels，新增模型只需扩展能力声明。图层拆分场景
     的 "auto" 仅校验模型支持图层拆分，不走档位与像素校验。
 
@@ -563,7 +563,7 @@ def capability_gate_error(
 ) -> SeedreamValidationError:
     """构造能力门控报错：当前模型、参数、支持模型清单与配置变更指引。
 
-    param_desc 缺省时按 capability 从 model_capabilities 的标签表取单源标签，仅
+    param_desc 缺省时按 capability 从 capabilities 的标签表取单源标签，仅
     参数口径异于能力本身的调用方显式传入。
     """
     if param_desc is None:

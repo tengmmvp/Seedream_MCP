@@ -7,7 +7,7 @@ scheme 的 URL 误入本地文件分支。
 
 import pytest
 
-from seedream_mcp.utils.images.image_ref import classify_image_reference
+from seedream_mcp.utils.images.ref import classify_image_reference
 
 
 @pytest.mark.parametrize(

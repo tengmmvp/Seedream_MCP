@@ -17,7 +17,7 @@ from PIL import Image
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.tools.core.context import GenerationExecutionContext
-from seedream_mcp.utils.io import io_save
+from seedream_mcp.utils.io import save as io_save
 
 
 def make_generation_context(**overrides: Any) -> GenerationExecutionContext:

@@ -23,11 +23,11 @@ from seedream_mcp.utils.core.errors import (
 )
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
-from seedream_mcp.utils.images import image_input as image_input_module
-from seedream_mcp.utils.images import image_validation as image_validation_module
-from seedream_mcp.utils.images.image_input import prepare_image_input
-from seedream_mcp.utils.images.image_validation import validate_image_input, validate_image_path
-from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
+from seedream_mcp.utils.images import inputs as image_input_module
+from seedream_mcp.utils.images import validation as image_validation_module
+from seedream_mcp.utils.images.inputs import prepare_image_input
+from seedream_mcp.utils.images.validation import validate_image_input, validate_image_path
+from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR
 
 
 def _images_root(ws: Path) -> Path:
@@ -652,7 +652,7 @@ def test_validate_image_input_keeps_home_prefix_literal(workspace_root: Path) ->
 
     展开会使实际读取目标脱离调用方已按字面值完成的工作区边界判定。
     """
-    from seedream_mcp.utils.images.image_validation import _resolve_local_image_path
+    from seedream_mcp.utils.images.validation import _resolve_local_image_path
 
     resolved = _resolve_local_image_path("~/x.png")
 

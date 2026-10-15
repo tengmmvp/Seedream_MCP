@@ -16,7 +16,7 @@ from seedream_mcp import config as config_module
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.resources import SERVER_NAME, SERVER_VERSION
 from seedream_mcp.server import models_info_resource, server_info_resource
-from seedream_mcp.utils.model import model_capabilities
+from seedream_mcp.utils.model import capabilities as model_capabilities
 
 
 def _test_config() -> SeedreamConfig:

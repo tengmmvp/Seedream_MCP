@@ -23,7 +23,7 @@ from seedream_mcp._client_http import _ERROR_JSON_PARSE_LIMIT
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamTimeoutError
-from seedream_mcp.utils.io.io_sse import items_limit_for
+from seedream_mcp.utils.io.sse import items_limit_for
 
 from _client_fakes import _install_mock_transport
 

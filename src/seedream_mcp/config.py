@@ -51,13 +51,13 @@ from .utils.core.logs import (
     get_logger,
 )
 from .utils.core.validators import validate_size_for_model
-from .utils.io.io_path import (
+from .utils.io.path import (
     clear_resolved_env_root_cache,
     register_data_root_provider,
     register_env_workspace_root_provider,
     reject_unc_declaration,
 )
-from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
+from .utils.model.capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
 
 
 def drain_pending_build_warnings() -> None:
@@ -963,7 +963,7 @@ def get_active_config() -> SeedreamConfig:
 def set_active_config(config: SeedreamConfig | None) -> None:
     """设置或清除 CLI 注入的活动配置，None 表示清除后回退全局默认。
 
-    变更同时使 io_path 的回退根缓存失效。
+    变更同时使 path 的回退根缓存失效。
     """
     global _active_config
     with _global_config_lock:
@@ -1041,7 +1041,7 @@ def _make_env_location_provider(attr: str, env_name: str) -> Callable[[], str | 
     return provider
 
 
-# 模块加载即注册，io_path 的位置求值经提供者取活动配置值。
+# 模块加载即注册，path 的位置求值经提供者取活动配置值。
 register_env_workspace_root_provider(
     _make_env_location_provider("workspace_root", "SEEDREAM_WORKSPACE_ROOT")
 )

@@ -36,7 +36,7 @@ from seedream_mcp.tools.impl.multi_image_fusion import handle_multi_image_fusion
 from seedream_mcp.tools.impl.sequential_generation import handle_sequential_generation
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
-from seedream_mcp.utils.io import io_save
+from seedream_mcp.utils.io import save as io_save
 
 # 参数化用例覆盖的四种生成工具输入模型，供 handler 与 params 参数共用注解。
 ParallelHandlerParams = (

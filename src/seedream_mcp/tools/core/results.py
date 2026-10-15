@@ -13,7 +13,7 @@ from ...utils.core.sanitizers import (
     normalize_message_text,
     sanitize_error_text,
 )
-from ...utils.io.io_save import AutoSaveResult
+from ...utils.io.save import AutoSaveResult
 from ._sanitize import (
     _REQUEST_FAILED_TYPE,
     _sanitize_image_errors,

@@ -208,7 +208,7 @@ def test_example_model_alias_list_matches_model_aliases() -> None:
     新增模型别名时清单与三语 README 的 --model 行须同步，否则用户不知道
     新别名可用。
     """
-    from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
+    from seedream_mcp.utils.model.capabilities import MODEL_ALIASES
 
     section_aliases = set(
         re.findall(r"doubao-seedream-[0-9a-z.\-]+", _example_model_id_comment_block())
@@ -223,7 +223,7 @@ def test_example_model_alias_list_matches_model_aliases() -> None:
 
 def test_readme_cli_model_line_matches_model_aliases() -> None:
     """三语 README 的 --model 行别名清单与 MODEL_ALIASES 键集一致。"""
-    from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
+    from seedream_mcp.utils.model.capabilities import MODEL_ALIASES
 
     for readme in ("README.md", "README.en.md", "README.zh-TW.md"):
         text = (_repo_root() / readme).read_text(encoding="utf-8")
@@ -239,7 +239,7 @@ def test_readme_cli_model_line_matches_model_aliases() -> None:
 
 def test_example_size_preset_comments_match_capability_table() -> None:
     """.env.example 的家族档位注释与能力表 allowed_presets 一致。"""
-    from seedream_mcp.utils.model.model_capabilities import (
+    from seedream_mcp.utils.model.capabilities import (
         MODEL_CAPABILITIES,
         MODEL_FAMILY_40,
         MODEL_FAMILY_45,

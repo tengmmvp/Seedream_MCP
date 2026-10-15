@@ -13,7 +13,7 @@ from .utils.core.errors import SeedreamConfigError, has_message_value
 from .utils.core.logs import EarlyMessageBuffer
 from .utils.core.sanitizers import is_printable_ascii
 from .utils.core.validators import INT_TEXT_PATTERN, parse_bool
-from .utils.model.model_capabilities import MODEL_ALIASES
+from .utils.model.capabilities import MODEL_ALIASES
 
 # 构建期告警先收集、经 config.drain_pending_build_warnings 后置输出：配置构建早于
 # setup_logging，即时输出会随日志系统重建被移出文件通道。元素为 (级别, 消息)，

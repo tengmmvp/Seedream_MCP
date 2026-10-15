@@ -1,6 +1,6 @@
 """Web 操作台元信息端点：入口页、重定向与 config-info。
 
-config-info 是前端的启动面：模型能力与尺寸档位同源 model_capabilities，兼作
+config-info 是前端的启动面：模型能力与尺寸档位同源 capabilities，兼作
 鉴权探测端点——配置了令牌时未携带 Authorization 的请求在此得到 401，前端据此
 弹出令牌输入。
 """
@@ -25,8 +25,8 @@ from ..utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
-from ..utils.io.io_file import SymlinkRejectedError, open_packaged_read
-from ..utils.model.model_capabilities import (
+from ..utils.io.files import SymlinkRejectedError, open_packaged_read
+from ..utils.model.capabilities import (
     MODEL_FAMILY_UNKNOWN,
     get_model_capabilities,
     model_payloads,

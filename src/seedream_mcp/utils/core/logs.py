@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 class EarlyMessageBuffer:
     """早于日志初始化的消息缓冲，冲刷与回滚由内部锁串行化。
 
-    config 构建告警与 io_path 目录回退提示共用同一机制，drain 在 setup_logging
+    config 构建告警与 path 目录回退提示共用同一机制，drain 在 setup_logging
     之后由 server 调用。
     """
 

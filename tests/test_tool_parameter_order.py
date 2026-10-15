@@ -33,7 +33,7 @@ from seedream_mcp.tools.core.schemas import (
     TextToImageInput,
     TOOLS_DESCRIPTION,
 )
-from seedream_mcp.utils.model.model_capabilities import (
+from seedream_mcp.utils.model.capabilities import (
     MODEL_CAPABILITIES,
     MODEL_FAMILY_UNKNOWN,
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,

@@ -15,7 +15,7 @@ import pytest
 from mcp.client import Client
 from mcp.types import ReadResourceResult, TextResourceContents
 
-import seedream_mcp.utils.io.io_path as io_path_module
+import seedream_mcp.utils.io.path as io_path_module
 
 import seedream_mcp.resources as resources
 import seedream_mcp.server as server

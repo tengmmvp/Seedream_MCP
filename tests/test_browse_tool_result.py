@@ -31,8 +31,8 @@ from seedream_mcp.tools.core import browse as browse_core_module
 from seedream_mcp.tools.impl import browse_images as browse_images_module
 from seedream_mcp.tools.impl.browse_images import handle_browse_images
 from seedream_mcp.utils.core.errors import SeedreamConfigError
-from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
-from seedream_mcp.utils.io.io_scan import ScanIncompleteCause, ScanResult
+from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR
+from seedream_mcp.utils.io.scan import ScanIncompleteCause, ScanResult
 
 
 def _seed_images_root(ws: Path) -> Path:
@@ -397,7 +397,7 @@ async def test_browse_images_hit_path_pages_without_rescan(
         (images_root / f"img_{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     scan_calls: list[int] = []
-    from seedream_mcp.utils.io import io_scan
+    from seedream_mcp.utils.io import scan as io_scan
 
     original_scan = io_scan.find_images_in_directory
 
@@ -467,7 +467,7 @@ async def test_browse_images_hit_path_predicate_bounded_by_quota(
     )
     assert seed.structured_content["count"] == 12
 
-    from seedream_mcp.utils.io import io_path
+    from seedream_mcp.utils.io import path as io_path
 
     real_within = io_path.is_within_resolved
     entry_checks = {"count": 0}
@@ -752,7 +752,7 @@ async def test_browse_images_truncated_empty_result_marks_incompleteness(
     截断静默时空页会误报「未找到图片文件」且 total_count=0，模型无从得知目录
     可能仍有图片。
     """
-    import seedream_mcp.utils.io.io_scan as path_module
+    import seedream_mcp.utils.io.scan as path_module
 
     images_root = _seed_images_root(workspace_root)
     for i in range(8):
@@ -778,7 +778,7 @@ async def test_browse_images_truncated_partial_page_marks_incompleteness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """截断前已收集的部分页携带标记，total_count 不以低报的精确值声称完备。"""
-    import seedream_mcp.utils.io.io_scan as path_module
+    import seedream_mcp.utils.io.scan as path_module
 
     images_root = _seed_images_root(workspace_root)
     early = images_root / "a"
@@ -1231,7 +1231,7 @@ def test_resolve_failure_negative_cache_skips_retry_within_ttl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """resolve 失败条目按 TTL 负缓存：TTL 内再次扫描不再逐条重试阻塞 resolve。"""
-    from seedream_mcp.utils.io import io_scan
+    from seedream_mcp.utils.io import scan as io_scan
 
     failure_counts = _install_failing_resolve_for(monkeypatch, "bad.png")
     io_scan.reset_directory_scan_cache()
@@ -1250,7 +1250,7 @@ def test_resolve_negative_cache_absent_key_not_recent_near_clock_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """未登记键不判近期失败：开机初期 monotonic 接近 0，缺省 0.0 不可当时间戳。"""
-    from seedream_mcp.utils.io import io_scan
+    from seedream_mcp.utils.io import scan as io_scan
 
     # 时钟钉在 10.0 模拟开机初期的 monotonic 读数，未登记键若以 0.0 兜底会误判近期失败。
     monkeypatch.setattr(time, "monotonic", lambda: 10.0)
@@ -1273,7 +1273,7 @@ def test_scan_rescan_stops_when_no_new_resolvable_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """坏段贯穿扩窗时连续两轮零新增即停：单次调用不再几何级重列目录，停滞以成因显式外传。"""
-    from seedream_mcp.utils.io import io_scan
+    from seedream_mcp.utils.io import scan as io_scan
 
     images_root = tmp_path / "images"
     images_root.mkdir()
@@ -1319,7 +1319,7 @@ async def test_browse_images_stalled_window_terminates_under_mtime_churn(
     末轮翻倍扫到目录末尾以 SKIPPED 成因出口，扫描限额序列同时锁定单次调用仅三趟枚举、
     无放大重扫。
     """
-    from seedream_mcp.utils.io import io_scan
+    from seedream_mcp.utils.io import scan as io_scan
 
     images_root = _seed_images_root(workspace_root)
     bad_names = [f"stall_{index}.png" for index in range(6)]
@@ -1723,7 +1723,7 @@ def test_scan_and_filter_directory_passes_include_and_quota(
     )
 
     assert captured["scan_limit"] == 7
-    from seedream_mcp.utils.io import io_scan
+    from seedream_mcp.utils.io import scan as io_scan
 
     # scanner 取 browse 作用域的同名属性，外部替换该属性即可替换底层扫描。
     assert captured["scanner"] is io_scan.find_images_in_directory

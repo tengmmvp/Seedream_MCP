@@ -1,8 +1,7 @@
 """按键节流的容量上限注册表。
 
 记录键到节流时间戳的映射，容量超限按最近使用序驱逐最久未用的键；自身不加锁，
-检查与写入的原子性由调用方的外部锁保证。写入原语 store_bounded_entry 是有界
-LRU 存放惯用式的单一实现，持自有锁与 OrderedDict 的调用方直接复用。
+检查与写入的原子性由调用方的外部锁保证。
 """
 
 from __future__ import annotations
@@ -11,23 +10,9 @@ from collections import OrderedDict
 from collections.abc import Hashable
 from typing import Generic, TypeVar
 
+from .bounded_store import store_bounded_entry
+
 _RegistryKeyT = TypeVar("_RegistryKeyT", bound=Hashable)
-_RegistryValueT = TypeVar("_RegistryValueT")
-
-
-def store_bounded_entry(
-    entries: OrderedDict[_RegistryKeyT, _RegistryValueT],
-    key: _RegistryKeyT,
-    value: _RegistryValueT,
-    max_entries: int,
-) -> None:
-    """写入条目并移到最近使用端，超上限按最久未用序驱逐，max_entries 非正拒绝。"""
-    if max_entries < 1:
-        raise ValueError("max_entries 必须为正整数")
-    entries[key] = value
-    entries.move_to_end(key)
-    while len(entries) > max_entries:
-        entries.popitem(last=False)
 
 
 class ThrottleRegistry(Generic[_RegistryKeyT]):

@@ -72,7 +72,7 @@ def truncate_upstream_message_fragment(value: Any) -> str:
     """归一化并截断上游错误 message 片段至 8KB 内，超长时保留前缀并标注原长度。
 
     handle_api_error 拼入上游 error/message 字段前统一经本函数处理，防止 dict 形态
-    经 repr 插值绕过键值脱敏、超大错误体随异常进入日志；io_sse 的请求级错误事件
+    经 repr 插值绕过键值脱敏、超大错误体随异常进入日志；sse 的请求级错误事件
     message 拼装共用本函数。
     """
     text = normalize_message_text(value)

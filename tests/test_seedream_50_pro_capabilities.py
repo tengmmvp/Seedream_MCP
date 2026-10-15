@@ -22,7 +22,7 @@ from seedream_mcp.utils.core.validators import (
     validate_size_for_model,
     validate_stream,
 )
-from seedream_mcp.utils.model.model_capabilities import (
+from seedream_mcp.utils.model.capabilities import (
     get_max_reference_images,
     get_model_capabilities,
 )

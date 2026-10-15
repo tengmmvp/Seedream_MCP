@@ -8,7 +8,7 @@ import aiohttp
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.io.io_download import DownloadManager
+from seedream_mcp.utils.io.download import DownloadManager
 
 
 async def test_seedream_client_httpx_async_client_disables_trust_env() -> None:

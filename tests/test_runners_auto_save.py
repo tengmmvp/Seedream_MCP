@@ -27,7 +27,7 @@ from seedream_mcp.tools.runners import (
     run_sequential_generation,
     run_text_to_image,
 )
-from seedream_mcp.utils.io import io_save
+from seedream_mcp.utils.io import save as io_save
 
 from _generation_fixtures import _patch_client_method_spy, _patch_client_success
 
@@ -103,7 +103,7 @@ async def test_run_text_to_image_absolute_save_path_survives_unresolvable_images
     预检与写入目录解析均不依赖基准；清理根解析失败时清理整体关闭，写入目录
     可能存放非本服务文件，任何清理动作不得作用于该目录。
     """
-    import seedream_mcp.utils.io.io_path as io_path_module
+    import seedream_mcp.utils.io.path as io_path_module
 
     def _unresolvable(configured_dir: str) -> Path:
         raise OSError("simulated unresolvable path")

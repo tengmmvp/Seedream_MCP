@@ -29,7 +29,7 @@ from ..utils.core.executors import (
 )
 from ..utils.core.logs import get_logger
 from ..utils.core.sanitizers import utf8_value_leaf_length
-from ..utils.io.io_path import (
+from ..utils.io.path import (
     READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
     images_root_relative,
     normalize_path,

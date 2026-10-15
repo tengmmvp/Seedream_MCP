@@ -797,7 +797,7 @@ def test_format_sse_failed_event_keeps_raw_message_for_outlet_sanitization() -> 
     源头先净化会使超长消息在出口被二次截断叠加标记；出口对凭据的剥离由
     本用例一并锁定。
     """
-    from seedream_mcp.utils.io.io_sse import format_sse_failed_event
+    from seedream_mcp.utils.io.sse import format_sse_failed_event
 
     raw_message = "upstream echo Authorization: Bearer sk-123"
     event = {

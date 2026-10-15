@@ -366,8 +366,8 @@ async def test_page_existence_check_runs_off_event_loop(
 
     from starlette.requests import Request
 
-    import seedream_mcp.utils.io.io_file as io_file_module
-    from seedream_mcp.utils.io.io_file import _open_no_follow_read_with_stat as original_open
+    import seedream_mcp.utils.io.files as io_file_module
+    from seedream_mcp.utils.io.files import _open_no_follow_read_with_stat as original_open
     from seedream_mcp.webapp import meta as meta_module
 
     prepare_static_dir(monkeypatch, tmp_path)
@@ -399,8 +399,8 @@ async def test_page_existence_checked_on_every_request(
 
     from starlette.requests import Request
 
-    import seedream_mcp.utils.io.io_file as io_file_module
-    from seedream_mcp.utils.io.io_file import _open_no_follow_read_with_stat as original_open
+    import seedream_mcp.utils.io.files as io_file_module
+    from seedream_mcp.utils.io.files import _open_no_follow_read_with_stat as original_open
     from seedream_mcp.webapp import meta as meta_module
 
     prepare_static_dir(monkeypatch, tmp_path)
@@ -531,8 +531,8 @@ async def test_static_page_symlink_rejection_degrades_and_warns(
     from starlette.requests import Request
 
     from _log_fakes import capture_loguru_messages
-    import seedream_mcp.utils.io.io_file as io_file_module
-    from seedream_mcp.utils.io.io_file import SymlinkRejectedError
+    import seedream_mcp.utils.io.files as io_file_module
+    from seedream_mcp.utils.io.files import SymlinkRejectedError
     from seedream_mcp.webapp import meta as meta_module
 
     prepare_static_dir(monkeypatch, tmp_path)
@@ -582,7 +582,7 @@ async def test_static_page_transient_io_error_uses_open_failure_text(
     from starlette.requests import Request
 
     from _log_fakes import capture_loguru_messages
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
     from seedream_mcp.webapp import meta as meta_module
 
     prepare_static_dir(monkeypatch, tmp_path)
@@ -616,7 +616,7 @@ async def test_static_page_unreadable_regular_file_returns_500(
 
     from starlette.requests import Request
 
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
     from seedream_mcp.webapp import meta as meta_module
 
     prepare_static_dir(monkeypatch, tmp_path)
@@ -713,8 +713,8 @@ async def test_page_replaced_during_open_window_serves_stat_consistent_response(
 
     from starlette.requests import Request
 
-    import seedream_mcp.utils.io.io_file as io_file_module
-    from seedream_mcp.utils.io.io_file import _open_no_follow_read_with_stat as original_open
+    import seedream_mcp.utils.io.files as io_file_module
+    from seedream_mcp.utils.io.files import _open_no_follow_read_with_stat as original_open
     from seedream_mcp.webapp import meta as meta_module
 
     static_dir = prepare_static_dir(monkeypatch, tmp_path)

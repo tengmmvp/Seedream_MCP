@@ -120,7 +120,7 @@ async def test_cleanup_shared_resources_drains_background_cleanup_first(
     reset_lifespan_singletons: None,
 ) -> None:
     """进程级清理先等待在途后台清理任务收尾，再关闭共享资源。"""
-    from seedream_mcp.utils.io import io_save as auto_save_module
+    from seedream_mcp.utils.io import save as auto_save_module
 
     events: list[str] = []
     real_drain = auto_save_module.drain_background_cleanup_tasks
@@ -262,7 +262,7 @@ async def test_build_active_resource_closes_client_when_manager_fails(
 ) -> None:
     """download_manager 初始化失败时补偿关闭已创建的 client，不泄漏半初始化资源。"""
     from seedream_mcp.client import SeedreamClient
-    from seedream_mcp.utils.io import io_download
+    from seedream_mcp.utils.io import download as io_download
 
     close_calls: list[str] = []
 
@@ -438,7 +438,7 @@ async def test_download_manager_connection_limit_survives_session_rebuild() -> N
     建立后二次注入会在重建时静默失去上限。
     """
     from aiohttp import BaseConnector
-    from seedream_mcp.utils.io.io_download import DownloadManager
+    from seedream_mcp.utils.io.download import DownloadManager
 
     manager = DownloadManager(connection_limit=2)
     session = await manager._ensure_session()
@@ -487,7 +487,7 @@ async def test_try_get_shared_client_returns_lifespan_instance() -> None:
         _try_get_shared_client,
         _try_get_shared_download_manager,
     )
-    from seedream_mcp.utils.io.io_download import DownloadManager
+    from seedream_mcp.utils.io.download import DownloadManager
 
     config = SeedreamConfig(api_key="test_key")
     shared_client = SeedreamClient(config)
@@ -586,7 +586,7 @@ async def test_execute_generation_handler_passes_shared_download_manager(
     from seedream_mcp.client import SeedreamClient
     from seedream_mcp.tools.core import common as common_module
     from seedream_mcp.tools.core.common import ToolMetadata
-    from seedream_mcp.utils.io.io_download import DownloadManager
+    from seedream_mcp.utils.io.download import DownloadManager
 
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)

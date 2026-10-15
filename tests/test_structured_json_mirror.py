@@ -43,7 +43,7 @@ from seedream_mcp.utils.core.executors import (
 from seedream_mcp.utils.core.sanitizers import estimate_output_length, utf8_value_leaf_length
 from seedream_mcp.tools.impl.browse_images import handle_browse_images
 from seedream_mcp.tools.runners import run_browse_images, run_text_to_image
-from seedream_mcp.utils.io import io_save
+from seedream_mcp.utils.io import save as io_save
 
 from _cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
 from _generation_fixtures import _patch_client_success, _patch_save_real_file

@@ -13,7 +13,7 @@ import pytest
 from _os_fakes import _make_cycle_link
 from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.utils.core.errors import SeedreamConfigError
-from seedream_mcp.utils.io.io_storage import FileManager, FileManagerError
+from seedream_mcp.utils.io.storage import FileManager, FileManagerError
 
 
 def test_file_manager_rejects_non_directory_base_dir(tmp_path: Path) -> None:
@@ -62,7 +62,7 @@ def test_file_manager_rejects_unc_base_dir_before_resolve(
     调用方 tools/core/_pipeline 已有拒绝，本入口拦直连构造作为防御纵深；断言 UNC
     未进入 resolve 而非仅断言抛错，防止回归为先解析后拒绝。
     """
-    from seedream_mcp.utils.io.io_path import is_unc_path
+    from seedream_mcp.utils.io.path import is_unc_path
 
     original_resolve = Path.resolve
 
@@ -81,7 +81,7 @@ def test_file_manager_rejects_unc_base_dir_before_resolve(
 
 def test_get_file_manager_caches_by_base_dir_and_evicts_lru(tmp_path: Path) -> None:
     """同 base_dir 复用同一实例，超出条目上限按最旧驱逐。"""
-    from seedream_mcp.utils.io.io_storage import (
+    from seedream_mcp.utils.io.storage import (
         _FILE_MANAGER_CACHE_MAX_ENTRIES,
         _file_manager_cache,
         get_file_manager,
@@ -108,7 +108,7 @@ def test_get_file_manager_concurrent_access_never_raises(tmp_path: Path) -> None
     """
     import threading
 
-    from seedream_mcp.utils.io.io_storage import get_file_manager
+    from seedream_mcp.utils.io.storage import get_file_manager
 
     thread_count = 8
     barrier = threading.Barrier(thread_count)

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.io.io_path import normalize_path
+from seedream_mcp.utils.io.path import normalize_path
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="尾部点与空格归一仅 win32 生效")
 

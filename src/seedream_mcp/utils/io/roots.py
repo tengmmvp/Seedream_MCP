@@ -18,7 +18,7 @@ from mcp.types import REQUEST_TIMEOUT, ListRootsRequest, ListRootsResult
 from mcp.types.version import is_version_at_least
 
 from ..core.logs import get_logger
-from .io_path import (
+from .path import (
     apply_workspace_roots,
     has_null_byte,
     has_windows_colon_component,

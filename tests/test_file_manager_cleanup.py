@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from _os_fakes import _make_dir_link
-from seedream_mcp.utils.io.io_storage import FileManager
+from seedream_mcp.utils.io.storage import FileManager
 
 # 深树层数上限与 Windows MAX_PATH 预算：每层目录消耗 3 字符以内，预算收缩仍保底 30 层。
 _DEEP_TREE_MAX_DEPTH = 100
@@ -511,7 +511,7 @@ def test_collect_all_files_warns_when_entries_exceed_threshold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """清理扫描的图片条目数超过告警阈值时记录含条数与阈值的 warning，收集行为不变。"""
-    import seedream_mcp.utils.io.io_storage as io_storage_module
+    import seedream_mcp.utils.io.storage as io_storage_module
 
     from _log_fakes import capture_loguru_messages
 

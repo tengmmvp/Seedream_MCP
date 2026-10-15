@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from seedream_mcp.utils.images import image_prepare
+from seedream_mcp.utils.images import prepare as image_prepare
 
 from _client_fakes import _make_client
 from _inflight_fakes import _patch_unretrieved_callback

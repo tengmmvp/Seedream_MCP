@@ -20,7 +20,7 @@ from seedream_mcp.utils.core.formats import (
     MAX_IMAGE_PIXELS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
 )
-from seedream_mcp.utils.images.image_validation import (
+from seedream_mcp.utils.images.validation import (
     MIN_IMAGE_EDGE,
     _validate_image_dimensions,
     decode_and_validate_dimensions,

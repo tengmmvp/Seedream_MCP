@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from mcp.types import CallToolResult, GetPromptResult, InputRequiredResult
 
     from .client import SeedreamClient
-    from .utils.io.io_download import DownloadManager
+    from .utils.io.download import DownloadManager
 
 # ==================== 服务器元数据常量 ====================
 
@@ -104,7 +104,7 @@ async def _safe_close(obj: Any) -> None:
 async def _build_active_resource(config: SeedreamConfig) -> _SharedResource:
     """创建并初始化新的共享资源句柄，部分初始化失败时关闭已创建部分避免泄漏。"""
     from .client import SeedreamClient
-    from .utils.io.io_download import DownloadManager
+    from .utils.io.download import DownloadManager
 
     new_client = SeedreamClient(config)
     # 下载并发上限经构造参数下沉，连接器重建的分支自动保持上限。
@@ -215,7 +215,7 @@ async def _cleanup_shared_resources(*, idle_only: bool = False) -> None:
     退出不等队列。
     """
     global _active_resource
-    from .utils.io.io_save import drain_background_cleanup_tasks
+    from .utils.io.save import drain_background_cleanup_tasks
 
     await drain_background_cleanup_tasks()
     if idle_only and _has_inflight_references():
@@ -277,7 +277,7 @@ def _reset_lifespan_state() -> None:
 
     重建 _shared_init_lock 避免跨事件循环复用旧锁；_global_config 一并复位避免
     跨用例残留，赋值经函数内延迟 import 取当前 config 模块对象，测试重载模块后
-    不会清错目标。CPU 卸载池随活动配置派生池深，关闭后待按需重建。io_path 的
+    不会清错目标。CPU 卸载池随活动配置派生池深，关闭后待按需重建。path 的
     resolve 缓存与 config 的构建告警缓冲同属复位协议，一并在此收口；conftest 仅
     补充测试域专属状态。
     """
@@ -291,12 +291,12 @@ def _reset_lifespan_state() -> None:
     config_module._BUILD_WARNINGS.clear()
     _shared_init_lock = asyncio.Lock()
     shutdown_cpu_offload_executor()
-    from .utils.images.image_thumbnail import reset_thumb_sweep_gate
-    from .utils.io.io_file import reset_packaged_resolve_cache
-    from .utils.io.io_path import clear_resolved_env_root_cache
-    from .utils.io.io_save import reset_cleanup_state
-    from .utils.io.io_scan import reset_directory_scan_cache
-    from .utils.io.io_storage import reset_file_manager_cache
+    from .utils.images.thumbnail import reset_thumb_sweep_gate
+    from .utils.io.files import reset_packaged_resolve_cache
+    from .utils.io.path import clear_resolved_env_root_cache
+    from .utils.io.save import reset_cleanup_state
+    from .utils.io.scan import reset_directory_scan_cache
+    from .utils.io.storage import reset_file_manager_cache
 
     clear_resolved_env_root_cache()
     reset_cleanup_state()

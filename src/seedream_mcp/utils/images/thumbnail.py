@@ -26,7 +26,7 @@ from ..core.formats import MAX_IMAGE_PIXELS
 from ..core.logs import get_logger
 from ..core.loop_bound import LoopKeyedInflight, loop_bound_semaphore
 from ..core.throttles import ThrottleRegistry
-from ..io.io_file import atomic_replace_from_fd_sync, open_no_follow_read
+from ..io.files import atomic_replace_from_fd_sync, open_no_follow_read
 
 if TYPE_CHECKING:
     from PIL import Image

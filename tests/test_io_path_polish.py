@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-import seedream_mcp.utils.io.io_path as io_path_module
-import seedream_mcp.utils.io.io_scan as io_scan_module
+import seedream_mcp.utils.io.path as io_path_module
+import seedream_mcp.utils.io.scan as io_scan_module
 from _log_fakes import capture_loguru_messages
 from _os_fakes import _install_counting_realpath, _make_cycle_link, _make_dangling_link
 from seedream_mcp.config import SeedreamConfig, set_active_config

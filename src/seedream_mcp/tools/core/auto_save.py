@@ -14,11 +14,11 @@ from typing import Any, Awaitable, Callable
 
 from ...config import SeedreamConfig
 from ...utils.core.errors import SeedreamConfigError
-from ...utils.io.io_save import AutoSaveManager, AutoSaveResult
-from ...utils.io.io_download import DownloadManager
+from ...utils.io.save import AutoSaveManager, AutoSaveResult
+from ...utils.io.download import DownloadManager
 from ...utils.core.logs import get_logger
 from ._pipeline import _resolve_base_dir
-from ...utils.io.io_path import resolve_images_root
+from ...utils.io.path import resolve_images_root
 from .results import extract_images, is_saveable_image
 
 logger = get_logger()

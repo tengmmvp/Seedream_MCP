@@ -21,8 +21,8 @@ from seedream_mcp import config as config_module
 from seedream_mcp._config_sources import _read_env_values
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamConfigError
-from seedream_mcp.utils.io import io_path as io_path_module
-from seedream_mcp.utils.model.model_capabilities import DEPRECATED_MODEL_TOKENS
+from seedream_mcp.utils.io import path as io_path_module
+from seedream_mcp.utils.model.capabilities import DEPRECATED_MODEL_TOKENS
 
 
 def test_read_env_values_wraps_os_error_as_config_error(

@@ -50,7 +50,7 @@ from ..core.http_int import strict_http_int
 from ..core.logs import get_logger
 from ..core.loop_bound import LoopKeyedInflight
 from ..core.settle import await_settled_op
-from .io_file import (
+from .files import (
     _cleanup_temp_file,
     _close_fd_quietly,
     finalize_atomic_replace,
@@ -58,7 +58,7 @@ from .io_file import (
     open_no_follow_write_fd,
     open_temp_fd,
 )
-from .io_url import sanitize_url
+from .url import sanitize_url
 
 logger = get_logger()
 

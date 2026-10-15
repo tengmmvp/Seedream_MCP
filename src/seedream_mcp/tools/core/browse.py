@@ -24,14 +24,14 @@ from ...utils.core.sanitizers import (
 )
 from ...utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ...utils.core.logs import get_logger
-from ...utils.io.io_path import (
+from ...utils.io.path import (
     get_read_context,
     get_workspace_roots,
     is_within_resolved,
     normalize_path,
     read_scope_denial_message,
 )
-from ...utils.io.io_scan import (
+from ...utils.io.scan import (
     ScanIncompleteCause,
     ScanResult,
     cached_find_images_in_directory,

@@ -18,12 +18,12 @@ from typing import Any, Callable
 
 import pytest
 
-import seedream_mcp.utils.io.io_scan as scan_module
+import seedream_mcp.utils.io.scan as scan_module
 from _log_fakes import capture_loguru_messages
 from _os_fakes import _install_failing_resolve_for
-from seedream_mcp.utils.io.io_file import has_reparse_attribute
-from seedream_mcp.utils.io.io_path import ResolveResultCache
-from seedream_mcp.utils.io.io_scan import cached_find_images_in_directory, find_images_in_directory
+from seedream_mcp.utils.io.files import has_reparse_attribute
+from seedream_mcp.utils.io.path import ResolveResultCache
+from seedream_mcp.utils.io.scan import cached_find_images_in_directory, find_images_in_directory
 
 
 def _scan_state(

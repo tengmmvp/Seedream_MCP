@@ -440,11 +440,11 @@ def test_troubleshooting_numeric_claims_match_code_constants() -> None:
         DEFAULT_LOG_RETENTION_DAYS,
         DEFAULT_LOG_ROTATION_SIZE_MB,
     )
-    from seedream_mcp.utils.images.image_thumbnail import (
+    from seedream_mcp.utils.images.thumbnail import (
         PREVIEW_MAX_IMAGES,
         THUMBNAIL_MAX_EDGE,
     )
-    from seedream_mcp.utils.images.image_validation import (
+    from seedream_mcp.utils.images.validation import (
         MAX_IMAGE_FILE_SIZE,
         MIN_IMAGE_EDGE,
     )

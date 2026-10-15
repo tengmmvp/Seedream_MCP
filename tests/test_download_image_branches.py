@@ -23,9 +23,9 @@ import pytest
 
 from seedream_mcp.utils.core import formats
 from seedream_mcp.utils.core.formats import SNIFF_HEAD_BYTES_FLOOR
-from seedream_mcp.utils.io import io_download as io_download_module
-from seedream_mcp.utils.io import io_file
-from seedream_mcp.utils.io.io_download import (
+from seedream_mcp.utils.io import download as io_download_module
+from seedream_mcp.utils.io import files as io_file
+from seedream_mcp.utils.io.download import (
     DownloadError,
     DownloadManager,
     RetryableDownloadError,

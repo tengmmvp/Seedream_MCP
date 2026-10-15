@@ -261,7 +261,7 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
     通道的 16KB 上限同量级，脱敏口径不变。仅键名或净化后内容变化的项做浅拷贝，
     其余项保持原对象引用，传入列表不被修改。限内内容重复净化恒等；超长 URL
     的截断产物再净化会按错误文本通道口径收敛（产物已不可用，仅长度与形态变
-    化）。全部图片项（含 SSE 失败事件）经此处统一净化，io_sse 源头不做净化。
+    化）。全部图片项（含 SSE 失败事件）经此处统一净化，sse 源头不做净化。
     """
     sanitized_images = images
     for index, image in enumerate(images):

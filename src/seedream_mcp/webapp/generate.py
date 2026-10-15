@@ -41,7 +41,7 @@ from ..tools.runners import (
 )
 from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from ..utils.core.logs import get_logger
-from ..utils.io.io_stream import data_items
+from ..utils.io.stream import data_items
 from . import _responses
 from .context import build_web_request_context
 

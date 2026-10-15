@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from ...client import SeedreamClient
 from ...request_plan import shared_request_plan_scope
 from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
-from ...utils.io.io_download import DownloadManager
+from ...utils.io.download import DownloadManager
 from ._pipeline import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,

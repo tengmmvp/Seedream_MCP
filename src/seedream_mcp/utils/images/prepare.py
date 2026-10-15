@@ -1,7 +1,7 @@
 """参考图预处理缓存子系统：LRU + single-flight 去重。
 
 集中管理图像输入预处理结果的缓存与并发去重。本地输入的缓存签名与读取链复用
-image_validation 的候选定位，签名与实际读取锁定同一文件，不因规则漂移命中陈旧
+validation 的候选定位，签名与实际读取锁定同一文件，不因规则漂移命中陈旧
 缓存。
 """
 
@@ -13,11 +13,11 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 
-from .image_input import local_candidate_scope, prepare_image_input
-from .image_ref import classify_image_reference, require_image_str
-from .image_validation import LocalImageCandidate, resolve_local_image_candidate
+from .inputs import local_candidate_scope, prepare_image_input
+from .ref import classify_image_reference, require_image_str
+from .validation import LocalImageCandidate, resolve_local_image_candidate
 from ..core.loop_bound import LoopKeyedInflight, loop_bound_semaphore
-from ..io.io_path import get_read_scope, resolve_images_root
+from ..io.path import get_read_scope, resolve_images_root
 
 # 预处理缓存键：(image 字符串, 读权限字符串元组, 本地文件 mtime+size 签名)；URL
 # 与 Data URI 的归一化结果是输入的纯函数，读权限隔离元组恒为空。
@@ -113,7 +113,7 @@ class ImagePreparer:
         """定位本地输入的候选文件，返回 (resolve 后物理路径, stat)。
 
         URL、data URI 与无法定位文件的输入返回 None，缓存签名由调用方从 stat
-        派生。候选定位与 image_input 的读取路径共用 resolve_local_image_candidate，
+        派生。候选定位与 inputs 的读取路径共用 resolve_local_image_candidate，
         签名与读取锁定同一文件；images_root 与 read_scope 未提供时现取，批内调用传入
         共享上下文消除逐图重复求值。
 

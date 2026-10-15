@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from seedream_mcp.utils.io.io_storage import FileManager
+from seedream_mcp.utils.io.storage import FileManager
 
 
 def test_create_save_path_ignores_query_signature(tmp_path: Path) -> None:

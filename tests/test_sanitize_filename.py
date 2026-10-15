@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.utils.core import sanitizers
-from seedream_mcp.utils.io import io_storage
-from seedream_mcp.utils.io.io_storage import (
+from seedream_mcp.utils.io import storage as io_storage
+from seedream_mcp.utils.io.storage import (
     FileManager,
     _MAX_EXTENSION_LENGTH,
     _MAX_FILENAME_LENGTH,

@@ -31,7 +31,7 @@ from seedream_mcp.utils.core.validators import (
     validate_stream,
     validate_watermark,
 )
-from seedream_mcp.utils.model.model_capabilities import (
+from seedream_mcp.utils.model.capabilities import (
     ModelCapabilities,
     capability_param_label,
 )
@@ -494,7 +494,7 @@ def test_capability_error_messages_follow_capability_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """报错文案的家族枚举随能力表派生，翻转声明后文案同步增删家族名。"""
-    import seedream_mcp.utils.model.model_capabilities as model_capabilities_module
+    import seedream_mcp.utils.model.capabilities as model_capabilities_module
 
     table = dict(model_capabilities_module.MODEL_CAPABILITIES)
     table[model_capabilities_module.MODEL_FAMILY_45] = replace(
@@ -516,7 +516,7 @@ def test_capability_error_messages_follow_capability_table(
 
 def test_deprecated_model_tokens_is_immutable_frozenset() -> None:
     """已下线模型 token 清单为 frozenset，公共清单不可被原地变异。"""
-    from seedream_mcp.utils.model.model_capabilities import DEPRECATED_MODEL_TOKENS
+    from seedream_mcp.utils.model.capabilities import DEPRECATED_MODEL_TOKENS
 
     assert isinstance(DEPRECATED_MODEL_TOKENS, frozenset)
     assert "doubao-seedream-3-0" in DEPRECATED_MODEL_TOKENS

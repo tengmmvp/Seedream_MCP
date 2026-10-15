@@ -13,9 +13,9 @@ from mcp.server.mcpserver.resolve import ListRoots
 from mcp.shared.exceptions import MCPError
 from mcp.types import REQUEST_TIMEOUT, ListRootsRequest, ListRootsResult
 
-import seedream_mcp.utils.io.io_roots as io_roots_module
+import seedream_mcp.utils.io.roots as io_roots_module
 from seedream_mcp.server import _workspace_roots_dependency
-from seedream_mcp.utils.io.io_roots import read_session_roots_or_raise
+from seedream_mcp.utils.io.roots import read_session_roots_or_raise
 
 from _roots_session_fakes import BackChannelSession as _BackChannelSession
 from _roots_session_fakes import BackChannelUnavailableSession as _BackChannelUnavailableSession

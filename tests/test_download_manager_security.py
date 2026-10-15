@@ -12,7 +12,7 @@ from typing import Any, cast
 from aiohttp import ClientResponse
 import pytest
 
-from seedream_mcp.utils.io.io_download import DownloadError, DownloadManager, _DNS_CACHE_MAX_SIZE
+from seedream_mcp.utils.io.download import DownloadError, DownloadManager, _DNS_CACHE_MAX_SIZE
 
 from _download_fakes import (
     _FakeLoop,
@@ -438,7 +438,7 @@ async def test_budget_stop_failure_log_reports_actual_attempt_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """累计预算截停后的终态失败日志记录实际尝试数，而非 max_retries 上限。"""
-    from seedream_mcp.utils.io import io_download as io_download_module
+    from seedream_mcp.utils.io import download as io_download_module
 
     capture = RecordingLogger()
     monkeypatch.setattr(io_download_module, "logger", capture)
@@ -603,7 +603,7 @@ async def test_download_image_strips_caller_range_headers_once_across_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """调用方 Range/If-Range 头入口一次剥离：重试各趟出站头干净，告警只记一条。"""
-    from seedream_mcp.utils.io import io_download as io_download_module
+    from seedream_mcp.utils.io import download as io_download_module
 
     capture = RecordingLogger()
     monkeypatch.setattr(io_download_module, "logger", capture)
@@ -670,7 +670,7 @@ async def test_download_image_cross_origin_header_strip_sticks_across_hop_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A→B→A 三跳链：跨源剥离后的安全头在跳回原源 A 时不再恢复定制头。"""
-    from seedream_mcp.utils.io.io_download import _strip_custom_headers_for_cross_origin
+    from seedream_mcp.utils.io.download import _strip_custom_headers_for_cross_origin
 
     manager = DownloadManager()
     session = _FakeSession(
@@ -702,7 +702,7 @@ async def test_download_image_cross_origin_header_strip_sticks_across_hop_back(
 
 def test_url_origin_treats_default_port_as_same_origin() -> None:
     """显式默认端口与省略端口判定同源；scheme 与 host 差异判定跨源。"""
-    from seedream_mcp.utils.io.io_download import _url_origin
+    from seedream_mcp.utils.io.download import _url_origin
 
     assert _url_origin("https://a.example/x") == _url_origin("https://a.example:443/y")
     assert _url_origin("http://a.example/x") == _url_origin("http://a.example:80/y")

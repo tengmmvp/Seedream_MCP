@@ -16,10 +16,10 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from seedream_mcp.utils.images import image_input as image_input_module
-from seedream_mcp.utils.images import image_prepare
-from seedream_mcp.utils.images import image_validation
-from seedream_mcp.utils.images.image_prepare import ImagePreparer
+from seedream_mcp.utils.images import inputs as image_input_module
+from seedream_mcp.utils.images import prepare as image_prepare
+from seedream_mcp.utils.images import validation as image_validation
+from seedream_mcp.utils.images.prepare import ImagePreparer
 
 # 合法 PNG 文件头，供构造可读取的候选常规文件
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
@@ -79,7 +79,7 @@ def test_oversized_candidate_returns_none(
 
 def test_candidate_delegates_to_shared_candidate_resolution(images_root: Path) -> None:
     """候选定位直接复用 resolve_local_image_candidate，不会因规则漂移锁定不同文件。"""
-    from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
+    from seedream_mcp.utils.images.validation import resolve_local_image_candidate
 
     valid = images_root / "photo.png"
     valid.write_bytes(_PNG_BYTES)

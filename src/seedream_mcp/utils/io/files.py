@@ -4,7 +4,7 @@
 open_no_follow_write_fd、open_temp_fd、finalize_atomic_replace
 与同步落盘入口 atomic_replace_from_fd_sync，另有 has_reparse_attribute
 判定 NTFS junction 等非符号链接型 reparse point，
-供 io_scan 的目录扫描与 io_storage 的清理遍历使用。共享函数抛 OSError，
+供 scan 的目录扫描与 storage 的清理遍历使用。共享函数抛 OSError，
 由调用方按各自异常类型包装。
 
 残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的符号链接；
@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import IO
 
 from ..core.settle import await_settled_op
-from .io_path import ResolveResultCache, resolve_rejecting_cycle
+from .path import ResolveResultCache, resolve_rejecting_cycle
 
 PathLike = str | Path
 
@@ -317,7 +317,7 @@ async def finalize_atomic_replace(
 ) -> None:
     """落盘终局单点：可选 fsync 后静默关闭 fd，再经线程池 ``os.replace`` 原子替换。
 
-    供 io_download 续传终局使用。fd 在任一退出路径均被关闭，关闭失败仅降
+    供 download 续传终局使用。fd 在任一退出路径均被关闭，关闭失败仅降
     debug 日志：数据已完整写入临时文件，替换不因善后关闭异常而丢弃；fsync 或
     replace 失败的异常原样上抛，临时文件清理与替换已成后的处置归调用方。取消
     到达时先等待脱离等待层的 fsync/replace 线程落定再放行取消，fd 关闭与调用

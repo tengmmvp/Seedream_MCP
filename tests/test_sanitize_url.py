@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from seedream_mcp.utils.io.io_url import get_file_extension_from_url, sanitize_url
+from seedream_mcp.utils.io.url import get_file_extension_from_url, sanitize_url
 
 
 def test_sanitize_url_preserves_scheme_host_path() -> None:

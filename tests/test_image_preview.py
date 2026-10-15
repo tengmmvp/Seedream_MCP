@@ -24,14 +24,14 @@ from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.runners import run_text_to_image
-from seedream_mcp.utils.images.image_thumbnail import (
+from seedream_mcp.utils.images.thumbnail import (
     PREVIEW_MAX_IMAGES,
     THUMBNAIL_MAX_EDGE,
     build_preview_contents,
     build_thumbnail_bytes,
     cached_thumbnail_bytes,
 )
-from seedream_mcp.utils.io import io_save
+from seedream_mcp.utils.io import save as io_save
 
 from _cpu_offload_spy import CpuOffloadSpy
 from _generation_fixtures import _patch_client_success, _patch_save_real_file
@@ -89,7 +89,7 @@ async def test_build_preview_contents_skips_transient_stat_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """源图 stat 瞬时失败上抛 OSError 时跳过该张，不外泄到工具调用。"""
-    from seedream_mcp.utils.images import image_thumbnail
+    from seedream_mcp.utils.images import thumbnail as image_thumbnail
 
     image = _write_png(tmp_path / "locked.png", (64, 64))
 
@@ -286,7 +286,7 @@ async def test_build_thumbnail_bytes_limited_runs_in_cpu_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """缩略图解码经专用线程池执行，不与默认执行器短任务同池排队。"""
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "decode.png", (300, 200))
     spy = CpuOffloadSpy(thumbnail_module.build_thumbnail_bytes)
@@ -413,7 +413,7 @@ async def test_generation_result_truncates_preview_beyond_limit(
 
 def test_thumbnail_cache_root_parallel_to_images_root(tmp_path: Path) -> None:
     """缓存目录与图片目录并列于 .seedream 下，驱逐清理不作用到图片目录内部。"""
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     images_root = tmp_path / ".seedream" / "images"
     assert thumbnail_module.thumbnail_cache_root(images_root) == tmp_path / ".seedream" / "thumbs"
@@ -423,7 +423,7 @@ async def test_cached_thumbnail_hits_disk_cache_without_redecode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """第二次取图命中落盘缓存，不再触发解码。"""
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (1200, 800))
     images_root = tmp_path / ".seedream" / "images"
@@ -447,7 +447,7 @@ async def test_cached_thumbnail_hits_disk_cache_without_redecode(
 
 async def test_cached_thumbnail_invalidates_on_source_change(tmp_path: Path) -> None:
     """源图 (mtime, size) 变化后缓存键失效，重新生成。"""
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (900, 600))
     images_root = tmp_path / ".seedream" / "images"
@@ -465,7 +465,7 @@ async def test_cached_thumbnail_empty_entry_treated_as_miss_and_regenerated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """0 字节缓存条目视为未命中：重新解码并以非空缩略图覆盖损坏缓存。"""
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (1000, 700))
     images_root = tmp_path / ".seedream" / "images"
@@ -495,7 +495,7 @@ async def test_cached_thumbnail_empty_entry_treated_as_miss_and_regenerated(
 
 async def test_cached_thumbnail_survives_unwritable_cache_dir(tmp_path: Path) -> None:
     """缓存目录不可写时静默降级为每次现生成，取图结果不受影响。"""
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (800, 600))
     images_root = tmp_path / ".seedream" / "images"
@@ -513,7 +513,7 @@ async def test_cached_thumbnail_concurrent_miss_decodes_once_and_shares_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """并发同图冷未命中经在途去重共享单次解码，共享 task 解码成功后写缓存。"""
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (1200, 800))
     images_root = tmp_path / ".seedream" / "images"
@@ -566,7 +566,7 @@ async def test_concurrent_loops_keep_isolated_inflight_registries(
     """
     import queue
 
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (800, 600))
     images_root = tmp_path / ".seedream" / "images"
@@ -654,7 +654,7 @@ async def test_retired_loop_with_pending_decode_is_collectable(
     import threading
     import weakref
 
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (300, 200))
     images_root = tmp_path / ".seedream" / "images"
@@ -736,7 +736,7 @@ async def test_late_waiter_shares_orphan_decode_after_creator_cancel(
     取消与后到调用之间测试不持在途条目强引用：注册表仅弱持在途条目，条目失去 task 侧保活
     即被回收、后到者重建解码（decode_calls 计数翻倍），以此锁定共享语义不回退。
     """
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (300, 200))
     images_root = tmp_path / ".seedream" / "images"
@@ -790,7 +790,7 @@ def test_thumbnail_sweep_evicts_oldest_beyond_cap(
     """累计字节超上界时按最旧驱逐至一半，最新文件保留。"""
     import os
 
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     thumbs_root = tmp_path / "thumbs"
     thumbs_root.mkdir()
@@ -820,7 +820,7 @@ def test_thumbnail_sweep_distinguishes_orphan_and_fresh_thumb_tmp(
     import os
     import time
 
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     thumbs_root = tmp_path / "thumbs"
     thumbs_root.mkdir()
@@ -844,7 +844,7 @@ def test_thumbnail_sweep_gate_is_keyed_by_cache_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """节流门按缓存根独立：一处的清扫窗口不压制另一处的驱逐。"""
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     monkeypatch.setattr(thumbnail_module, "THUMBNAIL_CACHE_MAX_TOTAL_BYTES", 1000)
 
@@ -862,7 +862,7 @@ def test_thumbnail_sweep_gate_caps_tracked_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """节流门键数超上限时按最近使用序驱逐，旋转 Roots 的长寿命进程不无限增长。"""
-    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     monkeypatch.setattr(thumbnail_module, "THUMBNAIL_CACHE_MAX_TOTAL_BYTES", 1000)
     thumbnail_module.reset_thumb_sweep_gate()

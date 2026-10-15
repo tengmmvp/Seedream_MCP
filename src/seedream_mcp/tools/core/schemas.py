@@ -13,8 +13,8 @@ from typing import Annotated, Callable, ClassVar, Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...utils.core.errors import SeedreamValidationError
-from ...utils.images.image_validation import MAX_IMAGE_FILE_SIZE
-from ...utils.model.model_capabilities import (
+from ...utils.images.validation import MAX_IMAGE_FILE_SIZE
+from ...utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
     layer_decomposition_presets_text,
 )

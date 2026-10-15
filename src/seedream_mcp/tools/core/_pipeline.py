@@ -19,8 +19,8 @@ from ...utils.core.errors import (
 )
 from ...utils.core.sanitizers import sanitize_error_text
 from ...utils.core.logs import get_logger
-from ...utils.io.io_path import normalize_path, resolve_images_root, resolve_rejecting_cycle
-from ...utils.io.io_stream import data_items
+from ...utils.io.path import normalize_path, resolve_images_root, resolve_rejecting_cycle
+from ...utils.io.stream import data_items
 
 if TYPE_CHECKING:
     from loguru import Logger

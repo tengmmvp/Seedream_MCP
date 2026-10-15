@@ -26,7 +26,7 @@ from seedream_mcp.tools.core.schemas import (
     SequentialGenerationInput,
     TextToImageInput,
 )
-from seedream_mcp.utils.io.io_save import AutoSaveResult
+from seedream_mcp.utils.io.save import AutoSaveResult
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 
 
@@ -824,7 +824,7 @@ async def test_execute_generation_handler_maps_unresolvable_images_root_to_confi
     from unittest.mock import MagicMock
 
     from seedream_mcp.tools.core.common import ToolMetadata, execute_generation_handler
-    from seedream_mcp.utils.io import io_path
+    from seedream_mcp.utils.io import path as io_path
 
     def _runtime_error(configured_dir: str) -> Path:
         raise RuntimeError("Could not resolve home directory")

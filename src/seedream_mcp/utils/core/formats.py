@@ -1,8 +1,8 @@
 """图像格式定义与推断。
 
 集中管理格式家族表、受支持图像扩展名、MIME 类型映射、PIL 格式名映射、
-基于文件头的格式推断与 base64 解码尺寸估算，供 validation、image_input、
-io_download、io_save 等模块共享，避免多处重复定义。
+基于文件头的格式推断与 base64 解码尺寸估算，供 validation、inputs、
+download、save 等模块共享，避免多处重复定义。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
-# 自动保存单文件大小上限默认值，config 与 io_download 共享此单一来源。
+# 自动保存单文件大小上限默认值，config 与 download 共享此单一来源。
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 
 # 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源。
@@ -253,7 +253,7 @@ def encode_data_uri(media_type: str, payload: bytes) -> str:
 def parse_data_uri(data: Any) -> tuple[str | None, Any, bool]:
     """解析 data URI，返回 (media_type, payload, is_base64)。
 
-    scheme 前缀按 RFC 3986 大小写不敏感判定，与 image_ref 的分类口径一致，使
+    scheme 前缀按 RFC 3986 大小写不敏感判定，与 ref 的分类口径一致，使
     ``DATA:image/png;base64,....`` 也进入校验流水线获得精确报错。media_type 取自
     header 的媒体类型部分，缺失时为 None；payload 为首个逗号后的负载，不做 base64
     解码；is_base64 标记 header 是否携带 ``;base64`` 参数（大小写不敏感），由调用方

@@ -19,7 +19,7 @@ import seedream_mcp.server as server
 import seedream_mcp.transport as transport_module
 from seedream_mcp._host_syntax import bind_host_invalid_reason
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
+from seedream_mcp.utils.model.capabilities import MODEL_ALIASES
 
 from _cli_fakes import make_run_args, stub_cli_main
 

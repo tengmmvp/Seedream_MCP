@@ -6,7 +6,7 @@ SEEDREAM_WORKSPACE_ROOT > 进程启动目录 > 用户主目录；图片目录恒
 ``<数据根目录>/.seedream/images``。
 读权限 = 工作区 ∪ 图片目录。
 提供路径规范化、越界判定原语，拦截包含 ``..`` 或经由符号链接指向权限范围
-之外的路径。MCP Roots 的会话取回与应用位于同组 io_roots 模块，工作区状态经
+之外的路径。MCP Roots 的会话取回与应用位于同组 roots 模块，工作区状态经
 本模块的上下文变量共享，置位与复位走 apply_workspace_roots/reset_workspace_roots。
 """
 
@@ -27,7 +27,7 @@ from typing import Callable, Generic, TypeVar
 from ..core.errors import SeedreamConfigError
 from ..core.formats import DATA_DIR_NAME
 from ..core.logs import EarlyMessageBuffer, get_logger
-from ..core.throttles import store_bounded_entry
+from ..core.bounded_store import store_bounded_entry
 
 logger = get_logger()
 
@@ -38,7 +38,7 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
 
 
 def apply_workspace_roots(roots: tuple[Path, ...]) -> Token[tuple[Path, ...] | None]:
-    """置位当前请求的工作区根集合，返回复位 token；写入口供 io_roots 专用。"""
+    """置位当前请求的工作区根集合，返回复位 token；写入口供 roots 专用。"""
     return _WORKSPACE_ROOTS_VAR.set(roots)
 
 
@@ -48,7 +48,7 @@ def reset_workspace_roots(token: Token[tuple[Path, ...] | None]) -> None:
 
 
 # Windows 保留设备名清单：CON/NUL/COM1 等作最终分量时被解释为设备而非文件，
-# normalize_path 的拒绝与 io_storage 的文件名净化经 is_windows_reserved_name 共用。
+# normalize_path 的拒绝与 storage 的文件名净化经 is_windows_reserved_name 共用。
 WINDOWS_RESERVED_NAMES = frozenset(
     {
         "CON",
@@ -81,7 +81,7 @@ def is_windows_reserved_name(name: str) -> bool:
     """判断文件名是否命中 Windows 保留设备名。
 
     Windows 解析前剥离前导点与首尾空格并取首个点前词干，CON.txt、con. 与 .CON
-    同样命中；normalize_path 与 io_roots 的读侧拒绝、io_storage 的文件名净化
+    同样命中；normalize_path 与 roots 的读侧拒绝、storage 的文件名净化
     共用本判定。
 
     Args:
@@ -412,7 +412,7 @@ def _usable_cwd_root() -> Path | None:
         fd, probe_name = tempfile.mkstemp(prefix=".seedream-probe-", dir=cwd)
     except OSError:
         return None
-    # 清理失败不影响可写判定，记录 warning 暴露残留而非静默吞掉，与 io_file 的
+    # 清理失败不影响可写判定，记录 warning 暴露残留而非静默吞掉，与 files 的
     # 临时文件清理同口径。
     try:
         os.close(fd)
@@ -639,7 +639,7 @@ def is_unc_path(path_str: str) -> bool:
 
     混合形态仅在 win32 判为 UNC，POSIX 反斜杠是合法文件名字符；统一分隔符
     形态各平台一致拒绝。UNC 的 resolve 在 Windows 触发 SMB 认证，须在
-    resolve 前拦截。io_path 与 images 组的候选守卫共用本判定。
+    resolve 前拦截。path 与 images 组的候选守卫共用本判定。
     """
     stripped = path_str.lstrip()
     if len(stripped) < 2:

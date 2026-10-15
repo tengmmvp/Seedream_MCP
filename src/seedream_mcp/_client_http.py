@@ -38,13 +38,13 @@ from .utils.core.sanitizers import (
     fit_utf8_bytes,
     sanitize_error_text,
 )
-from .utils.images.image_ref import classify_image_reference
-from .utils.io.io_sse import (
+from .utils.images.ref import classify_image_reference
+from .utils.io.sse import (
     is_sse_response,
     items_limit_for,
     parse_sse_response,
 )
-from .utils.io.io_stream import (
+from .utils.io.stream import (
     RESPONSE_BODY_LIMIT_HINT,
     STREAM_DEADLINE_HIT,
     STREAM_ENDED,

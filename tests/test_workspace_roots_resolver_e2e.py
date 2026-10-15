@@ -15,7 +15,7 @@ from mcp.client import Client, ClientRequestContext
 from mcp.types import CallToolResult, ListRootsResult, TextContent
 
 import seedream_mcp.server as server
-import seedream_mcp.utils.io.io_roots as io_roots_module
+import seedream_mcp.utils.io.roots as io_roots_module
 from seedream_mcp import config as config_module
 from seedream_mcp.config import SeedreamConfig
 

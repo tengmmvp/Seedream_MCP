@@ -288,7 +288,7 @@ async def test_thumbnail_decode_concurrency_capped_by_semaphore(
     import asyncio
 
     from seedream_mcp.utils.core.executors import CPU_OFFLOAD_DECODE_SLOTS
-    from seedream_mcp.utils.images import image_thumbnail as image_thumbnail_module
+    from seedream_mcp.utils.images import thumbnail as image_thumbnail_module
 
     day_dir = tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image"
     for name in ("b.png", "c.png", "d.png", "e.png", "f.png"):
@@ -593,7 +593,7 @@ async def test_image_head_returns_headers_without_reading_body(
     web_app_with_image: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """HEAD 只发头不做分块读，content-length 为全文件长度，句柄随即关闭。"""
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
 
     payload = _image_payload(tmp_path)
     spy = _SpyHandle(
@@ -752,7 +752,7 @@ async def test_image_response_parity_with_fileresponse(
     import os
 
     import seedream_mcp.webapp._responses as responses_module
-    from seedream_mcp.utils.io.io_file import open_no_follow_read
+    from seedream_mcp.utils.io.files import open_no_follow_read
     from seedream_mcp.webapp._responses import PRIVATE_CACHE_HEADER
     from starlette import responses as starlette_responses
     from starlette.responses import FileResponse
@@ -804,7 +804,7 @@ async def test_image_stream_read_dispatch_uses_large_chunks(
     web_app_with_image: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """全量 GET 的每次线程派发读取不低于 512KB，锁线程往返收敛。"""
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
     from seedream_mcp.webapp._responses import _NoFollowFileResponse
 
     image_path = tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png"
@@ -870,7 +870,7 @@ async def test_image_range_error_responses_close_handle(
     expected_status: int,
 ) -> None:
     """畸形与不可满足 Range 的早退分支显式关闭句柄，不依赖 GC 释放。"""
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
 
     spy = _SpyHandle(
         open(tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png", "rb")
@@ -929,7 +929,7 @@ async def test_image_open_denied_returns_500(
     web_app_with_image: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """权限等打开失败保留 500 诊断信号，不折叠为缺失。"""
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
 
     def _denied(path: object, **_kwargs: object) -> IO[bytes]:
         del path
@@ -952,8 +952,8 @@ async def test_image_open_symlink_rejection_returns_404(
     """符号链接拒绝按缺失口径归 404，与权限类 500 分档。"""
     import errno
 
-    import seedream_mcp.utils.io.io_file as io_file_module
-    from seedream_mcp.utils.io.io_file import SymlinkRejectedError
+    import seedream_mcp.utils.io.files as io_file_module
+    from seedream_mcp.utils.io.files import SymlinkRejectedError
 
     def _rejected(path: object, **_kwargs: object) -> IO[bytes]:
         raise SymlinkRejectedError(errno.ELOOP, "拒绝读取符号链接", str(path))
@@ -1214,7 +1214,7 @@ async def test_image_response_skips_pathsend_extension(tmp_path: Path) -> None:
     import asyncio
     from typing import cast
 
-    from seedream_mcp.utils.io.io_file import open_no_follow_read
+    from seedream_mcp.utils.io.files import open_no_follow_read
 
     payload = b"q" * 24
     source = tmp_path / "payload.bin"
@@ -1244,7 +1244,7 @@ async def test_web_image_client_disconnect_stream_completes_and_closes_handle(
     import asyncio
     from urllib.parse import urlencode
 
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
 
     image_path = tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png"
     spy = _SpyHandle(open(image_path, "rb"))
@@ -1287,7 +1287,7 @@ async def test_web_image_send_failure_surfaces_and_closes_handle(
     import asyncio
     from urllib.parse import urlencode
 
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
 
     image_path = tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png"
     spy = _SpyHandle(open(image_path, "rb"))
@@ -1325,7 +1325,7 @@ async def test_image_head_close_failure_after_headers_keeps_response(
     """HEAD 送达后兜底关闭抛错只记 warning，客户端已收完整头部且无外泄异常。"""
     from _log_fakes import capture_loguru_messages
 
-    import seedream_mcp.utils.io.io_file as io_file_module
+    import seedream_mcp.utils.io.files as io_file_module
 
     payload = _image_payload(tmp_path)
     spy = _CloseFailureSpyHandle(

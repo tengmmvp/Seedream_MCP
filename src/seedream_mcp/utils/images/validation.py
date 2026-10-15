@@ -33,8 +33,8 @@ from ..core.formats import (
 )
 from ..core.validators import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
 from ..core.logs import get_logger
-from ..io.io_file import open_no_follow_read
-from ..io.io_path import (
+from ..io.files import open_no_follow_read
+from ..io.path import (
     get_read_scope,
     has_null_byte,
     has_windows_colon_component,
@@ -45,7 +45,7 @@ from ..io.io_path import (
     normalize_path,
     resolve_images_root,
 )
-from .image_ref import classify_image_reference
+from .ref import classify_image_reference
 
 logger = get_logger()
 
@@ -177,7 +177,7 @@ def read_and_decode_local_image(
 ) -> tuple[bytes, str]:
     """no-follow 读取本地图像字节并做形态复核、限额复核、格式维度校验与出站标签一致性判定，供校验与读取两条路径复用。
 
-    非常规文件由 io_file.open_no_follow_read 在打开单点拒绝。读取失败的文案由
+    非常规文件由 files.open_no_follow_read 在打开单点拒绝。读取失败的文案由
     调用方经 format_read_error 生成；超限、格式、维度与解码失败用
     两条路径一致的固定文案，UnidentifiedImageError 用固定文案避免对象地址进入用户消息。
     扩展名与实际格式跨族在此单点拒绝，validate 与 prepare 两个公共入口对
@@ -345,7 +345,7 @@ def resolve_local_image_candidate(
 
     界内候选逐一做 image_candidate_stat 资格检查，返回首个命中的
     (resolve 后物理路径, stat)，未命中返回 None。ImagePreparer 的缓存签名与
-    image_input 的读取路径共用此定位，保证签名与实际读取锁定同一文件。
+    inputs 的读取路径共用此定位，保证签名与实际读取锁定同一文件。
     images_root 与 read_scope 未提供时按当前请求现取；调用方在一次请求内多次
     定位时传入 get_read_context 的共享结果，消除重复求值。
 
@@ -481,7 +481,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
             )
 
         if not skip_dimensions:
-            # 读取与解码校验经共享辅助，与 image_input 的读取链同一安全语义。
+            # 读取与解码校验经共享辅助，与 inputs 的读取链同一安全语义。
             read_and_decode_local_image(
                 path,
                 field_value=file_path,

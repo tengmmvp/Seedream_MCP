@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.utils.images.image_validation import validate_image_input
-from seedream_mcp.utils.io.io_download import DownloadError, DownloadManager
+from seedream_mcp.utils.images.validation import validate_image_input
+from seedream_mcp.utils.io.download import DownloadError, DownloadManager
 
 
 def test_validate_image_input_rejects_missing_host_without_message_rewrap() -> None:

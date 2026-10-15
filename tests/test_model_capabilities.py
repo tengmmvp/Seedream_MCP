@@ -8,7 +8,7 @@ from typing import cast, get_type_hints
 
 import pytest
 
-from seedream_mcp.utils.model.model_capabilities import (
+from seedream_mcp.utils.model.capabilities import (
     CAPABILITY_LABELS,
     MODEL_ALIASES,
     MODEL_CAPABILITIES,

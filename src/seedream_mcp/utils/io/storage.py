@@ -1,7 +1,7 @@
 """文件管理模块：生成图片保存路径、写入字节内容并清理旧文件。
 
 负责按日期与工具名组织保存路径、净化文件名、用内容哈希做去重，以及按保留天数
-清理旧文件。落盘写入与旧文件遍历均通过 io_file 防符号链接，避免经由符号链接逃逸
+清理旧文件。落盘写入与旧文件遍历均通过 files 防符号链接，避免经由符号链接逃逸
 出保存目录。字节签名嗅探扩展名由 core.formats 统一提供，调用方直接使用模块函数。
 """
 
@@ -26,19 +26,19 @@ from ..core.formats import (
 )
 from ..core.logs import get_logger
 from ..core.sanitizers import fit_utf8_budget, strip_unpaired_surrogates
-from ..core.throttles import store_bounded_entry
-from .io_file import (
+from ..core.bounded_store import store_bounded_entry
+from .files import (
     atomic_replace_from_fd_sync,
     has_reparse_attribute,
 )
-from .io_path import (
+from .path import (
     is_unc_path,
     is_windows_reserved_name,
     is_within_resolved,
     resolve_images_root,
     resolve_rejecting_cycle,
 )
-from .io_url import get_file_extension_from_url
+from .url import get_file_extension_from_url
 
 logger = get_logger()
 
@@ -67,7 +67,7 @@ _MAX_UNIQUE_BASE_LENGTH = 120
 _PART_SWEEP_GRACE_SECONDS = 24 * 3600
 
 # 清理遍历的条目告警阈值：按天与配额策略需要全量收集，不设预算截断，超阈记一条
-# warning 暴露异常规模的保存目录，量级对齐 io_scan 的扫描条目预算。
+# warning 暴露异常规模的保存目录，量级对齐 scan 的扫描条目预算。
 _CLEANUP_ENTRY_WARN_THRESHOLD = 20000
 
 
@@ -88,7 +88,7 @@ class FileManager:
         """初始化文件管理器并确保保存目录存在。
 
         Args:
-            base_dir: 图片保存目录。默认为 io_path.resolve_images_root 求值的
+            base_dir: 图片保存目录。默认为 path.resolve_images_root 求值的
                 图片目录，与目录体系的单一求值权威一致。
 
         Raises:
@@ -132,7 +132,7 @@ class FileManager:
     def validate_path(self, path: Path) -> bool:
         """验证路径是否在保存目录范围内。
 
-        复用 io_path.is_within_resolved 做 resolve 后的包含判定，可拦截包含 ``..``
+        复用 path.is_within_resolved 做 resolve 后的包含判定，可拦截包含 ``..``
         或经由符号链接指向保存目录之外的路径。
 
         Args:
@@ -154,7 +154,7 @@ class FileManager:
     def _resolved_within_base(self, resolved_path: Path) -> bool:
         """判断已 resolve 的路径是否位于保存目录内，直接比较，不再 resolve。
 
-        委托 io_path.is_within_resolved 保持包含判定的单一实现，供
+        委托 path.is_within_resolved 保持包含判定的单一实现，供
         run_cleanup_policies 等热路径复用，避免对已 resolve 路径重复解析。
         """
         return is_within_resolved(resolved_path, self.base_dir)
@@ -426,7 +426,7 @@ class FileManager:
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
 
-            # 原子落盘由 io_file 的同步骨架提供，与 io_download 续传终局
+            # 原子落盘由 files 的同步骨架提供，与 download 续传终局
             # finalize_atomic_replace 共用随机临时文件加 os.replace 的同一协议。
             def _writer(fd: int) -> None:
                 with os.fdopen(fd, "wb", closefd=False) as f:
