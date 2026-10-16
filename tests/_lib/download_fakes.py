@@ -9,6 +9,7 @@ test_download_image_branches 与 test_auto_save_and_download 复用，避免多�
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -286,17 +287,20 @@ async def _single_trip_to_temp(
     manager: DownloadManager,
     response: Any,
     save_path: Path,
-    temp_suffix: str,
-    content_type: str,
-    attempt: int,
-    wall_start_time: float,
+    temp_suffix: str = ".png.part",
+    content_type: str = "image/png",
+    attempt: int = 0,
+    wall_start_time: float | None = None,
     *,
     fsync: bool = False,
 ) -> dict[str, Any]:
     """单趟落盘便捷封装：独立续传状态走 _stream_response_to_resume，结束 dispose。
 
-    直连用例均为 200 响应，续传分类传非续传默认描述符。
+    直连用例均为 200 响应，续传分类传非续传默认描述符；尾参缺省取各用例
+    通行常量。
     """
+    if wall_start_time is None:
+        wall_start_time = time.monotonic()
     resume = _ResumeState()
     try:
         return await manager._stream_response_to_resume(

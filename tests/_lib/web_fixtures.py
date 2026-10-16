@@ -19,7 +19,7 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from _lib.asgi_fakes import _MAX_BODY, _assemble_streamable_http_app
+from _lib.asgi_fakes import _assemble_streamable_http_app
 from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.webapp.constants import (
     WEB_API_BROWSE,
@@ -61,14 +61,9 @@ def build_web_app(
     """按生产装配序构建带 Web 路由的 streamable-http 传输栈。
 
     装配经 _asgi_fakes._assemble_streamable_http_app 单点完成，web_enabled 驱动
-    Web 路由注册与静态挂载，请求体上限固定生产默认并显式传入中间件。
+    Web 路由注册与静态挂载。
     """
-    return _assemble_streamable_http_app(
-        auth_token,
-        host=host,
-        web_enabled=web_enabled,
-        attach_max_body_size=_MAX_BODY,
-    )
+    return _assemble_streamable_http_app(auth_token, host=host, web_enabled=web_enabled)
 
 
 @asynccontextmanager

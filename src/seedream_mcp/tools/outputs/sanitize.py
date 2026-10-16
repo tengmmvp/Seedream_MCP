@@ -62,8 +62,7 @@ def _flatten_mapping_keys(mapping: dict[Any, Any]) -> dict[Any, Any]:
     flattened: dict[Any, Any] = {}
     for key, value in mapping.items():
         new_key = flat_keys.get(key, key)
-        while new_key in flattened:
-            new_key = f"{new_key}<dup>"
+        new_key = _unique_flat_key(flattened, new_key)
         flattened[new_key] = value
     return flattened
 

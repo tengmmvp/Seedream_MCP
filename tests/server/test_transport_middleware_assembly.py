@@ -83,7 +83,7 @@ class _FakeStarletteApp:
 
 @pytest.fixture
 def active_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """注入固定活动配置，隔离装配函数对 http_max_body_size 的读取。"""
+    """注入固定活动配置，隔离装配函数对活动配置的读取。"""
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
 
@@ -317,26 +317,15 @@ def test_transport_security_merges_origins_into_bind_address_allowlist(
     assert security.allowed_origins == expected
 
 
-def test_attach_explicit_max_body_size_skips_config_read(
+def test_attach_passes_config_body_limit_to_limit_layer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """取自配置的四个可选参数全部显式传入时不读取活动配置，生产调用方取值一次复用。"""
-
-    def _fail_read() -> SeedreamConfig:
-        raise AssertionError("显式传入参数时不应读取活动配置")
-
-    monkeypatch.setattr(transport_module, "get_active_config", _fail_read)
+    """活动配置的请求体上限流入上限层中间件的装配参数。"""
+    config = SeedreamConfig(api_key="test_key", http_max_body_size=1048576)
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
     app = _FakeStarletteApp()
 
-    _attach_streamable_http_middleware(
-        app,
-        "127.0.0.1",
-        "",
-        max_body_size=1048576,
-        allowed_origins=(),
-        large_body_admission_concurrency=3,
-        body_read_timeout=120,
-    )
+    _attach_streamable_http_middleware(app, "127.0.0.1", "")
 
     assert app.attached_classes() == [
         _LoopbackHostGuardMiddleware,
@@ -344,15 +333,23 @@ def test_attach_explicit_max_body_size_skips_config_read(
         _LimitRequestBodyMiddleware,
         _LargeBodyAdmissionMiddleware,
     ]
+    limit_kwargs = next(
+        ref.kwargs for ref in app.user_middleware if ref.cls is _LimitRequestBodyMiddleware
+    )
+    assert limit_kwargs["max_body_size"] == 1048576
 
 
-def test_attach_fallback_reads_active_config_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """可选参数缺省回退只读取一次活动配置：四个可选参数共用同一配置对象。"""
+def test_attach_reads_active_config_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """装配单次读取活动配置，旋钮值流入中间件装配参数。"""
     reads = {"count": 0}
 
     def _counting_config() -> SeedreamConfig:
         reads["count"] += 1
-        return SeedreamConfig(api_key="test_key")
+        return SeedreamConfig(
+            api_key="test_key",
+            large_body_admission_concurrency=5,
+            body_read_timeout=77,
+        )
 
     monkeypatch.setattr(transport_module, "get_active_config", _counting_config)
     app = _FakeStarletteApp()
@@ -366,24 +363,22 @@ def test_attach_fallback_reads_active_config_once(monkeypatch: pytest.MonkeyPatc
         _LimitRequestBodyMiddleware,
         _LargeBodyAdmissionMiddleware,
     ]
+    admission_kwargs = next(
+        ref.kwargs for ref in app.user_middleware if ref.cls is _LargeBodyAdmissionMiddleware
+    )
+    assert admission_kwargs["admission_concurrency"] == 5
+    assert admission_kwargs["read_timeout"] == 77
 
 
 def test_attach_web_host_guard_allowlist_comes_from_active_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """web 非回环装配的 Host 守卫白名单取自活动配置，其余参数显式传入不改变来源。"""
+    """web 非回环装配的 Host 守卫白名单取自活动配置。"""
     config = SeedreamConfig(api_key="test_key", http_allowed_hosts=("proxy.example.com",))
     monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
     app = _FakeStarletteApp()
 
-    _attach_streamable_http_middleware(
-        app,
-        "10.0.0.5",
-        "secret",
-        max_body_size=1048576,
-        web_enabled=True,
-        allowed_origins=(),
-    )
+    _attach_streamable_http_middleware(app, "10.0.0.5", "secret", web_enabled=True)
 
     guard = next(ref for ref in app.user_middleware if ref.cls is _AppHostGuardMiddleware)
     assert guard.kwargs["allowed_hosts"] == (

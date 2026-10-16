@@ -3,8 +3,9 @@
 锁定四组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
 能力表参考图上限与组图总数上限、MCP 注册工具名与 handlers ToolMetadata 工具名、
 路径相似建议与 CLI 端口解析的边界行为；另含 loguru exc_info 关键字、security
-标记级别与环境变量键清洗前缀的全源码静态守护，以及 repo-layout.md 仓库与 tests
-结构契约的静态守护。新增取值或改名时两侧须同步，本文件在各处失败即暴露漂移。
+标记级别与环境变量键清洗前缀的全源码静态守护，download.py PermissionError
+处理器归类守护，以及 repo-layout.md 仓库与 tests 结构契约的静态守护。新增取值
+或改名时两侧须同步，本文件在各处失败即暴露漂移。
 """
 
 from __future__ import annotations
@@ -115,6 +116,94 @@ def _env_key_read_sites(source: str) -> list[tuple[str, str]]:
             prefix, _fully_static = _static_key_text(node.slice)
             sites.append((ast.unparse(node), prefix))
     return sites
+
+
+# PermissionError 及其内建超类拼写（OSError 连同 IOError/EnvironmentError 别名）：
+# except 捕获任一或裸 except 即实际覆盖 PermissionError。
+_PERMISSION_ERROR_COVERING_NAMES = frozenset(
+    {"PermissionError", "OSError", "IOError", "EnvironmentError"}
+)
+
+# 宽捕获豁免只收非文件面真实旁路：DNS 解析兜底 OSError 不涉杀软文件持锁，
+# 按终态域名失败处置是既有裁决。
+_BROAD_CATCH_EXEMPTIONS = frozenset({"_resolve_public_ips_uncached:OSError"})
+
+
+def _except_catches_permission_error(handler: ast.ExceptHandler) -> bool:
+    """判定 except 捕获类型是否覆盖 PermissionError：裸 except、内建超类与元组逐项。"""
+    caught = handler.type
+    if caught is None:
+        return True
+    if isinstance(caught, ast.Name):
+        return caught.id in _PERMISSION_ERROR_COVERING_NAMES
+    return isinstance(caught, ast.Tuple) and any(
+        isinstance(item, ast.Name) and item.id in _PERMISSION_ERROR_COVERING_NAMES
+        for item in caught.elts
+    )
+
+
+def _permission_error_handler_classified(handler: ast.ExceptHandler) -> bool:
+    """判定处理器体内是否出现三类归类形态之一：转可重试、作废路径、终态抛出。"""
+    for node in ast.walk(handler):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "_raise_transient_file_lock":
+                return True
+            if isinstance(func, ast.Attribute) and func.attr == "restart":
+                return True
+        if isinstance(node, ast.Raise) and node.exc is not None:
+            rendered = ast.unparse(node.exc)
+            if "DownloadError" in rendered and "权限拒绝" in rendered:
+                return True
+    return False
+
+
+def _permission_error_receiving_handlers(
+    tree: ast.Module,
+) -> list[tuple[str, ast.ExceptHandler]]:
+    """产出 (所属函数, 实际收到 PermissionError 的 except 处理器)。
+
+    异常派发命中的是首个覆盖捕获：同 try 内先序兄弟已覆盖 PermissionError
+    时，后序更宽捕获不再实际收到它；豁免登记的 (函数, 捕获原文) 不计入。
+    """
+    receivers: list[tuple[str, ast.ExceptHandler]] = []
+
+    def visit(nodes: list[ast.stmt], owner: str) -> None:
+        for stmt in nodes:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(stmt.body, stmt.name)
+            elif isinstance(stmt, ast.Try):
+                visit(stmt.body, owner)
+                intercepted = False
+                for handler in stmt.handlers:
+                    if _except_catches_permission_error(handler):
+                        exempt = (
+                            handler.type is not None
+                            and f"{owner}:{ast.unparse(handler.type)}" in _BROAD_CATCH_EXEMPTIONS
+                        )
+                        if not intercepted and not exempt:
+                            receivers.append((owner, handler))
+                        intercepted = True
+                    visit(handler.body, owner)
+                visit(stmt.orelse, owner)
+                visit(stmt.finalbody, owner)
+            else:
+                for field in ("body", "orelse", "finalbody"):
+                    children = getattr(stmt, field, None)
+                    if isinstance(children, list):
+                        visit(children, owner)
+
+    visit(tree.body, "<module>")
+    return receivers
+
+
+def _unclassified_permission_error_handlers(source: str) -> list[str]:
+    """提取实际收到 PermissionError 而未归类的 except 处理器，返回行号定位文案。"""
+    return [
+        f"第 {handler.lineno} 行 except 处理器"
+        for _owner, handler in _permission_error_receiving_handlers(ast.parse(source))
+        if not _permission_error_handler_classified(handler)
+    ]
 
 
 def test_response_format_enum_matches_validator_whitelist() -> None:
@@ -304,6 +393,73 @@ def test_env_key_site_extraction_ignores_unrelated_reads() -> None:
     )
 
     assert _env_key_read_sites(source) == []
+
+
+def test_download_permission_error_handlers_are_classified() -> None:
+    """download.py 实际收到 PermissionError 的处理器必须显式归类为可重试、作废路径或终态之一。
+
+    重试循环对 PermissionError 按权限拒绝默认判永久失败，新增 finalize 步骤若
+    捕获（含经 OSError 与裸 except 的宽捕获）后未显式归类，瞬时杀软持锁会失去
+    重试自愈；先序兄弟已截获或三类形态任一出现即合规，非文件面宽捕获须登记豁免。
+    """
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    source = (package_root / "utils" / "io" / "download.py").read_text(encoding="utf-8")
+
+    offenders = _unclassified_permission_error_handlers(source)
+
+    assert offenders == [], (
+        "捕获 PermissionError 的处理器未三择一归类（转可重试、作废路径、终态抛出）: " f"{offenders}"
+    )
+
+
+def test_permission_error_classification_reports_inline_violation() -> None:
+    """判定函数报出内联的未归类处理器，宽捕获计入，先序截获与豁免形态不误报。"""
+    source = (
+        "try:\n"
+        "    replace(path)\n"
+        "except (PermissionError, RetryableDownloadError):\n"
+        "    resume.restart()\n"
+        "try:\n"
+        "    truncate(fd)\n"
+        "except PermissionError as exc:\n"
+        "    _raise_transient_file_lock('终局截齐', exc)\n"
+        "try:\n"
+        "    save(path)\n"
+        "except PermissionError as exc:\n"
+        "    raise DownloadError(f'权限拒绝，不可重试: {exc}') from exc\n"
+        "try:\n"
+        "    finalize(fd)\n"
+        "except PermissionError:\n"
+        "    pass\n"
+        "try:\n"
+        "    finalize(fd)\n"
+        "except OSError as exc:\n"
+        "    raise DownloadError(f'域名解析失败: {exc}') from exc\n"
+        "try:\n"
+        "    replace(path)\n"
+        "except PermissionError as exc:\n"
+        "    _raise_transient_file_lock('续传临时文件重开', exc)\n"
+        "except OSError:\n"
+        "    resume.fd = None\n"
+        "    raise\n"
+        "try:\n"
+        "    truncate(fd)\n"
+        "except:\n"
+        "    pass\n"
+        "def _resolve_public_ips_uncached():\n"
+        "    try:\n"
+        "        getaddrinfo(host)\n"
+        "    except OSError as exc:\n"
+        "        raise DownloadError(f'域名解析失败: {exc}') from exc\n"
+    )
+
+    offenders = _unclassified_permission_error_handlers(source)
+
+    assert offenders == [
+        "第 15 行 except 处理器",
+        "第 19 行 except 处理器",
+        "第 30 行 except 处理器",
+    ]
 
 
 def test_style_prompt_prefix_names_registered_tools() -> None:

@@ -12,7 +12,6 @@ import os
 import random
 import socket
 import threading
-import time
 import zlib
 from collections.abc import Buffer, Callable, Iterator
 from pathlib import Path
@@ -512,18 +511,9 @@ async def test_download_response_rejects_invalid_content_length(tmp_path: Path) 
     response = _FakeResponse(
         headers={"content-type": "image/png", "content-length": "not-a-number"}
     )
-    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="非法 content-length"):
-        await _single_trip_to_temp(
-            manager,
-            response,
-            tmp_path / "out.png",
-            temp_suffix,
-            "image/png",
-            0,
-            time.monotonic(),
-        )
+        await _single_trip_to_temp(manager, response, tmp_path / "out.png")
 
     # 校验失败发生在 mkdir 与文件创建之前，临时文件不应存在
     assert not list(tmp_path.glob("*.part"))
@@ -533,18 +523,9 @@ async def test_download_response_rejects_oversized_content_length(tmp_path: Path
     """content-length 超 max_file_size 时提前抛出 DownloadError。"""
     manager = DownloadManager(max_file_size=100)
     response = _FakeResponse(headers={"content-type": "image/png", "content-length": "101"})
-    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="文件过大"):
-        await _single_trip_to_temp(
-            manager,
-            response,
-            tmp_path / "out.png",
-            temp_suffix,
-            "image/png",
-            0,
-            time.monotonic(),
-        )
+        await _single_trip_to_temp(manager, response, tmp_path / "out.png")
 
 
 async def test_download_response_rejects_negative_content_length(tmp_path: Path) -> None:
@@ -555,18 +536,9 @@ async def test_download_response_rejects_negative_content_length(tmp_path: Path)
     """
     manager = DownloadManager()
     response = _FakeResponse(headers={"content-type": "image/png", "content-length": "-1"})
-    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="非法 content-length"):
-        await _single_trip_to_temp(
-            manager,
-            response,
-            tmp_path / "out.png",
-            temp_suffix,
-            "image/png",
-            0,
-            time.monotonic(),
-        )
+        await _single_trip_to_temp(manager, response, tmp_path / "out.png")
 
     assert not list(tmp_path.glob("*.part"))
 
@@ -590,15 +562,7 @@ async def test_download_rejects_malformed_content_length(tmp_path: Path, value: 
     response = _FakeResponse(headers={"content-type": "image/png", "content-length": value})
 
     with pytest.raises(DownloadError, match="非法 content-length"):
-        await _single_trip_to_temp(
-            manager,
-            response,
-            tmp_path / "out.png",
-            ".png.part",
-            "image/png",
-            0,
-            time.monotonic(),
-        )
+        await _single_trip_to_temp(manager, response, tmp_path / "out.png")
 
     assert not list(tmp_path.glob("*.part"))
 
@@ -612,18 +576,9 @@ async def test_download_response_rejects_streaming_cumulative_oversize(
     response = _FakeResponse(
         headers={"content-type": "image/png"}, content_chunks=[b"x" * 60, b"x" * 60]
     )
-    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="文件过大"):
-        await _single_trip_to_temp(
-            manager,
-            response,
-            tmp_path / "out.png",
-            temp_suffix,
-            "image/png",
-            0,
-            time.monotonic(),
-        )
+        await _single_trip_to_temp(manager, response, tmp_path / "out.png")
 
 
 async def test_download_response_rejects_byte_signature_mismatch(tmp_path: Path) -> None:
@@ -633,18 +588,9 @@ async def test_download_response_rejects_byte_signature_mismatch(tmp_path: Path)
         headers={"content-type": "image/png", "content-length": "13"},
         content_chunks=[b"NOT_AN_IMAGE!"],
     )
-    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="字节签名"):
-        await _single_trip_to_temp(
-            manager,
-            response,
-            tmp_path / "out.png",
-            temp_suffix,
-            "image/png",
-            0,
-            time.monotonic(),
-        )
+        await _single_trip_to_temp(manager, response, tmp_path / "out.png")
 
     # 签名校验失败发生在 replace 之前，最终文件不应落盘
     assert not (tmp_path / "out.png").exists()
@@ -665,18 +611,9 @@ async def test_download_response_rejects_signature_mismatch_in_first_chunk(
         },
         content_chunks=[forged_head, trailing_chunk],
     )
-    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="字节签名"):
-        await _single_trip_to_temp(
-            manager,
-            response,
-            tmp_path / "out.png",
-            temp_suffix,
-            "image/png",
-            0,
-            time.monotonic(),
-        )
+        await _single_trip_to_temp(manager, response, tmp_path / "out.png")
 
     # 流内即时拒绝仅消费首块，第二块未被读取，不再占用后续带宽与磁盘写入
     assert response.content._chunk_idx == 1
@@ -750,7 +687,6 @@ async def test_download_response_closes_fd_when_part_open_fails(
         headers={"content-type": "image/png", "content-length": str(len(_PNG_BYTES))},
         content_chunks=[_PNG_BYTES],
     )
-    temp_suffix = ".png.part"
 
     closed = _install_close_counter(monkeypatch)
 
@@ -761,15 +697,7 @@ async def test_download_response_closes_fd_when_part_open_fails(
     monkeypatch.setattr(io_download_module, "open_no_follow_write_fd", _raising_open_write_fd)
 
     with pytest.raises(OSError, match="part open boom"):
-        await _single_trip_to_temp(
-            manager,
-            response,
-            tmp_path / "out.png",
-            temp_suffix,
-            "image/png",
-            0,
-            time.monotonic(),
-        )
+        await _single_trip_to_temp(manager, response, tmp_path / "out.png")
 
     # 续传状态持有的 fd 经 dispose 关闭恰一次，写入线程内无 fd 可泄漏。
     assert len(closed) == 1
@@ -1686,20 +1614,22 @@ async def test_download_decode_rewrite_locked_once_preserves_part_and_retries(
     assert not list(tmp_path.glob("*.part"))
 
 
-async def test_download_decode_rewrite_write_failure_redownloads_full(
+async def test_download_decode_rewrite_write_failure_retried_in_place_lands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """解码回退写回在截断后写失败：作废完成态退回全量重下自愈，而非重解已毁文件。
-
-    旧路径完成态保留会使重试直达终局，对已毁 .part 重解压得终态签名拒绝。
-    """
+    """解码回退写回中段失败一次：decoded 在内存仍完整，原地重写即接管落盘，不作废状态。"""
     real_truncate = os.ftruncate
     real_write = os.write
     gate = {"rewrite": False, "fired": False}
+    restart_calls = {"count": 0}
+    real_restart = _ResumeState.restart
+
+    def _counting_restart(state: _ResumeState) -> None:
+        restart_calls["count"] += 1
+        real_restart(state)
 
     def _gated_truncate(fd: int, length: int) -> None:
-        # 写回恒截断到 0，撕裂尾修正截断到已确认偏移；重试趟偏移归零后两处截断同形，
-        # 误触发由 fired 单次置位吸收。
+        # 写回恒截断到 0：门控只挂在解码回退的写段上。
         if length == 0:
             gate["rewrite"] = True
         return real_truncate(fd, length)
@@ -1707,6 +1637,52 @@ async def test_download_decode_rewrite_write_failure_redownloads_full(
     def _gated_write(fd: int, buffer: Buffer) -> int:
         if gate["rewrite"] and not gate["fired"]:
             gate["fired"] = True
+            raise OSError("simulated write failure")
+        return real_write(fd, buffer)
+
+    monkeypatch.setattr(os, "ftruncate", _gated_truncate)
+    monkeypatch.setattr(os, "write", _gated_write)
+    monkeypatch.setattr(_ResumeState, "restart", _counting_restart)
+    manager = DownloadManager()
+    session = _FakeSession([_compressed_success_response(gzip.compress(_DECODE_BODY))])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["file_size"] == len(_DECODE_BODY)
+    assert result["content_type"] == "image/png"
+    assert save_path.read_bytes() == _DECODE_BODY
+    # 原地重写单趟内自愈：restart 仅全量趟常规作废一次，解码失败路径未再作废、
+    # 不发新请求。
+    assert restart_calls["count"] == 1
+    assert result["attempts"] == 1
+    assert session._idx == 1
+    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_decode_rewrite_write_failure_redownloads_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """解码回退写回在截断后写失败且原地重写再失败：作废完成态退回全量重下自愈。
+
+    旧路径完成态保留会使重试直达终局，对已毁 .part 重解压得终态签名拒绝。
+    """
+    real_truncate = os.ftruncate
+    real_write = os.write
+    gate = {"rewrite": False, "fired": 0}
+
+    def _gated_truncate(fd: int, length: int) -> None:
+        # 写回恒截断到 0，撕裂尾修正截断到已确认偏移；重试趟偏移归零后两处截断同形，
+        # 两次失败恰耗尽于写回与原地重写，重试趟不再误触发。
+        if length == 0:
+            gate["rewrite"] = True
+        return real_truncate(fd, length)
+
+    def _gated_write(fd: int, buffer: Buffer) -> int:
+        if gate["rewrite"] and gate["fired"] < 2:
+            gate["fired"] += 1
             raise OSError("simulated write failure")
         return real_write(fd, buffer)
 
@@ -1728,10 +1704,53 @@ async def test_download_decode_rewrite_write_failure_redownloads_full(
     assert result["attempts"] == 2
     assert result["file_size"] == len(_DECODE_BODY)
     assert save_path.read_bytes() == _DECODE_BODY
-    # 写回失败作废完成态：重试退回全量重下发起新请求，而非对已毁 .part 重解码。
-    assert gate["fired"] is True
+    # 写回与原地重写接连失败作废完成态：重试退回全量重下发起新请求，而非对已毁
+    # .part 重解码。
+    assert gate["fired"] == 2
     assert session._idx == 2
     assert not list(tmp_path.glob("*.part"))
+
+
+async def test_decode_rewrite_fail_twice_restarts_and_reraises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写回与原地重写接连失败：restart 恰一次并上抛重写期间的异常，.part 状态未知。"""
+    body = gzip.compress(_DECODE_BODY)
+    part = tmp_path / "out.png.part"
+    part.write_bytes(body)
+    resume = _ResumeState()
+    resume.path = part
+    resume.head_bytes = body[:SNIFF_HEAD_BYTES_FLOOR]
+    resume.offset = len(body)
+    resume.expected_total = len(body)
+    restart_calls = {"count": 0}
+    real_restart = _ResumeState.restart
+    write_failures = {"count": 0}
+
+    def _counting_restart(state: _ResumeState) -> None:
+        restart_calls["count"] += 1
+        real_restart(state)
+
+    def _failing_rewrite_write(fd: int, buffer: Buffer) -> int:
+        del fd, buffer
+        write_failures["count"] += 1
+        raise OSError(f"simulated write failure {write_failures['count']}")
+
+    monkeypatch.setattr(_ResumeState, "restart", _counting_restart)
+    monkeypatch.setattr(os, "write", _failing_rewrite_write)
+    manager = DownloadManager()
+
+    with pytest.raises(RetryableDownloadError, match="临时文件已毁") as excinfo:
+        await manager._decode_compressed_resume(resume)
+
+    # 上抛的是重写期间的异常：首次失败仅驱动原地重写。
+    assert str(excinfo.value.__cause__) == "simulated write failure 2"
+    assert write_failures["count"] == 2
+    assert restart_calls["count"] == 1
+    # 作废续传状态：偏移与嗅探窗口复位、声明总长清空，重试退回全量重下。
+    assert resume.offset == 0
+    assert resume.head_bytes == b""
+    assert resume.expected_total is None
 
 
 async def test_download_decode_rewrite_persistent_fs_error_is_terminal(
@@ -2405,14 +2424,9 @@ async def test_download_finalize_truncate_cancel_disposes_reopened_fd(
     real_ftruncate = os.ftruncate
     truncate_calls = {"count": 0}
     reopened_fd: list[int] = []
-    closed_fds: set[int] = set()
-    real_close = os.close
+    closed = _install_close_counter(monkeypatch)
     entered = threading.Event()
     release = threading.Event()
-
-    def _recording_close(fd: int) -> None:
-        closed_fds.add(fd)
-        real_close(fd)
 
     def _staged_ftruncate(fd: int, length: int) -> None:
         truncate_calls["count"] += 1
@@ -2426,7 +2440,6 @@ async def test_download_finalize_truncate_cancel_disposes_reopened_fd(
         real_ftruncate(fd, length)
 
     monkeypatch.setattr(os, "ftruncate", _staged_ftruncate)
-    monkeypatch.setattr(os, "close", _recording_close)
     manager = DownloadManager()
     remaining = len(_RESUME_BODY) - _RESUME_SPLIT
     session = _FakeSession(
@@ -2454,7 +2467,7 @@ async def test_download_finalize_truncate_cancel_disposes_reopened_fd(
 
     assert truncate_calls["count"] == 3
     # 重开即持有化：取消善后经 resume.fd 引用关闭重开 fd，句柄不随取消泄漏。
-    assert reopened_fd[0] in closed_fds
+    assert reopened_fd[0] in closed
     assert not list(tmp_path.glob("*.part"))
     assert not save_path.exists()
 

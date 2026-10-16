@@ -1123,20 +1123,15 @@ def _attach_streamable_http_middleware(
     app: Any,
     host: str,
     auth_token: str,
-    max_body_size: int | None = None,
     web_enabled: bool = False,
-    allowed_origins: tuple[str, ...] | None = None,
-    large_body_admission_concurrency: int | None = None,
-    body_read_timeout: int | None = None,
 ) -> None:
     """向 streamable-http app 装配中间件栈，重复装配时跳过以保证幂等。
 
-    max_body_size、allowed_origins 与大请求体准入两参数未显式传入时回退读取活动配置；
-    生产调用方已取过该配置时显式传入，避免同一配置重复解析。
+    中间件旋钮与 web Host 守卫白名单均自单次读取的活动配置派生。
     任何令牌部署均豁免端点发现重定向路径，客户端免令牌即可发现实际端点；
     web_enabled 开启时并入 Web 静态页面免鉴权路径。豁免表仅传入 Bearer 层；
     大请求体准入层不识豁免表，豁免路径的合法 GET/HEAD 形态由无体方法免监督直通覆盖，
-    大请求体准入阈值自 max_body_size 经 _large_body_admission_threshold 派生。
+    大请求体准入阈值自请求体上限经 _large_body_admission_threshold 派生。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
     HostGuard（回环绑定为 LoopbackHostGuard，web 开启的非回环绑定为 AppHostGuard）
@@ -1153,22 +1148,11 @@ def _attach_streamable_http_middleware(
     if _middleware_attached(app):
         logger.warning("streamable-http 中间件已装配，跳过重复装配以避免中间件栈叠加")
         return
-    if (
-        allowed_origins is None
-        or max_body_size is None
-        or large_body_admission_concurrency is None
-        or body_read_timeout is None
-    ):
-        # 可选参数的配置回退共用单一局部：全量显式传入的生产装配不读取活动配置。
-        config = get_active_config()
-        if allowed_origins is None:
-            allowed_origins = config.http_allowed_origins or ()
-        if max_body_size is None:
-            max_body_size = config.http_max_body_size
-        if large_body_admission_concurrency is None:
-            large_body_admission_concurrency = config.large_body_admission_concurrency
-        if body_read_timeout is None:
-            body_read_timeout = config.body_read_timeout
+    config = get_active_config()
+    max_body_size = config.http_max_body_size
+    allowed_origins = config.http_allowed_origins or ()
+    large_body_admission_concurrency = config.large_body_admission_concurrency
+    body_read_timeout = config.body_read_timeout
     # Bearer 部署的豁免表单点求值：恒豁免端点发现，Web 静态豁免仅 web 开启时并入；
     # 无令牌部署无 Bearer 层，不豁免任何路径。
     exempt_exact: frozenset[str] = frozenset()
@@ -1228,7 +1212,7 @@ def _attach_streamable_http_middleware(
         guard_hosts = _loopback_bind_guard_hosts(host)
         app.add_middleware(_LoopbackHostGuardMiddleware, allowed_hosts=guard_hosts)
     elif web_enabled:
-        allowlist = _web_app_host_allowlist(host, get_active_config().http_allowed_hosts or ())
+        allowlist = _web_app_host_allowlist(host, config.http_allowed_hosts or ())
         if allowlist:
             app.add_middleware(_AppHostGuardMiddleware, allowed_hosts=allowlist)
 
@@ -1389,8 +1373,6 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
 
     config = get_active_config()
     transport_security = _transport_security_for_host(host)
-    max_body_size = config.http_max_body_size
-    allowed_origins = config.http_allowed_origins
     _register_well_known_mcp_route()
     if web_enabled:
         from ..webapp import register_web_routes
@@ -1401,7 +1383,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
         stateless_http=stateless,
         streamable_http_path=MCP_ENDPOINT_PATH,
         transport_security=transport_security,
-        max_request_body_size=max_body_size,
+        max_request_body_size=config.http_max_body_size,
     )
     if not _is_dns_rebinding_protected_host(host):
         if transport_security.enable_dns_rebinding_protection:
@@ -1424,16 +1406,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
         from ..webapp import mount_web_static
 
         mount_web_static(app)
-    _attach_streamable_http_middleware(
-        app,
-        host,
-        auth_token,
-        max_body_size=max_body_size,
-        web_enabled=web_enabled,
-        allowed_origins=allowed_origins,
-        large_body_admission_concurrency=config.large_body_admission_concurrency,
-        body_read_timeout=config.body_read_timeout,
-    )
+    _attach_streamable_http_middleware(app, host, auth_token, web_enabled=web_enabled)
     return app
 
 

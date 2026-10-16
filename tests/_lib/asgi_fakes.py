@@ -95,21 +95,18 @@ def _assemble_streamable_http_app(
     json_response: bool = False,
     body_limit: int = _MAX_BODY,
     config: SeedreamConfig | None = None,
-    attach_max_body_size: int | None = None,
     web_enabled: bool = False,
 ) -> Any:
     """按生产装配序构建 streamable-http 栈，供 build_transport_app 与 build_web_app 共享。
 
     中间件经 transport._attach_streamable_http_middleware 复用生产装配且顺序同源，
     transport_security 按绑定地址派生后与其余传输参数直传 streamable_http_app。
-    差异参数默认值归属：host、stateless、json_response、body_limit 与
-    attach_max_body_size=None 由本核心持有；build_transport_app 额外安装 config 并
-    转发 host、stateless、json_response 与 body_limit；build_web_app 显式传
-    attach_max_body_size 并转发 host 与 web_enabled，config 与其余参数沿用核心默认。
-    config 非 None 时先安装为活动配置再派生 transport_security；端点发现重定向路由
-    先于 streamable_http_app 注册；attach_max_body_size 为 None 时中间件回退读取
-    活动配置；web_enabled 驱动 Web 路由注册、静态挂载与中间件参数，webapp 模块
-    保持按需导入。
+    差异参数默认值归属：host、stateless、json_response、body_limit 与 config=None
+    由本核心持有；build_transport_app 额外安装 config 并转发 host、stateless、
+    json_response 与 body_limit；build_web_app 转发 host 与 web_enabled，config 与
+    其余参数沿用核心默认。config 非 None 时先安装为活动配置再派生 transport_security；
+    端点发现重定向路由先于 streamable_http_app 注册；中间件旋钮自活动配置取值；
+    web_enabled 驱动 Web 路由注册、静态挂载与中间件参数，webapp 模块保持按需导入。
     """
     if config is not None:
         set_active_config(config)
@@ -130,9 +127,7 @@ def _assemble_streamable_http_app(
         from seedream_mcp.webapp import mount_web_static
 
         mount_web_static(app)
-    _attach_streamable_http_middleware(
-        app, host, auth_token, max_body_size=attach_max_body_size, web_enabled=web_enabled
-    )
+    _attach_streamable_http_middleware(app, host, auth_token, web_enabled=web_enabled)
     return app
 
 

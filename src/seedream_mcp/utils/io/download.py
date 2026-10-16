@@ -168,12 +168,13 @@ def _rewrite_part_file(path: Path, data: bytes | bytearray) -> None:
 
     截断失败文件未动、截断后写段的永久文件系统 errno 均原样上抛（瞬时保留
     状态重试、永久终态）；写段其余失败自截断起文件已毁，包装为可重试错误由
-    调用方作废续传状态退回全量重下；打开段 PermissionError 文件未动，原样
-    上抛由调用方保留状态。
+    调用方先原地重写一次；打开与截断段持锁 PermissionError 文件未动，原样
+    上抛，首次调用处保留状态转可重试，重写调用处作废状态：可重试形态重试
+    退回全量重下，持锁形态经重试循环归权限终态。
     """
     fd = open_no_follow_write_fd(path)
     try:
-        # 截断失败文件未动：原样上抛，持锁由调用方转可重试，其余走重试循环 errno 分类。
+        # 截断失败文件未动：原样上抛，持锁处置随调用点，其余走重试循环 errno 分类。
         os.ftruncate(fd, 0)
         try:
             _write_all(fd, data)
@@ -1300,8 +1301,10 @@ class DownloadManager:
             DownloadError: 字节签名校验失败（含解码回退不受理）或续传临时文件缺失。
             RetryableDownloadError: 重开的临时文件已不存在（作废状态退回全量重下），
                 重开、终局截齐、终局替换、解码回退读取与写回打开、截断段遭瞬时
-                持锁（保留状态，下一趟重试），或解码回退写回自截断起失败（作废
-                状态退回全量重下）。
+                持锁（保留状态，下一趟重试），或解码回退写回自截断起失败且原地
+                重写再失败（作废状态退回全量重下）。
+            PermissionError: 解码回退原地重写再失败的持锁形态（作废状态，经重试
+                循环归权限终态）。
         """
         path = resume.path
         if path is None:
@@ -1391,7 +1394,9 @@ class DownloadManager:
         Raises:
             RetryableDownloadError: 解码读取与写回打开、截断段遭瞬时持锁（文件
                 未动，保留原始状态，下一趟重走解码与终局），或写回自截断起失败
-                （临时文件已毁，作废续传状态退回全量重下自愈）。
+                且原地重写再失败（.part 状态未知，作废续传状态退回全量重下自愈）。
+            PermissionError: 原地重写再失败的持锁形态（作废状态，经重试循环归
+                权限终态）。
         """
         path = resume.path
         if path is None or not _is_compression_container_head(resume.head_bytes):
@@ -1421,10 +1426,19 @@ class DownloadManager:
             # 打开或截断段持锁文件未动：保留原始状态，下一趟重走解码与终局。
             _raise_transient_file_lock("解码回退写回", exc)
         except RetryableDownloadError:
-            # 自截断起文件已毁：作废完成态，重试退回全量重下自愈。
-            resume.restart()
-            resume.expected_total = None
-            raise
+            # 自截断起失败但 decoded 在内存仍完整：原地重写一次，免作废状态整趟重下。
+            try:
+                await await_settled_op(
+                    asyncio.to_thread(_rewrite_part_file, path, decoded),
+                    absorb_all_cancels=True,
+                )
+            except (PermissionError, RetryableDownloadError):
+                # 重写再失败时 .part 状态未知（持锁同按已毁处置）：作废完成态，
+                # RetryableDownloadError 重试退回全量重下自愈，PermissionError
+                # 经重试循环归权限终态。
+                resume.restart()
+                resume.expected_total = None
+                raise
         resume.head_bytes = head
         resume.offset = len(decoded)
         resume.expected_total = len(decoded)

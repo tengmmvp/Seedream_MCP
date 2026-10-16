@@ -357,25 +357,19 @@ def test_open_regular_read_fstat_failure_closes_fd_and_raises(
     path = tmp_path / "plain.bin"
     path.write_bytes(b"data")
     opened: list[int] = []
-    closed: list[int] = []
     real_open = os.open
-    real_close = os.close
 
     def _recording_open(name: str, flags: int, *args: Any, **kwargs: Any) -> int:
         fd = real_open(name, flags, *args, **kwargs)
         opened.append(fd)
         return fd
 
-    def _recording_close(fd: int) -> None:
-        closed.append(fd)
-        real_close(fd)
-
     def _failing_fstat(fd: int) -> os.stat_result:
         del fd
         raise OSError("simulated ESTALE")
 
     monkeypatch.setattr(os, "open", _recording_open)
-    monkeypatch.setattr(os, "close", _recording_close)
+    closed = _install_close_counter(monkeypatch)
     monkeypatch.setattr(os, "fstat", _failing_fstat)
 
     with pytest.raises(OSError, match="simulated ESTALE"):
@@ -806,14 +800,7 @@ def test_atomic_replace_from_fd_sync_writer_failure_cleans_temp_and_closes_fd_on
 ) -> None:
     """同步 writer 抛出：随机临时文件被清理、fd 由骨架唯一关闭一次、原始异常上抛。"""
     final = tmp_path / "out.bin"
-    closed: list[int] = []
-    real_close = os.close
-
-    def _tracking_close(fd: int) -> None:
-        closed.append(fd)
-        real_close(fd)
-
-    monkeypatch.setattr(os, "close", _tracking_close)
+    closed = _install_close_counter(monkeypatch)
 
     def bad_writer(fd: int) -> None:
         raise OSError("write boom")
