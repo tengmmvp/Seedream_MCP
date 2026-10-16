@@ -698,7 +698,7 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
 
 ```bash
 # 設定來源
---config-file TEXT                                 # .env 設定檔路徑；指定後不再讀取專案根與目前目錄的 .env
+--config-file TEXT                                 # .env 設定檔路徑，留空視同未指定；指定後不再讀取專案根與目前目錄的 .env
 
 # 必要設定
 --api-key TEXT                                     # API 金鑰（推薦使用環境變數 ARK_API_KEY；命令列傳入會留在行程清單與 shell 歷史中）

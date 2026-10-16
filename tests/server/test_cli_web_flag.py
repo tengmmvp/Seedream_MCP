@@ -1,8 +1,9 @@
 """Web 操作台开关的 CLI 旗标与配置优先级测试。
 
 --web/--no-web 互斥组经 argparse 解析，配置优先级为 CLI 覆盖 > env 文件 > 默认关闭，
-与 watermark 旗标同构；未传旗标时 args.web 为 None 表示不覆盖任何来源；
-web 开启而传输非 streamable-http 时 cli_main 启动告警的触发与抑制亦在此守护。
+与 watermark 旗标同构，镜像的 watermark CLI 优先级用例亦在此。未传旗标时
+args.web 为 None 表示不覆盖任何来源。web 开启而传输非 streamable-http 时 cli_main
+启动告警的触发与抑制亦在此守护。
 """
 
 from __future__ import annotations
@@ -103,6 +104,31 @@ def test_cli_web_overrides_env_file_false(tmp_path: Path, monkeypatch: pytest.Mo
     config = cli.build_config_from_args(args)
 
     assert config.web_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("cli_watermark", "env_value", "expected"),
+    [(False, "true", False), (True, "false", True)],
+)
+def test_cli_watermark_overrides_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cli_watermark: bool,
+    env_value: str,
+    expected: bool,
+) -> None:
+    """CLI 水印旗标两个方向均覆盖 env 文件的水印设置。"""
+    monkeypatch.delenv("SEEDREAM_DEFAULT_WATERMARK", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_DEFAULT_WATERMARK={env_value}\n")
+
+    args = make_run_args("stdio")
+    args.watermark = cli_watermark
+    args.config_file = str(env_file)
+
+    config = cli.build_config_from_args(args)
+
+    assert config.default_watermark is expected
 
 
 def test_cli_main_warns_when_web_enabled_with_stdio_transport(

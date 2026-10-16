@@ -20,7 +20,8 @@ from ..utils.model.capabilities import MODEL_ALIASES
 # 级别取 loguru 注册名，部署风险类告警用 ERROR，高日志级别部署下不被过滤。
 _BUILD_WARNINGS = EarlyMessageBuffer()
 
-# 项目根 .env 层仅源码检出部署存在，pip 安装部署该层空转，CWD .env 层仍生效。
+# 项目根 .env 层仅源码检出部署存在。pip 安装部署该层落到 site-packages 上级，
+# 正常无 .env 等价空转，CWD .env 层仍生效。
 # src 布局下仓库根在 config 包之上三级。
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
@@ -166,8 +167,8 @@ def parse_int(value: object) -> int:
 def _read_env_values(env_file: str | None) -> dict[str, str]:
     """读取 .env 文件键值为字典，不写入进程环境变量。
 
-    显式传入 env_file 时只读取该文件；未提供时按项目根 .env 与当前工作目录
-    .env 合并读取，当前工作目录覆盖项目根。
+    显式传入 env_file 时只读取该文件，空白串视同未提供；未提供时按项目根
+    .env 与当前工作目录 .env 合并读取，当前工作目录覆盖项目根。
     """
 
     def _load_single_env_file(path: Path) -> dict[str, str]:
@@ -188,37 +189,40 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
         except (OSError, RuntimeError) as exc:
             raise SeedreamConfigError(f"配置文件不可读: {raw} -> {exc}") from exc
 
-    if env_file:
+    if isinstance(env_file, str) and _value_is_set(env_file):
         env_path = _prepare_env_path(env_file)
         if not env_path.is_file():
             raise SeedreamConfigError(f"配置文件不存在: {env_path}")
         return _load_single_env_file(env_path)
 
-    merged_values: dict[str, str] = {}
+    default_values: dict[str, str] = {}
+    runtime_values: dict[str, str] = {}
     default_env_path = _prepare_env_path(DEFAULT_ENV_FILE)
     runtime_env_path = _prepare_env_path(".env")
 
     if default_env_path.is_file():
-        merged_values.update(_load_single_env_file(default_env_path))
+        default_values = _load_single_env_file(default_env_path)
 
     if runtime_env_path.is_file() and runtime_env_path != default_env_path:
-        merged_values.update(_load_single_env_file(runtime_env_path))
-        if default_env_path.is_file():
-            _BUILD_WARNINGS.append(
-                "ERROR",
-                f"当前工作目录 .env（{runtime_env_path}）覆盖了项目根 .env"
-                f"（{default_env_path}）的配置值；"
-                "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
-            )
+        runtime_values = _load_single_env_file(runtime_env_path)
+        if default_values:
+            # 同名键才构成真实覆盖，键集不相交的并存不告。
+            if runtime_values.keys() & default_values:
+                _BUILD_WARNINGS.append(
+                    "ERROR",
+                    f"当前工作目录 .env（{runtime_env_path}）覆盖了项目根 .env"
+                    f"（{default_env_path}）的配置值；"
+                    "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
+                )
         else:
-            # 无项目根 .env 时 CWD .env 是唯一来源，属隐式加载。
+            # 项目根 .env 缺失或无有效键时 CWD .env 是唯一来源，属隐式加载。
             _BUILD_WARNINGS.append(
                 "WARNING",
                 f"已加载当前工作目录 .env（{runtime_env_path}）；"
                 "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
             )
 
-    return merged_values
+    return {**default_values, **runtime_values}
 
 
 def _value_is_set(value: object) -> bool:
@@ -383,7 +387,7 @@ _ConfigValuePicker = Callable[[Mapping[str, object], str, str, Mapping[str, str]
 
 # 配置字段的声明式取值表：字段到取值辅助与 override 键名覆盖的映射，覆盖为 None 时
 # override 键名即字段名；model_id、default_watermark 与 web_enabled 的 override 键名是 CLI 简称的
-# 有意命名间接映射，别名展开统一由 validate 完成，构建侧不重复规范化。构建循环遍历
+# 有意命名间接映射，模型别名展开统一由 validate 完成，构建侧不重复规范化。构建循环遍历
 # _FIELD_ENV_MAP 并索引本表，新增 env metadata 字段漏登记时以 KeyError 在构建期暴露。
 _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "base_url": (_pick_str, None),
@@ -426,7 +430,19 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "request_state_secret_keys": (_pick_request_state_key_bytes, None),
 }
 
-# 合法的 overrides 键集合：字段名、CLI 简称别名与 api_key，未知键在构建期告警。
+# 合法的 overrides 键集合：各字段的 override 键名与 api_key，未知键在构建期告警。
+# 有别名的字段以别名为键，字段名形态经 _normalize_field_name_overrides 归一后同样生效。
 _KNOWN_OVERRIDE_KEYS = frozenset(
-    {"api_key", *_FIELD_PICKERS} | {alias for _, alias in _FIELD_PICKERS.values() if alias}
+    {"api_key"} | {alias or field_name for field_name, (_, alias) in _FIELD_PICKERS.items()}
 )
+
+
+def _normalize_field_name_overrides(overrides: Mapping[str, object]) -> dict[str, object]:
+    """把别名字段的字段名形态 override 归一到别名键，别名显式值优先。"""
+    normalized = dict(overrides)
+    for field_name, (_, alias) in _FIELD_PICKERS.items():
+        if alias and field_name in normalized:
+            field_value = normalized.pop(field_name)
+            if not _value_is_set(normalized.get(alias)):
+                normalized[alias] = field_value
+    return normalized

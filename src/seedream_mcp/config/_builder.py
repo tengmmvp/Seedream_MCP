@@ -26,6 +26,7 @@ from .sources import (
     _FIELD_PICKERS,
     _KNOWN_OVERRIDE_KEYS,
     _decode_request_state_key_entries,
+    _normalize_field_name_overrides,
     _pick_config_value,
     _read_env_values,
     _split_optional_str_tuple,
@@ -56,14 +57,18 @@ def build_config_from_sources(
 
     Args:
         overrides: 调用方显式覆盖值，CLI 参数为典型来源。
-        env_file: 可选 .env 文件路径，未提供时先读项目根 .env 再读当前工作目录
-            .env，后者覆盖前者。
+        env_file: 可选 .env 文件路径，空串或纯空白视同未提供；未提供时先读项目根
+            .env 再读当前工作目录 .env，后者覆盖前者。
 
     Raises:
         SeedreamConfigError: 配置文件不可读、缺少 API 密钥或配置项校验失败。
     """
     with _config_build_lock:
-        return _build_config_from_sources_unlocked(overrides, env_file)
+        _build_in_progress.active = True
+        try:
+            return _build_config_from_sources_unlocked(overrides, env_file)
+        finally:
+            _build_in_progress.active = False
 
 
 def _build_config_from_sources_unlocked(
@@ -85,8 +90,8 @@ def _build_config_unlocked_body(
     env_file: str | None,
 ) -> SeedreamConfig:
     """构建配置对象的主体，告警回滚由调用方负责。"""
-    override_values = dict(overrides or {})
-    unknown_keys = sorted(set(override_values) - _KNOWN_OVERRIDE_KEYS)
+    override_values = _normalize_field_name_overrides(overrides or {})
+    unknown_keys = sorted(map(str, override_values.keys() - _KNOWN_OVERRIDE_KEYS))
     if unknown_keys:
         _BUILD_WARNINGS.append(
             "WARNING",
@@ -121,8 +126,11 @@ def _build_config_unlocked_body(
 
 # 配置构建串行化锁：保护 .env 读取与配置构建，避免并发构建竞态。
 _config_build_lock = threading.Lock()
-# 全局配置惰性初始化锁；与 _config_build_lock 分离，避免嵌套获取造成死锁。
+# 全局配置惰性初始化锁，与 _config_build_lock 分离，避免嵌套获取造成死锁。
 _global_config_lock = threading.Lock()
+# 构建进行中的线程本地标记，get_global_config 据此把构建期惰性构建转为配置错误，
+# 防重入构建锁的单线程死锁。
+_build_in_progress = threading.local()
 
 _global_config: SeedreamConfig | None = None
 # CLI 注入的活动配置，优先于 _global_config。
@@ -130,10 +138,17 @@ _active_config: SeedreamConfig | None = None
 
 
 def get_global_config() -> SeedreamConfig:
-    """获取全局配置实例，首次调用时惰性构建并经双检锁缓存。"""
+    """获取全局配置实例，首次调用时惰性构建并经双检锁缓存。
+
+    Raises:
+        SeedreamConfigError: 配置构建进行中时触发惰性构建被拒绝，防重入死锁。
+    """
     global _global_config
     if _global_config is not None:
         return _global_config
+    if getattr(_build_in_progress, "active", False):
+        # 构建期惰性构建会重入构建锁死锁，转配置错误由调用方回退。
+        raise SeedreamConfigError("配置构建进行中，不允许触发全局配置惰性构建")
     with _global_config_lock:
         if _global_config is None:
             _global_config = SeedreamConfig.from_env()

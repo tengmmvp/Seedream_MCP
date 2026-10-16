@@ -83,7 +83,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # 配置来源
     parser.add_argument(
         "--config-file",
-        help=".env 配置文件路径；指定后不再读取项目根与当前目录的 .env",
+        help=".env 配置文件路径，留空视同未指定；指定后不再读取项目根与当前目录的 .env",
     )
 
     # 必需配置

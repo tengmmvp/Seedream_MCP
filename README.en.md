@@ -698,7 +698,7 @@ The server provides the following MCP prompt templates to generate text-to-image
 
 ```bash
 # Configuration source
---config-file TEXT                                 # .env config file path; when given, the .env files in the project root and current directory are no longer read
+--config-file TEXT                                 # .env config file path, a blank value is treated as unspecified; when given, the .env files in the project root and current directory are no longer read
 
 # Required
 --api-key TEXT                                     # API key (ARK_API_KEY env var recommended; a CLI value stays in the process list and shell history)

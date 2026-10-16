@@ -81,6 +81,42 @@ def test_build_config_priority_prefers_overrides(
     assert config.model_id == "doubao-seedream-4-0-250828"
 
 
+def test_build_config_field_name_overrides_match_alias_forms() -> None:
+    """别名字段的字段名形态 override 归一到别名键生效，两形态并传时别名优先。"""
+    config = build_config_from_sources(
+        overrides={
+            "api_key": "k",
+            "model_id": "doubao-seedream-4.0",
+            "default_watermark": True,
+            "web_enabled": True,
+        }
+    )
+
+    assert config.model_id == "doubao-seedream-4-0-250828"
+    assert config.default_watermark is True
+    assert config.web_enabled is True
+
+    both = build_config_from_sources(overrides={"api_key": "k", "web": False, "web_enabled": True})
+
+    assert both.web_enabled is False
+
+    # 别名值为 None 时不算显式值，字段名形态的取值生效。
+    unset_alias = build_config_from_sources(
+        overrides={"api_key": "k", "web": None, "web_enabled": True}
+    )
+
+    assert unset_alias.web_enabled is True
+
+
+def test_alias_override_keys_disjoint_from_field_names() -> None:
+    """别名键与字段名及 api_key 互不相交且互不重复，一键名只驱动一个字段。"""
+    aliases = [alias for _, alias in _FIELD_PICKERS.values() if alias]
+
+    assert set(aliases) & set(_FIELD_PICKERS) == set()
+    assert "api_key" not in aliases
+    assert len(aliases) == len(set(aliases))
+
+
 def test_build_config_priority_prefers_system_env_over_env_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -92,6 +128,20 @@ def test_build_config_priority_prefers_system_env_over_env_file(
     config = build_config_from_sources(env_file=str(env_file))
 
     assert config.api_key == "env_key"
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_build_config_blank_override_and_env_fall_through_to_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """空白串的 override 与系统环境变量均按未设置穿透到 env 文件层。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
+    monkeypatch.setenv("SEEDREAM_MODEL_ID", blank)
+
+    config = build_config_from_sources(overrides={"model": blank}, env_file=str(env_file))
+
+    assert config.model_id == "doubao-seedream-4-0-250828"
 
 
 def test_build_config_reads_seedream_log_level_binding(
@@ -149,6 +199,29 @@ def test_build_config_raises_when_explicit_env_file_missing(tmp_path: Path) -> N
         build_config_from_sources(env_file=str(missing_env))
 
 
+def test_build_config_explicit_env_file_excludes_implicit_layers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式 env_file 只读该文件：项目根与当前目录 .env 的键不并入，也无隐式加载告警。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", tmp_path / "default.env")
+    _write_env_file(tmp_path / "default.env", "SEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
+    _write_env_file(tmp_path / ".env", "SEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
+    explicit = tmp_path / "explicit.env"
+    _write_env_file(explicit, "ARK_API_KEY=file_key\n")
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="WARNING"):
+        config = build_config_from_sources(env_file=str(explicit))
+        drain_pending_build_warnings()
+
+    assert config.api_key == "file_key"
+    assert config.model_id == "doubao-seedream-5-0-260128"
+    assert not any("当前工作目录 .env" in record for record in records)
+
+
 def test_build_config_reads_cwd_env_when_env_file_not_provided(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -194,7 +267,7 @@ def test_build_config_falls_back_to_default_env_when_cwd_env_missing(
 def test_build_config_merges_default_and_cwd_env_when_cwd_missing_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """cwd .env 缺键时由默认 env 文件补齐，合并后生效。"""
+    """cwd .env 缺键时由默认 env 文件补齐，合并后生效。两层并存输出 ERROR 级覆盖告警。"""
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
     monkeypatch.chdir(runtime_dir)
@@ -208,10 +281,92 @@ def test_build_config_merges_default_and_cwd_env_when_cwd_missing_keys(
 
     _write_env_file(runtime_dir / ".env", "SEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
 
-    config = build_config_from_sources()
+    records: list[str] = []
+    with capture_loguru_messages(records, level="ERROR"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
 
     assert config.api_key == "default_key"
     assert config.model_id == "doubao-seedream-4-0-250828"
+    # CWD .env 覆盖项目根属部署风险，告警锁定为 ERROR 级。
+    assert any("覆盖了项目根 .env" in record for record in records)
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_build_config_blank_env_file_falls_back_to_implicit_layers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """空串与纯空白的 env_file 视同未提供，回落默认双文件合并。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
+    _write_env_file(tmp_path / ".env", "ARK_API_KEY=cwd_key\n")
+
+    config = build_config_from_sources(env_file=blank)
+
+    assert config.api_key == "cwd_key"
+
+
+def test_build_config_disjoint_env_layers_coexist_without_override_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """键集不相交的两层 .env 并存合并生效，不发覆盖告警。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_LOG_LEVEL", raising=False)
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "ARK_API_KEY=default_key\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+    _write_env_file(runtime_dir / ".env", "SEEDREAM_LOG_LEVEL=DEBUG\n")
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="ERROR"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
+
+    assert config.api_key == "default_key"
+    assert config.log_level == "DEBUG"
+    assert not any("覆盖了项目根" in record for record in records)
+
+
+def test_build_config_comment_only_default_env_keeps_implicit_load_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """项目根 .env 仅有注释时无有效键，CWD .env 的隐式加载告警照常发出。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "# 仅注释与空行\n\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+    _write_env_file(tmp_path / ".env", "ARK_API_KEY=cwd_key\n")
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="WARNING"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
+
+    assert config.api_key == "cwd_key"
+    assert any("已加载当前工作目录 .env" in record for record in records)
+
+
+def test_build_config_same_path_loaded_once_without_override_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """项目根与当前目录指向同一 .env 时单次加载，不发覆盖或隐式加载告警。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", tmp_path / ".env")
+    _write_env_file(tmp_path / ".env", "ARK_API_KEY=same_key\n")
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="WARNING"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
+
+    assert config.api_key == "same_key"
+    assert not any("当前工作目录 .env" in record for record in records)
 
 
 def test_build_config_does_not_inject_dotenv_to_os_environ(
@@ -749,6 +904,21 @@ def test_build_config_none_overrides_fall_through_to_defaults(
     assert config.model_id == "doubao-seedream-5-0-260128"
 
 
+@pytest.mark.parametrize(
+    ("watermark_override", "env_value", "expected"),
+    [(False, "true", False), (True, "false", True)],
+)
+def test_build_config_watermark_alias_overrides_env_var(
+    monkeypatch: pytest.MonkeyPatch, watermark_override: bool, env_value: str, expected: bool
+) -> None:
+    """watermark 别名的 True/False 覆盖均优先于 SEEDREAM_DEFAULT_WATERMARK 环境变量。"""
+    monkeypatch.setenv("SEEDREAM_DEFAULT_WATERMARK", env_value)
+
+    config = build_config_from_sources(overrides={"api_key": "k", "watermark": watermark_override})
+
+    assert config.default_watermark is expected
+
+
 def test_build_config_loads_image_prepare_concurrency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -921,7 +1091,7 @@ def test_seedream_config_rejects_invalid_validate_branches(
     """validate() 各拒绝分支经构造期校验拒绝非法配置。
 
     覆盖占位符密钥、非法协议 base_url、空 model_id、非正 timeout/api_timeout、
-    max_retries<1、非法 log_level、负 auto_save_max_retries。
+    负 max_retries、非法 log_level、负 auto_save_max_retries。
     """
     # api_key 未在 kwargs 中时补充合法值，占位符用例已在 kwargs 中时不覆盖
     full_kwargs = {"api_key": "k", **kwargs} if "api_key" not in kwargs else kwargs
@@ -1773,6 +1943,31 @@ def test_build_config_concurrent_builds_succeed_and_agree(
     assert all(config == first for config in configs)
 
 
+def test_get_global_config_builds_exactly_once_under_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全局配置双检锁并发首建恰一次，全部调用共享同一实例且二次调用不重建。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    sentinel = SeedreamConfig(api_key="k")
+    calls = {"count": 0}
+
+    def _counting_from_env() -> SeedreamConfig:
+        calls["count"] += 1
+        return sentinel
+
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setattr(SeedreamConfig, "from_env", _counting_from_env)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _: config_module.get_global_config(), range(16)))
+
+    assert calls["count"] == 1
+    assert all(config is sentinel for config in results)
+    assert config_module.get_global_config() is sentinel
+    assert calls["count"] == 1
+
+
 def test_failed_build_rolls_back_pending_warnings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1802,6 +1997,54 @@ def test_pool_depth_provider_supplies_generate_and_prepare_concurrency(
     monkeypatch.setattr(config_module, "_active_config", config)
 
     assert _active_pool_concurrency() == (7, 4)
+
+
+def test_env_location_provider_falls_back_to_env_var_during_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """构建期位置提供者经配置错误回退环境变量，不消费惰性构建的配置。"""
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", "/build-time-ws")
+    monkeypatch.setattr(config_module._build_in_progress, "active", True, raising=False)
+
+    def _lazy_built() -> SeedreamConfig:
+        return SeedreamConfig(api_key="k", workspace_root="/lazy-built-ws")
+
+    monkeypatch.setattr(SeedreamConfig, "from_env", _lazy_built)
+
+    provider = config_module._make_env_location_provider(
+        "workspace_root", "SEEDREAM_WORKSPACE_ROOT"
+    )
+
+    assert provider() == "/build-time-ws"
+
+
+def test_pool_depth_provider_returns_none_during_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """构建期池深提供者经配置错误回退 None，不消费惰性构建的配置。"""
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setattr(config_module._build_in_progress, "active", True, raising=False)
+
+    def _lazy_built() -> SeedreamConfig:
+        return SeedreamConfig(api_key="k", generate_concurrency=9)
+
+    monkeypatch.setattr(SeedreamConfig, "from_env", _lazy_built)
+
+    assert config_module._active_pool_concurrency() is None
+
+
+def test_get_global_config_rejects_lazy_build_during_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """构建期触发全局配置惰性构建转为配置错误，不重入构建锁死锁。"""
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setattr(config_module._build_in_progress, "active", True, raising=False)
+
+    with pytest.raises(SeedreamConfigError, match="惰性构建"):
+        config_module.get_global_config()
 
 
 def test_pool_depth_provider_returns_none_when_config_build_fails(
