@@ -3,7 +3,8 @@
 fsync 计数透传供 test_io_file 与 test_auto_save_and_download 复用，os.close
 计数透传供 test_io_file、test_settle 与 test_download_image_branches 复用，realpath
 计数透传供 test_io_path_polish、test_resolve_base_dir 与
-test_browse_tool_result 复用，目录链接创建原语与其上的链接环、悬空链接构造
+test_browse_tool_result 复用，normcase_parts 计数透传供 test_find_images_directory
+与 test_browse_tool_result 复用，目录链接创建原语与其上的链接环、悬空链接构造
 供 test_io_path_polish、test_file_manager_fail_fast、test_resolve_base_dir
 与 test_file_manager_cleanup 复用，文件符号链接创建原语供 test_io_file 与
 test_skill_resources 复用，Path.replace 的单次失败与门控替身、
@@ -19,6 +20,7 @@ import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -64,6 +66,26 @@ def _install_counting_realpath(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(os.path, "realpath", _counting_realpath)
     return realpath_calls
+
+
+def _install_counting_normcase_parts(
+    monkeypatch: pytest.MonkeyPatch, owner: ModuleType, suffix: str | None = None
+) -> list[str]:
+    """monkeypatch owner.normcase_parts 为计数透传实现，返回调用路径记录列表。
+
+    suffix 非空时仅记录以该后缀结尾的路径，None 记录全量调用。
+    """
+    parts_calls: list[str] = []
+    real_parts: Callable[[Path], tuple[str, ...]] = owner.normcase_parts
+
+    def _counting_parts(path: Path) -> tuple[str, ...]:
+        path_str = str(path)
+        if suffix is None or path_str.endswith(suffix):
+            parts_calls.append(path_str)
+        return real_parts(path)
+
+    monkeypatch.setattr(owner, "normcase_parts", _counting_parts)
+    return parts_calls
 
 
 def _install_replace_fail_once(monkeypatch: pytest.MonkeyPatch) -> None:
