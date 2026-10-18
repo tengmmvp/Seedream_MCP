@@ -18,6 +18,7 @@ from seedream_mcp.utils.io.save import (
 )
 
 from _lib.png_fixtures import forged_png_bytes
+from _lib.time_fakes import _assert_due_flips_at_window_edges
 
 
 async def test_save_multiple_images_aggregates_partial_failure(
@@ -285,7 +286,7 @@ async def test_maybe_cleanup_throttle_shared_across_request_subdirs(
 async def test_cleanup_partial_failure_writes_backoff_timestamp(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """清理返回 errors 时写入短退避时间戳，下次保存按退避秒数重试。"""
+    """清理返回 errors 时改写为短退避到期，下次保存按退避秒数重试。"""
     import time
 
     default_root = tmp_path / "images"
@@ -301,16 +302,19 @@ async def test_cleanup_partial_failure_writes_backoff_timestamp(
     monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", failing_cleanup)
     auto_save_module._cleanup_last_run.clear()
 
+    t_before = time.monotonic()
     await manager._maybe_cleanup()
     await auto_save_module.drain_background_cleanup_tasks()
+    t_after = time.monotonic()
 
     assert len(auto_save_module._cleanup_last_run) == 1
     assert manager._cleanup_file_manager is not None
     base_key = str(manager._cleanup_file_manager.base_dir)
-    gap = time.time() - auto_save_module._cleanup_last_run.get(base_key)
-    interval = auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS
     backoff = auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
-    assert interval - backoff - 5 <= gap <= interval
+    # 退避到期时间戳形态为 now + backoff，经 due 在时钟窗口两端的翻转锁定写入公式。
+    _assert_due_flips_at_window_edges(
+        monkeypatch, auto_save_module._cleanup_last_run, base_key, t_before, t_after, backoff
+    )
 
 
 async def test_run_cleanup_in_background_skips_without_file_manager(tmp_path: Path) -> None:

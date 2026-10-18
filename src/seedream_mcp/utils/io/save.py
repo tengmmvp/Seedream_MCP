@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
-import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
@@ -41,10 +40,10 @@ logger = get_logger()
 
 # 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描。
 _CLEANUP_MIN_INTERVAL_SECONDS = 3600
-# 清理失败后的重试退避秒数：失败时写入该秒数形态的短退避时间戳，使失败重试有独立
+# 清理失败后的重试退避秒数：失败时把节流门改写为该秒数后的到期，使失败重试有独立
 # 于完整节流间隔的下限，高频保存下持续失败的清理不再每次调用都触发全目录扫描。
 _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS = 60
-# 按清理根目录记录最近清理时间，跨请求共享节流；不同清理根独立，互不抑制。
+# 按清理根目录节流清理，跨请求共享；不同清理根独立，互不抑制。
 # 注册表设容量上限，避免异常多变的清理根使键无界增长耗尽内存。
 _CLEANUP_LAST_RUN_MAX_ENTRIES = 16
 _cleanup_last_run: ThrottleRegistry[str] = ThrottleRegistry(_CLEANUP_LAST_RUN_MAX_ENTRIES)
@@ -359,28 +358,26 @@ class AutoSaveManager:
         清理入口不受清理策略开关影响：.part 孤儿清扫在 auto-save 启用时始终执行，
         两项清理策略均显式关闭的部署下遗留临时文件同样被回收；按天清理与配额驱逐
         仍按各自开关门控。清理边界不可用（_cleanup_file_manager 为 None）时整体
-        跳过。节流时间戳仅清理成功后保留，失败改写为短退避时间戳；锁内完成检查
-        与占位，并发请求不会同时进入清理。
+        跳过。节流门经注册表 due/mark 查门与推进，失败改写为短退避到期；锁内完成
+        检查与占位，并发请求不会同时进入清理。
         """
         if self._cleanup_file_manager is None:
             return
         cleanup_key = str(self._cleanup_file_manager.base_dir)
-        now = time.time()
         async with _cleanup_lock:
-            previous = _cleanup_last_run.get(cleanup_key, 0.0)
-            if now - previous < _CLEANUP_MIN_INTERVAL_SECONDS:
+            if not _cleanup_last_run.due(cleanup_key):
                 return
-            _cleanup_last_run.set(cleanup_key, now)
-        # 后台执行清理，不阻塞当前请求返回；失败写入短退避时间戳供下次重试。
+            _cleanup_last_run.mark(cleanup_key, _CLEANUP_MIN_INTERVAL_SECONDS)
+        # 后台执行清理，不阻塞当前请求返回；失败改写为短退避到期供下次重试。
         task = asyncio.create_task(self._run_cleanup_in_background(cleanup_key))
         _cleanup_tasks.add(task)
         task.add_done_callback(_cleanup_tasks.discard)
 
     async def _run_cleanup_in_background(self, cleanup_key: str) -> None:
-        """在后台线程执行清理，失败时写入短退避时间戳。
+        """在后台线程执行清理，失败时改写为短退避到期。
 
         run_cleanup_policies 宽捕获扫描级与逐项错误并收入 errors 而非上抛，逐项
-        失败同样写退避时间戳：目录可能仍超限，下次保存应按退避秒数重试而非等待
+        失败同样改写短退避到期：目录可能仍超限，下次保存应按退避秒数重试而非等待
         完整节流间隔。
         """
         if self._cleanup_file_manager is None:
@@ -401,18 +398,13 @@ class AutoSaveManager:
             logger.warning("自动清理部分失败: {}", errors)
 
     async def _apply_cleanup_failure_backoff(self, cleanup_key: str) -> None:
-        """清理失败后写入短退避时间戳，使失败重试有独立节流下限。
+        """清理失败后把节流门改写为短退避到期，使失败重试有独立节流下限。
 
-        时间戳取 now - interval + backoff 形态，下次调用须再等待退避秒数方可重试，
-        避免高频保存下持续失败的清理退化为每次保存都扫描目录。
+        下次调用须再等待退避秒数方可重试，避免高频保存下持续失败的清理退化为
+        每次保存都扫描目录。
         """
         async with _cleanup_lock:
-            _cleanup_last_run.set(
-                cleanup_key,
-                time.time()
-                - _CLEANUP_MIN_INTERVAL_SECONDS
-                + _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS,
-            )
+            _cleanup_last_run.mark(cleanup_key, _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS)
 
     def _extension_from_mime(self, mime: str | None) -> str:
         """根据 MIME 类型推断文件扩展名，未知类型回退默认图片扩展名。"""
