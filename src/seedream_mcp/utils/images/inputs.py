@@ -22,6 +22,7 @@ from ..core.executors import (
     should_offload_size,
 )
 from ..core.formats import encode_data_uri
+from ..core.inflight import TransientInflightError
 from ..core.logs import get_logger
 from ..io.path import (
     get_read_context,
@@ -77,6 +78,7 @@ async def prepare_image_input(image: str) -> str:
         SeedreamValidationError: 输入格式无效、路径越界、界内定位失败或本地文件
             读取失败等本地预处理失败；本阶段不触网，不参与 client 的 API 重试。
         SeedreamMCPError: CPU 卸载池已关闭，服务正在退出。
+        TransientInflightError: 链内共享在途瞬态标记携带者原样上抛，不经兜底重定型。
     """
     try:
         normalized = require_image_str(image).strip()
@@ -93,6 +95,9 @@ async def prepare_image_input(image: str) -> str:
     except CpuOffloadPoolClosedError as exc:
         # 池关闭只发生在退出清理窗口，归服务关闭而非输入缺陷。
         raise SeedreamMCPError("服务正在关闭，图像预处理已中止") from exc
+    except TransientInflightError:
+        # 标记携带者原样上抛：兜底重定型为校验错误会抹掉标记，令计划层瞬态安全网失效。
+        raise
     except Exception as e:
         # 兜底异常均来自本地预处理，归校验档。
         raise SeedreamValidationError(f"图像处理失败: {e}") from e

@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from seedream_mcp.utils.core.inflight import InflightTaskCancelledError
 from seedream_mcp.utils.io.save import AutoSaveManager
 from seedream_mcp.utils.io.download import (
     DownloadError,
@@ -25,6 +26,7 @@ from _lib.download_fakes import (
     _png_success_response,
 )
 from _lib.os_fakes import _install_fsync_counter
+from _lib.time_fakes import _assert_due_flips_at_window_edges
 
 # 1x1 透明 PNG 的 base64 编码
 _PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -194,15 +196,13 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
 async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """节流表容量驱逐按最近使用序进行，刚刷新时间戳的键不被移除。
+    """节流表容量驱逐按最近使用序进行，刚推进到期时间戳的键不被移除。
 
-    对已存在键赋值不移动条目位置：按插入位置驱逐会把链首刚刷新节流时间戳的
-    键连同时间戳一起移除，同目录的下一次保存视为从未节流而再次触发并发清理，
+    对已存在键 mark 不移动条目位置：按插入位置驱逐会把链首刚推进到期时间戳的
+    键整条移除，同目录的下一次保存视为从未节流而再次触发并发清理，
     正常清理被并发方的删除竞争误判为失败。写入后移到链尾保证驱逐的是真正
     最久未用的键。
     """
-    import time as time_module
-
     from seedream_mcp.utils.io import save as auto_save_module
 
     auto_save_module._cleanup_last_run.clear()
@@ -212,11 +212,11 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
         cleanup_calls.append(days)
         return {"deleted_files": 0, "deleted_size": 0, "errors": []}
 
-    # 预置过期键占满容量上限，目标目录居链首，写入不移动位置时恰为被逐出的链首键。
-    stale = time_module.time() - 7200
-    auto_save_module._cleanup_last_run.set(str(tmp_path), stale)
+    # 预置过期键占满容量上限，目标目录居链首，写入不移动位置时恰为被逐出的链首键；
+    # 负间隔产生与代码同基准（time.monotonic）的已过期时间戳。
+    auto_save_module._cleanup_last_run.mark(str(tmp_path), -7200.0)
     for i in range(auto_save_module._CLEANUP_LAST_RUN_MAX_ENTRIES - 1):
-        auto_save_module._cleanup_last_run.set(f"old-{i}", stale)
+        auto_save_module._cleanup_last_run.mark(f"old-{i}", -7200.0)
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
     assert manager._cleanup_file_manager is not None
@@ -225,7 +225,7 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
     await auto_save_module.drain_background_cleanup_tasks()
     assert cleanup_calls == [30]
 
-    # 超出容量上限的新键触发驱逐：被逐出的是最久未用的 old 键，目标目录的节流
+    # 超出容量上限的新键触发驱逐：被逐出的是最久未用的 old 键，目标目录的到期
     # 时间戳随最近使用序保留。
     other_dir = tmp_path / "other"
     other_dir.mkdir()
@@ -281,10 +281,10 @@ async def test_maybe_cleanup_sweeps_orphan_part_with_cleanup_disabled(
 async def test_maybe_cleanup_failure_backoff_throttles_retry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """清理失败时写入短退避时间戳，失败重试有独立于完整节流间隔的下限。
+    """清理失败时改写为短退避到期，失败重试有独立于完整节流间隔的下限。
 
     旧行为回滚到清理前旧值，失败后的首次调用立即再次触发全目录扫描，高频保存下
-    持续失败的清理退化为每次保存都扫描；退避时间戳使下次重试至少等待 60 秒。
+    持续失败的清理退化为每次保存都扫描；退避到期使下次重试至少等待 60 秒。
     """
     import time as time_module
 
@@ -302,25 +302,25 @@ async def test_maybe_cleanup_failure_backoff_throttles_retry(
         assert manager._cleanup_file_manager is not None
         monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", failing_cleanup)
 
-        # 首次清理失败：异常被吞，写入短退避时间戳
-        t_before = time_module.time()
+        # 首次清理失败：异常被吞，改写为短退避到期
+        t_before = time_module.monotonic()
         await manager._maybe_cleanup()
         await auto_save_module.drain_background_cleanup_tasks()
-        t_after = time_module.time()
+        t_after = time_module.monotonic()
         assert calls == [30]
 
-        # 紧接着的第二次调用被退避时间戳节流，不再立即重试
+        # 紧接着的第二次调用被退避到期节流，不再立即重试
         await manager._maybe_cleanup()
         await auto_save_module.drain_background_cleanup_tasks()
         assert calls == [30]
 
-        # 退避时间戳形态为 now - interval + backoff，以首次清理前后的时钟窗口锁定
-        # 写入公式，断言不依赖用例执行速度
-        interval = auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS
+        # 退避到期时间戳形态为 now + backoff，经 due 在首次清理前后时钟窗口两端的
+        # 翻转锁定写入公式，断言不依赖用例执行速度
         backoff = auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
         base_key = str(manager.file_manager.base_dir)
-        stored = auto_save_module._cleanup_last_run.get(base_key)
-        assert t_before - interval + backoff <= stored <= t_after - interval + backoff
+        _assert_due_flips_at_window_edges(
+            monkeypatch, auto_save_module._cleanup_last_run, base_key, t_before, t_after, backoff
+        )
     finally:
         await manager.close()
 
@@ -450,6 +450,99 @@ def test_validate_url_wrapper_returns_false_for_ftp_scheme() -> None:
     wrapper 特有的 bool 返回契约。
     """
     assert DownloadManager().validate_url("ftp://x/1.png") is False
+
+
+async def test_download_retries_after_shared_inflight_task_cancelled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """共享在途 task 被取消按可重试归类：退避后重试成功，不落编程错误终态跳过重试。"""
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    validation_calls = 0
+
+    async def _cancelled_then_pass(url: str) -> None:
+        nonlocal validation_calls
+        del url
+        validation_calls += 1
+        if validation_calls == 1:
+            raise InflightTaskCancelledError("共享在途任务已被取消")
+
+    monkeypatch.setattr(manager, "_validate_url_for_request", _cancelled_then_pass)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert validation_calls == 2
+    assert result["attempts"] == 2
+    assert save_path.exists()
+
+
+async def test_download_retries_after_transient_marker_beyond_cancellation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """非取消的瞬态标记携带者同样按可重试归类：分类器检查标记而非枚举类型。"""
+    from seedream_mcp.utils.core.inflight import TransientInflightError
+
+    class _ExternalTransientError(RuntimeError, TransientInflightError):
+        """非取消的标记携带者替身：源头混入标记声明瞬态。"""
+
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    validation_calls = 0
+
+    async def _transient_then_pass(url: str) -> None:
+        nonlocal validation_calls
+        del url
+        validation_calls += 1
+        if validation_calls == 1:
+            raise _ExternalTransientError("外部瞬态失败")
+
+    monkeypatch.setattr(manager, "_validate_url_for_request", _transient_then_pass)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert validation_calls == 2
+    assert result["attempts"] == 2
+    assert save_path.exists()
+
+
+async def test_download_transient_marker_on_oserror_wins_over_permanent_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """兼属 OSError 且携带永久 errno 的标记携带者按标记归类可重试，不被 OSError 永久分支拦为终态。"""
+    import errno
+
+    from seedream_mcp.utils.core.inflight import TransientInflightError
+
+    class _OSErrorTransientError(OSError, TransientInflightError):
+        """兼属 OSError 的标记携带者替身：锁定标记子句位于 OSError 分支之前。"""
+
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    validation_calls = 0
+
+    async def _enospc_transient_then_pass(url: str) -> None:
+        nonlocal validation_calls
+        del url
+        validation_calls += 1
+        if validation_calls == 1:
+            raise _OSErrorTransientError(errno.ENOSPC, "mock no space")
+
+    monkeypatch.setattr(manager, "_validate_url_for_request", _enospc_transient_then_pass)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert validation_calls == 2
+    assert result["attempts"] == 2
+    assert save_path.exists()
 
 
 # ==================== fsync 开关透传 ====================

@@ -47,6 +47,7 @@ from ..core.formats import (
     is_known_image_bytes,
 )
 from ..core.http_int import strict_http_int
+from ..core.inflight import TransientInflightError
 from ..core.logs import get_logger
 from ..core.loop_bound import LoopKeyedInflight
 from ..core.settle import await_settled_op
@@ -1552,10 +1553,11 @@ class DownloadManager:
     ) -> dict[str, Any]:
         """按线性退避重复下载尝试直至成功、终态失败或重试耗尽。
 
-        异常分类：可重试错误（HTTP 5xx/408/429、DNS 瞬时故障、瞬时 OSError、
-        网络类 ClientError）记录后落入退避重试；语义明确的终态错误、权限拒绝与
-        只读文件系统等永久错误、非下载语义的意外错误原样上抛不烧重试预算；跨
-        尝试累计预算耗尽即停止重试，防止重试按尝试数成倍放大单个保存任务的占用。
+        异常分类：可重试错误（HTTP 5xx/408/429、DNS 瞬时故障、共享在途瞬态
+        失败、瞬时 OSError、网络类 ClientError）记录后落入退避重试；语义明确的
+        终态错误、权限拒绝与只读文件系统等永久错误、非下载语义的意外错误原样
+        上抛不烧重试预算；跨尝试累计预算耗尽即停止重试，防止重试按尝试数成倍
+        放大单个保存任务的占用。
 
         Raises:
             DownloadError: 终态失败原样上抛，或重试耗尽后以最后一次可重试错误收尾。
@@ -1597,6 +1599,14 @@ class DownloadManager:
                     fsync=fsync,
                     resume=resume,
                 )
+
+            except TransientInflightError as e:
+                # 共享在途瞬态失败（标记混入，InflightTaskCancelledError 为其
+                # 携带者）：首位于各分类子句之前，携带者兼属 OSError 等其他
+                # 分支类型时仍按瞬态归类；记录后落入退避重试，下趟单飞重新
+                # 登记在途条目即可成功。
+                last_error = RetryableDownloadError(str(e))
+                logger.warning("共享在途瞬态失败 (尝试 {}): {}", attempt + 1, e)
 
             except RetryableDownloadError as e:
                 # HTTP 5xx、DNS 瞬时解析失败等瞬时故障，记录后落入退避重试。
@@ -1645,8 +1655,9 @@ class DownloadManager:
                 logger.opt(exception=True).warning("文件系统错误 (尝试 {}): {}", attempt + 1, e)
 
             except Exception as e:
-                # 编程 bug 等非可重试意外错误直接抛出不浪费退避等待；调用方 save.py 的
-                # _run_save_with_degradation 兜底 except Exception，降级返回原始 URL。
+                # 编程 bug 等非可重试意外错误直接抛出不浪费退避等待；调用方 save.py
+                # 的 _run_save_with_degradation 兜底 except Exception，降级返回原始
+                # URL。
                 logger.opt(exception=True).warning(
                     "下载非预期错误，不再重试 (尝试 {}): {}",
                     attempt + 1,

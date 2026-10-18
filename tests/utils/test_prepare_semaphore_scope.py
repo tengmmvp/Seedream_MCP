@@ -170,8 +170,8 @@ async def test_cancelled_creators_do_not_break_concurrency_limit(
 ) -> None:
     """串行取消创建者留下的脱缰 task 持续占用并发槽位，峰值并发不超过上限。
 
-    创建者被取消时 shield 使共享 task 继续运行；若槽位随之释放，峰值并发随取消
-    次数无界放大。
+    创建者被取消时仅自身 future 被取消，共享 task 继续运行；若槽位随之释放，峰值
+    并发随取消次数无界放大。
     """
     client = _make_client()
     preparer = client._image_preparer
@@ -195,7 +195,7 @@ async def test_cancelled_creators_do_not_break_concurrency_limit(
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # 串行发起 3 个请求并各自取消创建者：取消不传播到共享 task，3 个脱缰 task 继续在途。
-    # 以 _prepare_inflight 条目数判定创建者已挂起在 shield 等待点，避免依赖时序。
+    # 以 _prepare_inflight 条目数判定创建者已挂起在 consume 等待点，避免依赖时序。
     for index in range(3):
         creator = asyncio.ensure_future(
             preparer.prepare_image_input(f"https://example.com/cancelled-{index}.png")
@@ -293,7 +293,7 @@ async def test_orphan_task_survives_gc_and_returns_slot(
     except asyncio.CancelledError:
         pass
 
-    # 排空就绪队列兜底：shield 取消回调的闭包强持共享 task，正常时序下 await creator 已将其跑完。
+    # 排空就绪队列兜底：取消路径的槽位转移闭包强持共享 task，正常时序下 await creator 已将其跑完。
     for _ in range(4):
         await asyncio.sleep(0)
 
@@ -483,7 +483,7 @@ def test_stale_inflight_entries_isolated_across_event_loops(
             )
             while not preparer._prepare_inflight:
                 await asyncio.sleep(0)
-            # 取消并等待收尾：共享 task 经 shield 不受连带取消，继续挂在旧循环上。
+            # 取消并等待收尾：共享 task 不因创建者取消被连带取消，继续挂在旧循环上。
             creator.cancel()
             try:
                 await creator

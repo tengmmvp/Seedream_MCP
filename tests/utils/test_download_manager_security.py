@@ -130,7 +130,7 @@ async def test_resolve_failure_consumed_by_caller_not_armed(
 ) -> None:
     """在途解析抛错且由调用方正常消费时不登记「未取回异常」回调。
 
-    异常经 shield 交还调用方并由既有错误通道记录，无条件挂回调会使同一异常
+    异常经专属 future 交还调用方并由既有错误通道记录，无条件挂回调会使同一异常
     以「后台共享任务失败」重复入日志。
     """
     fired = _patch_unretrieved_callback(monkeypatch)

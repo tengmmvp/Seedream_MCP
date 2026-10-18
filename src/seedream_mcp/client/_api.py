@@ -22,7 +22,6 @@ from ..utils.core.errors import SeedreamValidationError
 from ..utils.core.logs import get_logger
 from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-    get_max_reference_images,
     layer_decomposition_presets_text,
     limited_reference_families_annotation,
     supported_family_display_names,
@@ -36,6 +35,7 @@ from ..utils.core.validators import (
     validate_common_generation_params,
     validate_layer_decomposition,
     validate_max_images,
+    validate_reference_image_count,
     validate_sequential_generation_support,
     validate_sequential_image_limit,
 )
@@ -92,7 +92,7 @@ class SeedreamClient(_ClientHTTPMixin):
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._timeout: httpx.Timeout | None = None
-        # 参考图预处理缓存子系统委托 ImagePreparer：LRU + single-flight 去重。
+        # 参考图预处理缓存子系统委托 ImagePreparer：LRU + 单飞去重。
         self._image_preparer = ImagePreparer(
             prepare_cache_max=self.config.prepare_cache_max,
             prepare_cache_max_bytes=self.config.prepare_cache_max_bytes,
@@ -386,9 +386,8 @@ class SeedreamClient(_ClientHTTPMixin):
             SeedreamNetworkError: 网络错误且重试次数耗尽。
             SeedreamConfigError: API 密钥为空或图像预处理配置缺失。
         """
-        max_reference = get_max_reference_images(self.config.model_id)
         image = self._normalize_image_sequence(
-            image, min_count=2, max_count=max_reference, field_name="image"
+            image, min_count=2, model_id=self.config.model_id, field_name="image"
         )
         (
             validated_prompt,
@@ -515,7 +514,7 @@ class SeedreamClient(_ClientHTTPMixin):
             reference_images = self._normalize_image_sequence(
                 image,
                 min_count=1,
-                max_count=get_max_reference_images(self.config.model_id),
+                model_id=self.config.model_id,
                 field_name="image",
             )
 
@@ -699,10 +698,10 @@ class SeedreamClient(_ClientHTTPMixin):
         images: str | Sequence[str] | None,
         *,
         min_count: int,
-        max_count: int,
+        model_id: str,
         field_name: str,
     ) -> list[str]:
-        """校验并规范化图片序列输入，str 视作单元素列表，逐项规范化并按 min_count 与 max_count 校验数量。"""
+        """校验并规范化图片序列输入，str 视作单元素列表，逐项规范化并按 min_count 与模型参考图上限校验数量。"""
         if not isinstance(images, (str, list, tuple)):
             raise SeedreamValidationError(
                 f"{field_name} 参数必须是字符串列表",
@@ -719,19 +718,13 @@ class SeedreamClient(_ClientHTTPMixin):
                 SeedreamClient._normalize_single_image(image, field_name=element_field)
             )
 
-        image_count = len(normalized_images)
-        if image_count < min_count:
+        if len(normalized_images) < min_count:
             raise SeedreamValidationError(
                 f"{field_name} 数量不能少于 {min_count}",
                 field=field_name,
                 value=normalized_images,
             )
-        if image_count > max_count:
-            raise SeedreamValidationError(
-                f"{field_name} 数量不能超过 {max_count}",
-                field=field_name,
-                value=normalized_images,
-            )
+        validate_reference_image_count(model_id, normalized_images, field_name=field_name)
 
         return normalized_images
 

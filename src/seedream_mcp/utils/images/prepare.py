@@ -1,4 +1,4 @@
-"""参考图预处理缓存子系统：LRU + single-flight 去重。
+"""参考图预处理缓存子系统：LRU + 单飞去重。
 
 集中管理图像输入预处理结果的缓存与并发去重。本地输入的缓存签名与读取链复用
 validation 的候选定位，签名与实际读取锁定同一文件，不因规则漂移命中陈旧
@@ -16,6 +16,8 @@ from pathlib import Path
 from .inputs import local_candidate_scope, prepare_image_input
 from .ref import classify_image_reference, require_image_str
 from .validation import LocalImageCandidate, resolve_local_image_candidate
+from ..core.errors import SeedreamMCPError
+from ..core.inflight import InflightTaskCancelledError
 from ..core.loop_bound import LoopKeyedInflight, loop_bound_semaphore
 from ..io.path import get_read_scope, resolve_images_root
 
@@ -38,6 +40,18 @@ def _current_read_context() -> tuple[tuple[str, ...], Path, list[Path]]:
 
 # 超过此长度的非本地输入改用摘要键，避免大 data URI 的 O(n) 哈希与比较阻塞事件循环。
 _LARGE_IMAGE_THRESHOLD = 1024 * 1024
+
+# 共享在途 task 被取消的整段尝试上限：取消属外部瞬态，重入即重建在途条目。
+_PREPARE_INFLIGHT_CANCEL_ATTEMPTS = 3
+
+
+class PrepareInflightExhaustedError(SeedreamMCPError):
+    """共享预处理在途 task 连续以取消态终结达尝试上限后上抛的失败类型。
+
+    调用方自身未被取消，不以取消态终结；error_code 指向反复取消事实供上层
+    归因；内层重试已达上限，属确定性终态、不带瞬态标记，计划层按确定性
+    失败冻结重放。
+    """
 
 
 class _PrepareSemaphoreSlot:
@@ -78,7 +92,7 @@ class _PrepareSemaphoreSlot:
 
 
 class ImagePreparer:
-    """参考图预处理缓存管理器，LRU + single-flight 去重。
+    """参考图预处理缓存管理器，LRU + 单飞去重。
 
     预处理结果按 (输入, 读权限, 本地文件签名) 缓存，本地文件纳入
     mtime+size 防内容替换返回陈旧编码；同一键的并发 miss 复用同一在途 task。
@@ -149,11 +163,16 @@ class ImagePreparer:
         """准备图像输入数据，将图像 URL、Data URI 或本地文件路径归一化为 API 所需格式。
 
         结果按 (输入, 读权限, 本地文件签名) 缓存，以读权限隔离键避免跨租户
-        命中；同一键的并发 miss 复用同一在途 task（single-flight），缓存超限按 LRU
+        命中；同一键的并发 miss 复用同一在途 task（单飞），缓存超限按 LRU
         淘汰。并发上限由进程级 loop_bound 信号量约束，仅实际执行预处理的调用
         占用槽位，缓存命中与在途等待在槽外完成；创建者被取消而共享 task
-        仍在运行时，槽位释放责任转移给 task 完成回调。本地输入的首次定位候选经
-        上下文传入读取链复用，签名与读取锁定同一文件。
+        仍在运行时，槽位释放责任转移给 task 完成回调。共享在途 task 被取消属
+        外部瞬态，整段重入重建在途条目再试；重试单层封顶于本层，达尝试上限即
+        终态，上抛携带 error_code 的 PrepareInflightExhaustedError，计划层对其
+        冻结重放、不叠加第二层重试；取消按具体类型捕获而非瞬态标记——耗尽
+        升级是取消专属语义，非取消的标记瞬态不在本层吸收、原样直达计划层。
+        本地输入的首次定位候选经上下文传入读取链
+        复用，签名与读取锁定同一文件。
 
         Args:
             image: 图像输入字符串，三类来源的归一化语义与模块级函数一致。
@@ -168,11 +187,27 @@ class ImagePreparer:
         Raises:
             SeedreamValidationError: 输入格式无效、路径越界、维度超限或图像内容
                 处理失败等调用方输入问题。
+            PrepareInflightExhaustedError: 共享在途 task 连续以取消态终结达尝试
+                上限，调用方自身未被取消。
         """
         cache_key, normalized_image, candidate = await self._resolve_cache_key(
             image, scope_key, read_context
         )
+        for _ in range(_PREPARE_INFLIGHT_CANCEL_ATTEMPTS):
+            try:
+                return await self._prepare_attempt(cache_key, normalized_image, candidate)
+            except InflightTaskCancelledError:
+                pass
+        # 调用方自身未被取消，不得谎称取消上抛 CancelledError。
+        raise PrepareInflightExhaustedError(
+            "共享预处理任务被反复取消，已放弃重试",
+            error_code="prepare_inflight_cancelled",
+        )
 
+    async def _prepare_attempt(
+        self, cache_key: PrepareCacheKey, image: str, candidate: LocalImageCandidate | None
+    ) -> str:
+        """单次预处理尝试：缓存命中直返，在途条目共享等待，未命中持槽位执行。"""
         cached = self._prepare_cache.get(cache_key)
         if cached is not None:
             self._prepare_cache.move_to_end(cache_key)
@@ -190,7 +225,7 @@ class ImagePreparer:
             # 候选经作用域注入在途 task 的读取链，task 创建时复制当前上下文取到本
             # 调用的候选；作用域退出即复位，值不泄漏进调用方的后续调用。
             async with local_candidate_scope(candidate):
-                return await self._prepare_image_input_locked(normalized_image, cache_key, slot)
+                return await self._prepare_image_input_locked(image, cache_key, slot)
         finally:
             slot.release()
 
@@ -252,7 +287,7 @@ class ImagePreparer:
         task，故先复查缓存，在途复查与登记经 register_if_absent 单次同步调用原子
         完成：命中缓存直接返回，命中在途则归还槽位改以纯等待者身份在槽外等待，
         并发满载时后到者不重复执行全量读盘与编码。miss 时创建 _prepare_and_cache
-        task 登记并经 shield 等待，创建者被取消时槽位经 on_cancel 回调转移给
+        task 登记并经 consume 等待，创建者被取消时槽位经 on_cancel 回调转移给
         task 本体释放。
         """
         cached = self._prepare_cache.get(cache_key)
@@ -278,7 +313,7 @@ class ImagePreparer:
         return await entry.consume(on_cancel=_transfer_slot)
 
     async def _prepare_and_cache(self, image: str, cache_key: PrepareCacheKey) -> str:
-        """执行图像预处理并写入 LRU 缓存，供 single-flight 去重复用。
+        """执行图像预处理并写入 LRU 缓存，供单飞去重复用。
 
         在途登记由创建方经完成回调按条目身份清理；创建者被取消时 task 继续运行
         直至完成，保护共享同一 task 的其他等待者，避免连带取消。

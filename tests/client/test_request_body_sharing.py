@@ -8,8 +8,10 @@ monkeypatch 注入，不触达真实 API。
 from __future__ import annotations
 
 import asyncio
+import traceback
 from typing import Any
 
+import httpx
 import pytest
 
 from _lib.cpu_offload_spy import CpuOffloadSpy
@@ -24,6 +26,7 @@ from seedream_mcp.utils.core.errors import (
     format_error_for_user,
     resolve_error_profile,
 )
+from seedream_mcp.utils.core.inflight import InflightTaskCancelledError
 
 import seedream_mcp.client._api as client_module
 
@@ -265,8 +268,13 @@ async def test_direct_path_small_body_serialization_runs_outside_cpu_pool(
 # ==================== 共享计划失败路径 ====================
 
 
+def _count_traceback_frames(exc: BaseException) -> int:
+    """统计异常 traceback 的帧数，供断言共享异常对象不随重抛增长。"""
+    return len(traceback.extract_tb(exc.__traceback__))
+
+
 async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
-    """builder 抛错时首个异常被缓存并重放给同批后到者，构建只执行一次。"""
+    """builder 抛错时首个异常被缓存并重放给同键后到者，构建只执行一次。"""
     plan = SharedRequestPlan()
     builder_failure = RuntimeError("prepare failed")
     attempts = {"count": 0}
@@ -281,8 +289,11 @@ async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
         return_exceptions=True,
     )
 
-    # 各请求收到同一原异常对象，不被包装为其他类型
-    assert all(outcome is builder_failure for outcome in outcomes)
+    # 锁内执行 builder 的首个到者收原异常，其余后到者收同型同文案的独立副本
+    assert sum(outcome is builder_failure for outcome in outcomes) == 1
+    assert len({id(outcome) for outcome in outcomes}) == len(outcomes)
+    assert all(type(outcome) is RuntimeError for outcome in outcomes)
+    assert all(str(outcome) == "prepare failed" for outcome in outcomes)
     # 构建只执行一次：确定性失败重试只会重复读盘与解码等全量副作用
     assert attempts["count"] == 1
     # 计划未写入失败产物
@@ -292,14 +303,20 @@ async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
     async def working_builder() -> dict[str, Any]:
         return {"model": "m"}
 
+    frames_before_replay = _count_traceback_frames(builder_failure)
     replayed: BaseException | None = None
     try:
         await plan.get_or_build("text_to_image", working_builder)
     except Exception as exc:
         replayed = exc
 
-    assert replayed is builder_failure
+    # 后到者收独立副本，类型与文案一致
+    assert replayed is not builder_failure
+    assert type(replayed) is type(builder_failure)
+    assert str(replayed) == str(builder_failure)
     assert attempts["count"] == 1
+    # 重抛不向共享异常对象的 traceback 追加帧
+    assert _count_traceback_frames(builder_failure) == frames_before_replay
 
     # 失败缓存随 release 清空，同一计划重新构建并成功写入
     plan.release()
@@ -308,6 +325,276 @@ async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
 
     assert built == {"model": "m"}
     assert plan.request_data == {"model": "m"}
+
+
+async def test_shared_plan_transient_failure_not_frozen() -> None:
+    """InflightTaskCancelledError 不冻结缓存：首个到者收瞬态失败，后到者重建成功。"""
+    plan = SharedRequestPlan()
+    attempts = {"count": 0}
+
+    async def transient_then_working_builder() -> dict[str, Any]:
+        attempts["count"] += 1
+        await asyncio.sleep(0)
+        if attempts["count"] == 1:
+            raise InflightTaskCancelledError("共享在途任务已被取消")
+        return {"model": "m"}
+
+    outcomes = await asyncio.gather(
+        *(plan.get_or_build("image_to_image", transient_then_working_builder) for _ in range(3)),
+        return_exceptions=True,
+    )
+
+    # 首个到者收瞬态失败原样上抛，后到者经重建拿到结果并复用共享构建产物
+    assert sum(isinstance(o, InflightTaskCancelledError) for o in outcomes) == 1
+    assert [o for o in outcomes if isinstance(o, dict)] == [{"model": "m"}] * 2
+    assert attempts["count"] == 2
+    assert plan.request_data == {"model": "m"}
+
+
+async def test_shared_plan_transient_marker_beyond_known_types_not_frozen() -> None:
+    """计划层未枚举的瞬态类型经源头混入标记同样不冻结缓存，后到者重建成功。"""
+    from seedream_mcp.utils.core.inflight import TransientInflightError
+
+    class _ExternalTransientError(RuntimeError, TransientInflightError):
+        """计划层未枚举、仅靠源头标记声明瞬态的替身异常。"""
+
+    plan = SharedRequestPlan()
+    attempts = {"count": 0}
+
+    async def transient_then_working_builder() -> dict[str, Any]:
+        attempts["count"] += 1
+        await asyncio.sleep(0)
+        if attempts["count"] == 1:
+            raise _ExternalTransientError("外部瞬态失败")
+        return {"model": "m"}
+
+    outcomes = await asyncio.gather(
+        *(plan.get_or_build("text_to_image", transient_then_working_builder) for _ in range(3)),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(o, _ExternalTransientError) for o in outcomes) == 1
+    assert [o for o in outcomes if isinstance(o, dict)] == [{"model": "m"}] * 2
+    assert attempts["count"] == 2
+    assert plan.request_data == {"model": "m"}
+
+
+async def test_shared_plan_prepare_sourced_transient_marker_survives_wrapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prepare 链内抛出的标记携带者穿透 inputs 兜底重定型：计划层不冻结，后到者重建成功。"""
+    from seedream_mcp.utils.core.inflight import TransientInflightError
+    from seedream_mcp.utils.images import inputs as image_inputs_module
+    from seedream_mcp.utils.images.inputs import prepare_image_input
+
+    class _ExternalTransientError(RuntimeError, TransientInflightError):
+        """prepare 链内抛出、仅靠源头标记声明瞬态的替身异常。"""
+
+    call_count = 0
+
+    def transient_then_pass(image: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _ExternalTransientError("外部瞬态失败")
+        return image
+
+    monkeypatch.setattr(image_inputs_module, "validate_image_input", transient_then_pass)
+
+    plan = SharedRequestPlan()
+
+    async def builder() -> dict[str, Any]:
+        prepared = await prepare_image_input("https://example.com/ref.png")
+        return {"image": prepared}
+
+    outcomes = await asyncio.gather(
+        *(plan.get_or_build("image_to_image", builder) for _ in range(3)),
+        return_exceptions=True,
+    )
+
+    # 首个到者收的仍是标记携带者本身：兜底重定型为 SeedreamValidationError 会抹掉标记
+    assert sum(isinstance(o, _ExternalTransientError) for o in outcomes) == 1
+    assert [o for o in outcomes if isinstance(o, dict)] == [
+        {"image": "https://example.com/ref.png"}
+    ] * 2
+    assert call_count == 2
+    assert plan.request_data == {"image": "https://example.com/ref.png"}
+
+
+async def test_shared_plan_prepare_exhaustion_frozen_and_replayed() -> None:
+    """prepare 重试耗尽的终态失败冻结并重放独立副本：后到者不重建、不叠加第二层重试。"""
+    from seedream_mcp.utils.images.prepare import PrepareInflightExhaustedError
+
+    plan = SharedRequestPlan()
+    exhaustion = PrepareInflightExhaustedError(
+        "共享预处理任务被反复取消，已放弃重试", error_code="prepare_inflight_cancelled"
+    )
+    attempts = {"count": 0}
+
+    async def exhausting_builder() -> dict[str, Any]:
+        attempts["count"] += 1
+        await asyncio.sleep(0)
+        raise exhaustion
+
+    outcomes = await asyncio.gather(
+        *(plan.get_or_build("image_to_image", exhausting_builder) for _ in range(3)),
+        return_exceptions=True,
+    )
+
+    # 首个到者收原异常，其余后到者收互不相同的独立副本，构建只执行一次
+    raised: list[PrepareInflightExhaustedError] = []
+    for outcome in outcomes:
+        assert isinstance(outcome, PrepareInflightExhaustedError)
+        raised.append(outcome)
+
+    assert attempts["count"] == 1
+    assert sum(exc is exhaustion for exc in raised) == 1
+    assert len({id(exc) for exc in raised}) == 3
+    for exc in raised:
+        assert exc.message == exhaustion.message
+        assert exc.error_code == exhaustion.error_code
+
+    # 计划存续期内后到的同键构建请求被冻结异常短路，重建不能成功
+    async def working_builder() -> dict[str, Any]:
+        return {"model": "m"}
+
+    late: BaseException | None = None
+    try:
+        await plan.get_or_build("image_to_image", working_builder)
+    except Exception as exc:
+        late = exc
+
+    assert isinstance(late, PrepareInflightExhaustedError)
+    assert late is not exhaustion
+    assert attempts["count"] == 1
+    assert plan.request_data is None
+
+
+async def test_shared_plan_build_failure_copy_preserves_key_attributes() -> None:
+    """校验异常构建失败的重放副本保留 message/field/value 等关键属性。"""
+    plan = SharedRequestPlan()
+
+    async def failing_builder() -> dict[str, Any]:
+        raise SeedreamValidationError("参考图不可读", field="image", value=["bad"])
+
+    original: SeedreamValidationError | None = None
+    try:
+        await plan.get_or_build("text_to_image", failing_builder)
+    except SeedreamValidationError as exc:
+        original = exc
+    assert original is not None
+
+    for _ in range(2):
+        replayed: SeedreamValidationError | None = None
+        try:
+            await plan.get_or_build("text_to_image", failing_builder)
+        except SeedreamValidationError as exc:
+            replayed = exc
+
+        assert replayed is not None
+        assert replayed is not original
+        assert type(replayed) is type(original)
+        assert str(replayed) == str(original)
+        assert replayed.message == original.message
+        assert replayed.field == original.field
+        assert replayed.value == original.value
+        assert replayed.error_code == original.error_code
+
+
+async def test_shared_plan_build_failure_copy_preserves_cause_chain() -> None:
+    """raise ... from 的构建失败重放副本保留原异常的因果链，traceback 仍独立。"""
+    plan = SharedRequestPlan()
+    root_cause = ValueError("读盘失败")
+    builder_failure = RuntimeError("prepare failed")
+    attempts = {"count": 0}
+
+    async def failing_builder() -> dict[str, Any]:
+        attempts["count"] += 1
+        await asyncio.sleep(0)
+        try:
+            raise root_cause
+        except ValueError:
+            raise builder_failure from root_cause
+
+    outcomes = await asyncio.gather(
+        *(plan.get_or_build("text_to_image", failing_builder) for _ in range(3)),
+        return_exceptions=True,
+    )
+    raised = [exc for exc in outcomes if isinstance(exc, BaseException)]
+    assert len(raised) == 3
+
+    # 首个到者收原异常，其余后到者收互不相同的独立副本
+    assert sum(exc is builder_failure for exc in raised) == 1
+    assert len({id(exc) for exc in raised}) == 3
+    # 各副本因果链与原异常一致，后到者的根因诊断不因重放降级
+    for exc in raised:
+        assert exc.__cause__ is root_cause
+        assert exc.__context__ is root_cause
+        assert exc.__suppress_context__ is True
+    assert attempts["count"] == 1
+
+    frames_before_replay = _count_traceback_frames(builder_failure)
+    replayed: BaseException | None = None
+    try:
+        await plan.get_or_build("text_to_image", failing_builder)
+    except Exception as exc:
+        replayed = exc
+
+    assert replayed is not None
+    assert replayed is not builder_failure
+    assert replayed.__cause__ is root_cause
+    # 重抛不向共享异常对象的 traceback 追加帧
+    assert _count_traceback_frames(builder_failure) == frames_before_replay
+
+    # 隐式链（无 from）的副本 context 保留且不被 __cause__ 赋值隐式抑制
+    plan.release()
+    implicit_failure = RuntimeError("implicit failed")
+
+    async def implicit_builder() -> dict[str, Any]:
+        try:
+            raise root_cause
+        except ValueError:
+            raise implicit_failure
+
+    try:
+        await plan.get_or_build("text_to_image", implicit_builder)
+    except RuntimeError:
+        pass
+    implicit_clone: BaseException | None = None
+    try:
+        await plan.get_or_build("text_to_image", implicit_builder)
+    except Exception as exc:
+        implicit_clone = exc
+
+    assert implicit_clone is not None
+    assert implicit_clone is not implicit_failure
+    assert implicit_clone.__cause__ is None
+    assert implicit_clone.__context__ is root_cause
+    assert implicit_clone.__suppress_context__ is False
+
+
+async def test_shared_plan_replay_falls_back_to_shared_object_when_copy_fails() -> None:
+    """copy.copy 失败的异常类型重放回退共享对象本身，真实失败不被 TypeError 掩盖。"""
+    plan = SharedRequestPlan()
+    request = httpx.Request("GET", "https://example.com")
+    response = httpx.Response(404, request=request)
+    failure = httpx.HTTPStatusError("上游 404", request=request, response=response)
+
+    async def failing_builder() -> dict[str, Any]:
+        raise failure
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await plan.get_or_build("text_to_image", failing_builder)
+
+    replayed: BaseException | None = None
+    try:
+        await plan.get_or_build("text_to_image", failing_builder)
+    except Exception as exc:
+        replayed = exc
+
+    # httpx.HTTPStatusError 的构造参数不能经构造器往返，copy.copy 抛 TypeError，
+    # 回退重抛共享对象本身
+    assert replayed is failure
 
 
 async def test_shared_plan_rebuilds_when_key_changes() -> None:

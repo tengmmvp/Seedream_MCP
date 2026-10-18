@@ -23,6 +23,7 @@ from mcp.types import ImageContent
 
 from ..core.executors import CPU_OFFLOAD_DECODE_SLOTS, run_in_cpu_pool
 from ..core.formats import MAX_IMAGE_PIXELS
+from ..core.inflight import TransientInflightError
 from ..core.logs import get_logger
 from ..core.loop_bound import LoopKeyedInflight, loop_bound_semaphore
 from ..core.throttles import ThrottleRegistry
@@ -205,14 +206,15 @@ def _store_thumbnail(thumb: Path, thumbs_root: Path, data: bytes) -> None:
 
 
 def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
-    if time.time() < _thumb_sweep_after.get(thumbs_root, 0.0):
+    if not _thumb_sweep_after.due(thumbs_root):
         return
     if not _thumb_sweep_lock.acquire(blocking=False):
         return
     try:
-        if time.time() < _thumb_sweep_after.get(thumbs_root, 0.0):
+        if not _thumb_sweep_after.due(thumbs_root):
             return
         entries: list[tuple[float, int, Path]] = []
+        # mtime 宽限判定须与文件系统墙钟同基准，不随节流门换单调钟。
         now = time.time()
         try:
             for entry in thumbs_root.iterdir():
@@ -230,7 +232,7 @@ def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
         except OSError:
             return
         # 门在完整收集成功后才推进，中途异常下个窗口可重试
-        _thumb_sweep_after.set(thumbs_root, time.time() + _THUMB_SWEEP_INTERVAL_SECONDS)
+        _thumb_sweep_after.mark(thumbs_root, _THUMB_SWEEP_INTERVAL_SECONDS)
     finally:
         _thumb_sweep_lock.release()
     total = sum(size for _, size, _ in entries)
@@ -272,7 +274,8 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
         images_root: 已 resolve 的图片目录，缓存目录与其并列。
 
     Returns:
-        JPEG 缩略图字节；损坏或像素超限等生成失败时为 None。
+        JPEG 缩略图字节；损坏、像素超限或共享在途瞬态失败（标记混入）等生成
+            失败时为 None。
 
     Raises:
         FileNotFoundError: 源图缺失，与生成失败分档供调用方映射。
@@ -290,10 +293,16 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
     if cached:
         return cached
 
-    return await _thumb_inflight.consume_shared(
-        thumb,
-        lambda: asyncio.ensure_future(_decode_and_cache_thumbnail(image_path, thumb, thumbs_root)),
-    )
+    try:
+        return await _thumb_inflight.consume_shared(
+            thumb,
+            lambda: asyncio.ensure_future(
+                _decode_and_cache_thumbnail(image_path, thumb, thumbs_root)
+            ),
+        )
+    except TransientInflightError:
+        # 共享在途瞬态失败（标记混入）归生成失败降级为 None，其余异常原样上抛。
+        return None
 
 
 async def _decode_and_cache_thumbnail(
@@ -335,7 +344,7 @@ async def build_preview_contents(
                 return await cached_thumbnail_bytes(path, images_root)
             return await build_thumbnail_bytes_limited(path)
         except OSError:
-            # 源图缺失或 stat 瞬时失败均跳过该张。
+            # 源图缺失与 stat 瞬时失败跳过该张。
             return None
 
     thumbnails = await asyncio.gather(*(_or_none(path) for path in image_paths))

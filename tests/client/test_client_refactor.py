@@ -631,7 +631,7 @@ def test_normalize_image_sequence_unwraps_str_input() -> None:
     normalized = SeedreamClient._normalize_image_sequence(
         images="http://example.com/a.png",
         min_count=1,
-        max_count=2,
+        model_id="",
         field_name="image",
     )
 
@@ -678,7 +678,7 @@ def test_normalize_image_sequence_rejects_non_list_sequence(
         SeedreamClient._normalize_image_sequence(
             images=sequence_factory(["http://example.com/a.png", "http://example.com/b.png"]),
             min_count=1,
-            max_count=2,
+            model_id="",
             field_name="image",
         )
 
@@ -698,7 +698,7 @@ def test_normalize_image_sequence_rejects_bytes_like_and_non_sequence(
         SeedreamClient._normalize_image_sequence(
             images=invalid_input,
             min_count=1,
-            max_count=2,
+            model_id="",
             field_name="image",
         )
 
@@ -709,7 +709,7 @@ def test_normalize_image_sequence_rejects_user_string() -> None:
         SeedreamClient._normalize_image_sequence(
             images=UserString("http://example.com/a.png"),  # type: ignore[arg-type]
             min_count=1,
-            max_count=2,
+            model_id="",
             field_name="image",
         )
 
@@ -727,7 +727,7 @@ def test_normalize_image_sequence_rejects_int_sequence_forms(invalid_input: Any)
         SeedreamClient._normalize_image_sequence(
             images=invalid_input,
             min_count=1,
-            max_count=2,
+            model_id="",
             field_name="image",
         )
 
@@ -740,7 +740,7 @@ def test_normalize_image_sequence_rejects_non_str_element_in_sequence() -> None:
         SeedreamClient._normalize_image_sequence(
             images=["http://example.com/a.png", 123],  # type: ignore[list-item]
             min_count=1,
-            max_count=2,
+            model_id="",
             field_name="image",
         )
 
@@ -759,7 +759,7 @@ def test_normalize_image_sequence_rejects_unencodable_surrogate() -> None:
         SeedreamClient._normalize_image_sequence(
             images=["http://example.com/a.png", "http://example.com/\ud800.png"],
             min_count=1,
-            max_count=2,
+            model_id="",
             field_name="image",
         )
 

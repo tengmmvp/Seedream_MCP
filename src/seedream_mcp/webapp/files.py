@@ -106,8 +106,8 @@ async def web_thumbnail(request: Request) -> Response:
     """缩略图端点：长边不超过 768 像素的 JPEG，经落盘缓存。
 
     解码失败与文件不存在分档：文件缺失 404，存在但无法生成缩略图（损坏、
-    像素超限或读取瞬时失败）422，CPU 卸载池关闭的退出竞态 500，监控与排障
-    可按状态码区分。
+    像素超限、stat 瞬时失败或共享在途瞬态失败）422，CPU 卸载池关闭的退出竞态 500，
+    监控与排障可按状态码区分。
     """
     resolved = await _resolve_request_path(request)
     if isinstance(resolved, Response):

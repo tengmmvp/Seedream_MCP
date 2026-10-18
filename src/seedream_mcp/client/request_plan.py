@@ -13,6 +13,7 @@ from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Iterator
 
 from ..utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
+from ..utils.core.inflight import TransientInflightError, clone_shared_exception
 from ..utils.core.sanitizers import utf8_value_leaf_length
 from ..utils.core.validators import ValidatedCommonParams
 
@@ -46,23 +47,32 @@ class SharedRequestPlan:
         """返回共享 request_data：同键首个到者执行 builder 构建，其余复用。
 
         key 为调用点标识，同一计划内键不匹配即重建，防止跨方法复用时静默
-        错发前一方法的请求体。builder 在锁内执行；构建抛出时缓存首个异常并
-        重放给同键后到者。批内输入相同，重试构建只会重复读盘与解码等全量
-        副作用，故重放同一异常对象。失败缓存随 release 清空，下一批次重新
-        构建。
+        错发前一方法的请求体。builder 在锁内执行；确定性构建失败缓存首个异常
+        并重放给同键后到者——批内输入相同，重试构建只会重复读盘与解码等全量
+        副作用；瞬态的生产者拥有有界重试（prepare 的在途取消重试单层封顶于其
+        内部），耗尽即上抛终态类型化错误、不带瞬态标记，同样冻结重放，计划
+        不叠加第二层重试；未被吸收而直达计划层的标记瞬态
+        （TransientInflightError）不冻结缓存，放行同键重建，为未来瞬态留
+        安全网。重放抛独立副本（clone_shared_exception），cause/context 与
+        原始 traceback 随副本保留，重抛只在副本链前追加帧，复制不支持的异常
+        类型回退共享对象本身。失败缓存随 release 清空，下一批次重新构建。
         """
         if self.request_data is not None and self._build_key == key:
             return self.request_data
         async with self._lock:
             if self.request_data is None or self._build_key != key:
                 if self._build_error is not None and self._build_error[0] == key:
-                    raise self._build_error[1]
+                    raise clone_shared_exception(self._build_error[1])
                 try:
                     self.request_data = await builder()
                     self._build_key = key
                     self._build_error = None
                     # 键切换重建后旧 body 与新 request_data 不再对应，一并失效。
                     self.body = None
+                except TransientInflightError:
+                    # 共享在途瞬态失败（异常在源头混入标记声明）：重建可
+                    # 重新登记在途条目并大概率成功，不冻结缓存。
+                    raise
                 except Exception as exc:
                     self._build_error = (key, exc)
                     raise

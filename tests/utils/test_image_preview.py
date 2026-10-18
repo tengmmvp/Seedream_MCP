@@ -35,6 +35,7 @@ from seedream_mcp.utils.io import save as io_save
 
 from _lib.cpu_offload_spy import CpuOffloadSpy
 from _lib.generation_fixtures import _patch_client_success, _patch_save_real_file
+from _lib.inflight_fakes import _reap_if_pending, await_shared_leader, cancel_shared_leader
 from _lib.png_fixtures import forged_png_bytes
 
 
@@ -102,6 +103,42 @@ async def test_build_preview_contents_skips_transient_stat_failure(
     contents = await build_preview_contents([image], tmp_path)
 
     assert contents == []
+
+
+async def test_build_preview_contents_skips_inflight_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """共享解码在途 task 被取消时该张降级跳过，不使其余张与整批结果失败。"""
+    from seedream_mcp.utils.images import thumbnail as image_thumbnail
+
+    cancelled = _write_png(tmp_path / "cancelled.png", (64, 64))
+    healthy = _write_png(tmp_path / "healthy.png", (64, 64))
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    real_limited = image_thumbnail.build_thumbnail_bytes_limited
+
+    async def _pending_for_cancelled(path: Path) -> bytes | None:
+        if path == cancelled:
+            await asyncio.get_running_loop().create_future()
+        return await real_limited(path)
+
+    monkeypatch.setattr(image_thumbnail, "build_thumbnail_bytes_limited", _pending_for_cancelled)
+
+    preview = asyncio.ensure_future(build_preview_contents([cancelled, healthy], images_root))
+    try:
+        # 两张图均在途，须以显式键定位被取消张的解码 task 再外部取消。
+        stat = cancelled.stat()
+        cancelled_key = image_thumbnail.thumbnail_cache_root(images_root) / (
+            image_thumbnail._thumb_key(cancelled, stat.st_mtime_ns, stat.st_size)
+        )
+        await cancel_shared_leader(image_thumbnail._thumb_inflight, cancelled_key)
+
+        contents = await preview
+
+        assert len(contents) == 1
+        assert base64.b64decode(contents[0].data)[:3] == b"\xff\xd8\xff"
+    finally:
+        await _reap_if_pending(preview)
 
 
 def test_build_thumbnail_bytes_downsamples_large_image(tmp_path: Path) -> None:
@@ -532,26 +569,29 @@ async def test_cached_thumbnail_concurrent_miss_decodes_once_and_shares_result(
     monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _gated_build)
 
     first = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
-    # 阻塞等待下沉工作线程，避免卡住事件循环使解码 task 无法推进。
-    assert await asyncio.to_thread(started.wait, 5)
-    registry = thumbnail_module._thumb_inflight.by_loop[asyncio.get_running_loop()]
-    assert len(registry) == 1
-    holder = next(iter(registry.values()))()
-    assert holder is not None
-    second = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
-    # 推进事件循环直至第二个调用完成缓存查找并以等待者身份挂上共享 task。
-    for _ in range(500):
-        if holder.consumers >= 2:
-            break
-        await asyncio.sleep(0.01)
-    release.set()
+    second: asyncio.Task[bytes | None] | None = None
+    try:
+        # 阻塞等待下沉工作线程，避免卡住事件循环使解码 task 无法推进。
+        assert await asyncio.to_thread(started.wait, 5)
+        holder = await await_shared_leader(thumbnail_module._thumb_inflight)
+        second = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
+        # 推进事件循环直至第二个调用完成缓存查找并以等待者身份挂上共享 task。
+        for _ in range(500):
+            if holder.consumers >= 2:
+                break
+            await asyncio.sleep(0.01)
+        release.set()
 
-    first_result, second_result = await asyncio.gather(first, second)
+        first_result, second_result = await asyncio.gather(first, second)
 
-    assert decode_calls["count"] == 1
-    assert first_result is not None and second_result == first_result
-    assert len(registry) == 0
-    assert thumbnail_module.thumbnail_cache_root(images_root).is_dir()
+        assert decode_calls["count"] == 1
+        assert first_result is not None and second_result == first_result
+        assert len(thumbnail_module._thumb_inflight) == 0
+        assert thumbnail_module.thumbnail_cache_root(images_root).is_dir()
+    finally:
+        await _reap_if_pending(first)
+        if second is not None:
+            await _reap_if_pending(second)
 
 
 async def test_concurrent_loops_keep_isolated_inflight_registries(
@@ -676,21 +716,21 @@ async def test_retired_loop_with_pending_decode_is_collectable(
             creator = asyncio.ensure_future(
                 thumbnail_module.cached_thumbnail_bytes(image, images_root)
             )
-            # 轮询推进循环直至解码 task 登记进本循环注册表。
-            registry: Any = None
-            for _ in range(1000):
-                registry = thumbnail_module._thumb_inflight.by_loop.get(asyncio.get_running_loop())
-                if registry:
-                    break
-                await asyncio.sleep(0.01)
-            outcome["registry"] = registry
-            outcome["loop_ref"] = weakref.ref(asyncio.get_running_loop())
-            # 创建者放弃等待，共享 task 按取消语义留在本循环继续在途。
-            creator.cancel()
             try:
-                await creator
-            except asyncio.CancelledError:
-                outcome["abandoned"] = True
+                # 等待解码 task 登记进本循环注册表，不接住返回的条目引用。
+                await await_shared_leader(thumbnail_module._thumb_inflight)
+                outcome["registry"] = thumbnail_module._thumb_inflight.by_loop[
+                    asyncio.get_running_loop()
+                ]
+                outcome["loop_ref"] = weakref.ref(asyncio.get_running_loop())
+                # 创建者放弃等待，共享 task 按取消语义留在本循环继续在途。
+                creator.cancel()
+                try:
+                    await creator
+                except asyncio.CancelledError:
+                    outcome["abandoned"] = True
+            finally:
+                await _reap_if_pending(creator)
 
         loop = asyncio.new_event_loop()
         try:
@@ -754,34 +794,86 @@ async def test_late_waiter_shares_orphan_decode_after_creator_cancel(
     monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", _gated_limited)
 
     creator = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
-    # 轮询推进循环直至解码 task 登记进本循环注册表。
-    registry: Any = None
-    for _ in range(1000):
-        registry = thumbnail_module._thumb_inflight.by_loop.get(asyncio.get_running_loop())
-        if registry:
-            break
-        await asyncio.sleep(0.01)
-    assert isinstance(registry, dict)
-
-    creator.cancel()
+    late: asyncio.Task[bytes | None] | None = None
     try:
-        await creator
-    except asyncio.CancelledError:
-        pass
+        # 等待解码 task 登记进本循环注册表，不接住返回的条目引用。
+        await await_shared_leader(thumbnail_module._thumb_inflight)
+        registry = thumbnail_module._thumb_inflight.by_loop[asyncio.get_running_loop()]
 
-    # 后到等待者经注册表取同一在途条目，此间不持在途条目强引用。
-    late = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
-    # 轮询直至有等待者挂上在途条目，创建者已退出，消费者只可能来自后到调用。
-    for _ in range(1000):
-        current = next(iter(registry.values()), None)
-        holder = current() if current is not None else None
-        if holder is not None and holder.consumers >= 1:
-            break
-        await asyncio.sleep(0.01)
-    gate["future"].set_result(b"shared-thumbnail")
-    assert await late == b"shared-thumbnail"
-    assert decode_calls["count"] == 1
-    assert not registry
+        creator.cancel()
+        try:
+            await creator
+        except asyncio.CancelledError:
+            pass
+
+        # 后到等待者经注册表取同一在途条目，此间不持在途条目强引用。
+        late = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
+        # 轮询直至有等待者挂上在途条目，创建者已退出，消费者只可能来自后到调用。
+        for _ in range(1000):
+            current = next(iter(registry.values()), None)
+            holder = current() if current is not None else None
+            if holder is not None and holder.consumers >= 1:
+                break
+            await asyncio.sleep(0.01)
+        gate["future"].set_result(b"shared-thumbnail")
+        assert await late == b"shared-thumbnail"
+        assert decode_calls["count"] == 1
+        assert not registry
+    finally:
+        await _reap_if_pending(creator)
+        if late is not None:
+            await _reap_if_pending(late)
+
+
+async def test_cached_thumbnail_bytes_sinks_leader_cancel_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """共享解码 task 被取消时获取层归生成失败降级为 None，消费点不再感知类型化取消异常。"""
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "src.png", (300, 200))
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+
+    async def _pending_limited(path: Path) -> bytes | None:
+        del path
+        await asyncio.get_running_loop().create_future()
+        return None
+
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", _pending_limited)
+
+    caller = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
+    try:
+        await cancel_shared_leader(thumbnail_module._thumb_inflight)
+
+        assert await caller is None
+        assert len(thumbnail_module._thumb_inflight) == 0
+    finally:
+        await _reap_if_pending(caller)
+
+
+async def test_cached_thumbnail_bytes_sinks_transient_marker_beyond_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非取消的瞬态标记携带者同样降级 None：获取层按标记而非具体类型分类。"""
+    from seedream_mcp.utils.core.inflight import TransientInflightError
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
+
+    class _ExternalTransientError(RuntimeError, TransientInflightError):
+        """非取消的标记携带者替身：源头混入标记声明瞬态。"""
+
+    image = _write_png(tmp_path / "src.png", (300, 200))
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+
+    async def _failing_limited(path: Path) -> bytes | None:
+        del path
+        raise _ExternalTransientError("外部瞬态失败")
+
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", _failing_limited)
+
+    assert await thumbnail_module.cached_thumbnail_bytes(image, images_root) is None
+    assert len(thumbnail_module._thumb_inflight) == 0
 
 
 def test_thumbnail_sweep_evicts_oldest_beyond_cap(

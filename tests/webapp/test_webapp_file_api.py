@@ -11,6 +11,7 @@ from typing import IO, Any
 
 import pytest
 
+from _lib.inflight_fakes import _reap_if_pending, cancel_shared_leader
 from _lib.web_fixtures import (
     asgi_body_bytes,
     asgi_start_headers,
@@ -410,6 +411,37 @@ async def test_thumbnail_transient_stat_failure_returns_422(
     assert response.status_code == 422
     payload = response.json()
     assert payload["error"] == "thumbnail_failed"
+
+
+async def test_thumbnail_inflight_cancelled_returns_422(
+    web_app_with_image: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """共享解码在途 task 被取消，经获取层降级为 None，仍归 422 生成失败，不谎报缺失或不可用。"""
+    import asyncio
+
+    from seedream_mcp.utils.images import thumbnail as image_thumbnail_module
+
+    async def _pending(path: Path) -> bytes | None:
+        del path
+        await asyncio.get_running_loop().create_future()
+        return None
+
+    monkeypatch.setattr(image_thumbnail_module, "build_thumbnail_bytes_limited", _pending)
+
+    request_task = asyncio.ensure_future(
+        web_get(web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png")
+    )
+    try:
+        # 单请求单图恰登记一条在途条目，key=None 语义即可定位并取消解码 leader。
+        await cancel_shared_leader(image_thumbnail_module._thumb_inflight)
+
+        response = await request_task
+
+        assert response.status_code == 422
+        payload = response.json()
+        assert payload["error"] == "thumbnail_failed"
+    finally:
+        await _reap_if_pending(request_task)
 
 
 async def test_thumbnail_pool_closed_returns_500(web_app_with_image: Any) -> None:

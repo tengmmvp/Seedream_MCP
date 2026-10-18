@@ -379,6 +379,25 @@ async def test_prepare_image_input_rejects_url_userinfo_username_only() -> None:
         await prepare_image_input("https://user@mirror.example.com/ref.png")
 
 
+async def test_prepare_image_input_transient_marker_passes_through_fallback_wrapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """链内抛出的瞬态标记携带者穿透兜底重定型：重定型为 SeedreamValidationError 会抹掉标记。"""
+    from seedream_mcp.utils.core.inflight import TransientInflightError
+
+    class _ExternalTransientError(RuntimeError, TransientInflightError):
+        """prepare 链内抛出、仅靠源头标记声明瞬态的替身异常。"""
+
+    def failing_validate(image: str) -> str:
+        del image
+        raise _ExternalTransientError("外部瞬态失败")
+
+    monkeypatch.setattr(image_input_module, "validate_image_input", failing_validate)
+
+    with pytest.raises(_ExternalTransientError):
+        await prepare_image_input("https://example.com/ref.png")
+
+
 async def test_prepare_image_input_rejects_invalid_data_uri() -> None:
     """非法 base64 负载的 Data URI 须被校验透传拒绝，校验错误原样上抛不被吞掉。"""
     with pytest.raises(SeedreamValidationError, match="Base64 解码失败|Data URI"):

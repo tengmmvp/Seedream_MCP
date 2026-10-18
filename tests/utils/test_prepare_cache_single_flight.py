@@ -11,7 +11,12 @@ import pytest
 from seedream_mcp.utils.images import prepare as image_prepare
 
 from _lib.client_fakes import _make_client
-from _lib.inflight_fakes import _patch_unretrieved_callback
+from _lib.inflight_fakes import (
+    _patch_unretrieved_callback,
+    _reap_if_pending,
+    await_shared_leader,
+    cancel_shared_leader,
+)
 from _lib.log_fakes import RecordingLogger
 
 
@@ -106,8 +111,8 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
 ) -> None:
     """等待者被取消时仅退出自身；共享的 inflight task 继续运行至完成。
 
-    等待者 await asyncio.shield(inflight)，取消仅作用于其自身的外层 await，
-    在途登记由注册表完成回调清理。
+    等待者经 consume 以专属 future 等待共享 task 转发，取消仅作用于
+    自身 future，在途登记由注册表完成回调清理。
     """
     client = _make_client()
     roots_key = ("test-roots",)
@@ -260,21 +265,22 @@ async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
     creator = asyncio.ensure_future(
         client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
-    await inner_started.wait()
-    inflight_entry = client._image_preparer._prepare_inflight.peek((image_url, (), (0.0, 0)))
-    assert inflight_entry is not None
-    inflight = inflight_entry.task
-    creator.cancel()
+    try:
+        await inner_started.wait()
+        inflight = (await await_shared_leader(client._image_preparer._prepare_inflight)).task
+        creator.cancel()
 
-    done, pending = await asyncio.wait({creator, inflight})
-    assert pending == set()
-    assert done == {creator, inflight}
-    assert creator.cancelled()
-    # 推进事件循环跑完 inflight 完成时排队的 done callback
-    await asyncio.sleep(0)
+        done, pending = await asyncio.wait({creator, inflight})
+        assert pending == set()
+        assert done == {creator, inflight}
+        assert creator.cancelled()
+        # 推进事件循环跑完 inflight 完成时排队的 done callback
+        await asyncio.sleep(0)
 
-    assert fired == [inflight]
-    assert isinstance(inflight.exception(), ValueError)
+        assert fired == [inflight]
+        assert isinstance(inflight.exception(), ValueError)
+    finally:
+        await _reap_if_pending(creator)
 
 
 async def test_prepare_rechecks_cache_after_semaphore_wait(
@@ -411,7 +417,7 @@ async def test_waiter_cancel_then_creator_consumes_failure_no_fallback_log(
     done, pending = await asyncio.wait({creator, waiter})
     assert pending == set()
     assert waiter.cancelled()
-    # 创建者经 shield 收到该异常，异常由其调用侧的既有错误通道负责记录
+    # 创建者经专属 future 收到该异常，异常由其调用侧的既有错误通道负责记录
     assert isinstance(creator.exception(), ValueError)
 
     # 推进事件循环跑完可能排队的 done callback 后，兜底日志为零条
@@ -445,18 +451,113 @@ async def test_all_consumers_abandon_failure_logs_fallback_exactly_once(
     creator = asyncio.ensure_future(
         client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
-    await inner_started.wait()
-    inflight_entry = client._image_preparer._prepare_inflight.peek((image_url, (), (0.0, 0)))
-    assert inflight_entry is not None
-    shared_task = inflight_entry.task
-    creator.cancel()
+    try:
+        await inner_started.wait()
+        shared_task = (await await_shared_leader(client._image_preparer._prepare_inflight)).task
+        creator.cancel()
 
-    done, pending = await asyncio.wait({creator, shared_task})
-    assert pending == set()
-    assert creator.cancelled()
+        done, pending = await asyncio.wait({creator, shared_task})
+        assert pending == set()
+        assert creator.cancelled()
 
-    # 推进事件循环跑完 inflight 完成时排队的 done callback
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    # 同一孤儿失败仅一条兜底 warning，不因重复登记而多次记录
-    assert capture.warnings == ["后台共享任务失败: prepare failed"]
+        # 推进事件循环跑完 inflight 完成时排队的 done callback
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        # 同一孤儿失败仅一条兜底 warning，不因重复登记而多次记录
+        assert capture.warnings == ["后台共享任务失败: prepare failed"]
+    finally:
+        await _reap_if_pending(creator)
+
+
+async def test_prepare_retries_after_shared_leader_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """共享在途 task 被外部取消后整段重入重建在途条目，重试拿到新 task 的结果。"""
+    client = _make_client()
+    preparer = client._image_preparer
+    first_started = asyncio.Event()
+    call_count = 0
+
+    async def fake_prepare(image: str) -> str:
+        nonlocal call_count
+        del image
+        call_count += 1
+        if call_count == 1:
+            first_started.set()
+            await asyncio.sleep(3600)
+        return "prepared:retry"
+
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
+
+    image_url = "https://example.com/ref.png"
+    caller = asyncio.ensure_future(
+        preparer.prepare_image_input(image_url, scope_key=("test-roots",))
+    )
+    try:
+        await first_started.wait()
+        # 外部取消共享 task，模拟无消费者自身取消的瞬态在途取消。
+        await cancel_shared_leader(preparer._prepare_inflight)
+
+        assert await caller == "prepared:retry"
+        assert call_count == 2
+        assert len(preparer._prepare_inflight) == 0
+        assert len(preparer._prepare_cache) == 0
+    finally:
+        await _reap_if_pending(caller)
+
+
+async def test_prepare_inflight_cancel_exhausts_retries_and_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """在途 task 反复以取消态终结达尝试上限后，上抛携带明确消息与错误码的终态失败。"""
+    from seedream_mcp.utils.core.inflight import TransientInflightError
+    from seedream_mcp.utils.images.prepare import PrepareInflightExhaustedError
+
+    client = _make_client()
+    preparer = client._image_preparer
+    call_count = 0
+
+    async def always_cancelled(image: str) -> str:
+        nonlocal call_count
+        del image
+        call_count += 1
+        # 协程未收取消请求而抛 CancelledError，task 以取消态终结等价外部取消共享 task。
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(image_prepare, "prepare_image_input", always_cancelled)
+
+    with pytest.raises(PrepareInflightExhaustedError) as exc_info:
+        await preparer.prepare_image_input("https://example.com/ref.png", scope_key=("test-roots",))
+
+    # 调用方自身未被取消：失败不得谎称取消，消息与错误码指向反复取消事实
+    assert not isinstance(exc_info.value, asyncio.CancelledError)
+    assert "反复取消" in exc_info.value.message
+    assert exc_info.value.error_code == "prepare_inflight_cancelled"
+    # 耗尽即终态：不带瞬态标记，计划层按确定性失败冻结重放而非放行重建
+    assert not isinstance(exc_info.value, TransientInflightError)
+    assert call_count == 3
+
+
+async def test_prepare_cancel_exhaustion_survives_generation_error_wrapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重试耗尽的类型化失败经生成方法包装后保持类型、消息与 error_code。
+
+    Seedream 错误体系内的异常经 _finalize_generation_error 原样透传，不被
+    兜底分支泛化包装为「API 调用失败」。
+    """
+    from seedream_mcp.utils.images.prepare import PrepareInflightExhaustedError
+
+    client = _make_client()
+
+    async def always_cancelled(image: str) -> str:
+        del image
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(image_prepare, "prepare_image_input", always_cancelled)
+
+    with pytest.raises(PrepareInflightExhaustedError) as exc_info:
+        await client.image_to_image(prompt="p", image="https://example.com/ref.png")
+
+    assert "反复取消" in exc_info.value.message
+    assert exc_info.value.error_code == "prepare_inflight_cancelled"
