@@ -1,10 +1,11 @@
 """UNC 路径拒绝测试。
 
 Windows UNC 路径的 resolve 会触发 SMB 认证，须在 resolve 前拦截。覆盖
-is_unc_path、is_within_resolved、normalize_path、_file_uri_to_path 的拒绝语义，
-以及 normalize_path 对 Windows 驱动器相对路径的同口径拒绝。pathlib 与
-normpath 在 win32 把 ``/\\host\\share`` 等混合分隔符形态归一为 UNC，混合
-形态的判定与拦截仅 win32 生效，POSIX 反斜杠是合法文件名字符。
+is_unc_path、normalize_path、_file_uri_to_path 的拒绝语义，is_within_resolved、
+多基 is_within_any 与分量级 is_within_nc_parts、is_within_any_nc_parts 的包含判定，
+以及 normalize_path 对 Windows 驱动器相对路径的同口径拒绝。pathlib 与 normpath
+在 win32 把 ``/\\host\\share`` 等混合分隔符形态归一为 UNC，混合形态的判定与拦截
+仅 win32 生效，POSIX 反斜杠是合法文件名字符。
 """
 
 import sys
@@ -12,12 +13,22 @@ from pathlib import Path
 
 import pytest
 
+from _lib.containment_cases import (
+    basic_containment_candidates,
+    containment_candidates,
+    nonascii_containment_pairs,
+    relative_to_contains,
+)
 from _lib.log_fakes import capture_loguru_messages
 from seedream_mcp.utils.io.path import (
     is_drive_relative,
     is_unc_path,
+    is_within_any,
+    is_within_any_nc_parts,
+    is_within_nc_parts,
     is_within_resolved,
     is_windows_rooted_without_drive,
+    normcase_parts,
     normalize_path,
 )
 from seedream_mcp.utils.io.roots import _file_uri_to_path
@@ -122,6 +133,137 @@ def test_is_within_resolved_accepts_one_of_multiple_bases(tmp_path: Path) -> Non
     f = (base_b / "file.png").resolve()
     assert is_within_resolved(f, base_a.resolve()) is False
     assert is_within_resolved(f, base_b.resolve()) is True
+
+
+def test_is_within_resolved_empty_base_excluded() -> None:
+    """空基判不包含为护栏约定而非 relative_to 既有语义：相对候选配空基的旧 relative_to 实际判包含。"""
+    assert is_within_resolved(Path.cwd(), Path("")) is False
+    assert is_within_resolved(Path("relative/x.png"), Path("")) is False
+
+
+# ==================== is_within_nc_parts ====================
+
+
+def test_is_within_nc_parts_accepts_equal_and_inside(tmp_path: Path) -> None:
+    """候选与基相等或以基分量为前缀时界内。"""
+    base = normcase_parts(tmp_path.resolve())
+    assert is_within_nc_parts(base, base) is True
+    assert is_within_nc_parts(base + ("img.png",), base) is True
+
+
+def test_is_within_nc_parts_rejects_sibling_prefix(tmp_path: Path) -> None:
+    """分量边界杜绝 /a/b 误含 /a/bc：同前缀兄弟目录及其内条目不界内。"""
+    scope_parts = normcase_parts((tmp_path / "b").resolve())
+    sibling = tmp_path / "bc"
+    assert is_within_nc_parts(normcase_parts(sibling.resolve()), scope_parts) is False
+    assert is_within_nc_parts(normcase_parts(sibling / "x.png"), scope_parts) is False
+    assert is_within_nc_parts(scope_parts[:-1], scope_parts) is False
+
+
+def test_is_within_nc_parts_empty_base_matches_all() -> None:
+    """空基匹配一切候选（本原语约定，resolve 后绝对路径链路不可达）。"""
+    assert is_within_nc_parts(("c:\\", "a", "b.png"), ()) is True
+    assert is_within_nc_parts((), ()) is True
+
+
+def test_is_within_nc_parts_case_folds_like_pathlib(tmp_path: Path) -> None:
+    """大小写归一口径与 pathlib 等值比较一致：差分 relative_to 参照无分歧。
+
+    is_within_resolved 已委托本原语，期望值取直连 relative_to 的共享参照，
+    保持差分对 pathlib 语义的独立锁定。
+    """
+    scope = tmp_path / "b"
+    for candidate in containment_candidates(scope):
+        expected = relative_to_contains(candidate, scope)
+        assert is_within_nc_parts(normcase_parts(candidate), normcase_parts(scope)) is expected, (
+            candidate,
+            scope,
+        )
+
+
+def test_is_within_nc_parts_nonascii_case_folds_like_pathlib(tmp_path: Path) -> None:
+    """非 ASCII 大小写变体与 pathlib 同口径折叠：差分 relative_to 参照无分歧。
+
+    ntpath.normcase 的不变区域设置小写不展开 U+212A/U+0130，按其折叠曾对
+    pathlib 判包含的变体误拒；is_within_resolved 的 relative_to 等价随分量
+    折叠口径按构造成立，一并断言。
+    """
+    scope = tmp_path / "b"
+    for candidate, base in nonascii_containment_pairs(scope):
+        expected = relative_to_contains(candidate, base)
+        assert is_within_nc_parts(normcase_parts(candidate), normcase_parts(base)) is expected, (
+            candidate,
+            base,
+        )
+        assert is_within_resolved(candidate, base) is expected, (candidate, base)
+
+
+# ==================== is_within_any ====================
+
+
+def test_is_within_any_accepts_one_of_multiple_bases(tmp_path: Path) -> None:
+    """多基场景任一基命中即界内，全部未命中判越界。"""
+    base_a = tmp_path / "a"
+    base_b = tmp_path / "b"
+    base_a.mkdir()
+    base_b.mkdir()
+    f = (base_b / "file.png").resolve()
+    assert is_within_any(f, [base_a.resolve(), base_b.resolve()]) is True
+    assert is_within_any(f, [base_a.resolve()]) is False
+
+
+def test_is_within_any_empty_bases_excluded() -> None:
+    """空基列表单点判不包含，与 is_within_resolved 空基护栏同口径。"""
+    assert is_within_any(Path.cwd(), []) is False
+
+
+def test_is_within_any_empty_base_entry_does_not_match_all(tmp_path: Path) -> None:
+    """基列表混入空基不发生匹配一切的退化，护栏经委托 is_within_any_nc_parts 继承。"""
+    assert is_within_any(tmp_path / "x.png", [Path("")]) is False
+    assert is_within_any(tmp_path / "x.png", [Path(""), tmp_path]) is True
+
+
+# ==================== is_within_any_nc_parts ====================
+
+
+def test_is_within_any_nc_parts_accepts_one_of_multiple_bases(tmp_path: Path) -> None:
+    """多基分量序列任一命中即界内，全部未命中判越界。"""
+    base_a = normcase_parts((tmp_path / "a").resolve())
+    base_b = normcase_parts((tmp_path / "b").resolve())
+    entry = normcase_parts((tmp_path / "b" / "file.png").resolve())
+    assert is_within_any_nc_parts(entry, [base_a, base_b]) is True
+    assert is_within_any_nc_parts(entry, [base_a]) is False
+
+
+def test_is_within_any_nc_parts_empty_bases_excluded() -> None:
+    """空基集合单点判不包含，与 is_within_any 同口径。"""
+    assert is_within_any_nc_parts(("c:\\", "a", "b.png"), []) is False
+
+
+def test_is_within_any_nc_parts_empty_base_entry_does_not_match_all(tmp_path: Path) -> None:
+    """基集合混入空分量序列不发生匹配一切的退化，护栏与 is_within_any 同口径。"""
+    entry = normcase_parts(tmp_path / "x.png")
+    assert is_within_any_nc_parts(entry, [()]) is False
+    assert is_within_any_nc_parts(entry, [(), normcase_parts(tmp_path)]) is True
+
+
+def test_is_within_any_forms_match_relative_to_reference(tmp_path: Path) -> None:
+    """路径形态与分量形态的多基判定都对直连 relative_to 的参照断言。
+
+    期望值不经 is_within_any 推导（其全函数委托分量原语，自指差分锁不住漂移）；
+    取基础候选三项（相等、界内、父级界外）覆盖多基组合语义。
+    """
+    base = tmp_path.resolve()
+    scope = base / "b"
+    bases = [base / "zzz", scope]
+    bases_parts = [normcase_parts(b) for b in bases]
+    for candidate in basic_containment_candidates(scope):
+        expected = relative_to_contains(candidate, scope)
+        assert is_within_any(candidate, bases) is expected, (candidate, scope)
+        assert is_within_any_nc_parts(normcase_parts(candidate), bases_parts) is expected, (
+            candidate,
+            scope,
+        )
 
 
 # ==================== 盘符相对与有根无盘符共享判定 ====================

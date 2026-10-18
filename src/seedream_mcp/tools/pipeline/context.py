@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config import SeedreamConfig
-from ...utils.core.errors import SeedreamValidationError
 from ...utils.core.validators import (
     ensure_utf8_encodable,
     resolve_default_parallelism,
@@ -21,11 +20,11 @@ from ...utils.core.validators import (
     validate_layer_decomposition,
     validate_optimize_prompt_options,
     validate_output_format,
+    validate_reference_image_count,
     validate_sequential_generation_support,
     validate_size_for_model,
     validate_stream,
 )
-from ...utils.model.capabilities import get_max_reference_images
 from ..schemas import GenerationInputParams
 
 
@@ -87,22 +86,16 @@ def build_generation_context(
         SeedreamValidationError: 尺寸、输出格式、流式、联网工具、提示词优化、图层
             拆分、透明通道、组图能力或参考图数量校验未通过。
     """
-    # 组图能力根因先于参考图数量上限报出，避免误导性的「数量超限」修复指引
+    # 组图能力根因先于参考图数量上限报出，避免误导性的「数量超限」修复指引。
     if hasattr(params, "max_images"):
         validate_sequential_generation_support(config.model_id)
-    # 数量上限依赖 model_id，由能力表统一判定；须与尺寸/流式等能力校验同层
-    # 在此执行，避免进度上报「参数校验完成」后才在请求执行器内报错。
     if params.prompt is not None:
         ensure_utf8_encodable(params.prompt, "提示词包含无法编码的字符", "prompt")
+    # 数量上限依赖 model_id，由能力表统一判定；须与尺寸/流式等能力校验同层
+    # 在此执行，避免进度上报「参数校验完成」后才在请求执行器内报错。
     images = getattr(params, "image", None)
     if isinstance(images, list):
-        max_reference = get_max_reference_images(config.model_id)
-        if len(images) > max_reference:
-            raise SeedreamValidationError(
-                f"image 数量不能超过 {max_reference}",
-                field="image",
-                value=images,
-            )
+        validate_reference_image_count(config.model_id, images)
     optimize_prompt_options = (
         validate_optimize_prompt_options(
             params.optimize_prompt_options.model_dump(), config.model_id
@@ -150,7 +143,7 @@ def build_generation_context(
         # max_images 为 schema 推导后的生效值，回显供调用方获知实际生成上限。
         max_images=getattr(params, "max_images", None),
         request_count=params.request_count,
-        # 缺省推导在 schema 校验器完成，此处兜底防未经校验器的输入模型直传 None
+        # 缺省推导在 schema 校验器完成，此处兜底防未经校验器的输入模型直传 None。
         parallelism=(
             params.parallelism
             if params.parallelism is not None

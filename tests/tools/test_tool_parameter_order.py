@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult
 from pydantic import BaseModel, ValidationError
 from pydantic.fields import FieldInfo
 
@@ -22,6 +23,7 @@ from _lib.no_param_tools import NO_PARAM_TOOLS
 from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools.schemas import (
     BrowseImagesInput,
+    FORMAT_FILTER_ITEM_MAX_LENGTH,
     ImageToImageInput,
     MultiImageFusionInput,
     OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
@@ -469,6 +471,39 @@ async def test_sequential_tool_rejects_oversized_image_list() -> None:
     message = str(exc_info.value)
     assert "参考图片数量" not in message
     assert "14" in message
+
+
+# ==================== 浏览后缀单项上限的 schema 层声明 ====================
+
+
+async def test_browse_format_filter_items_declare_max_length() -> None:
+    """format_filter 数组项的 maxLength 在平铺与模型两层 schema 均声明且同值。
+
+    镜像等价断言在两侧同时丢失声明时仍相等，本断言独立锁定声明存在；条目经
+    before-validator 归一后入核心 schema，maxLength 按归一后终值口径执行。
+    """
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+    tool_prop = by_name["browse_images"].input_schema["properties"]["format_filter"]
+    model_prop = BrowseImagesInput.model_json_schema()["properties"]["format_filter"]
+    for prop in (tool_prop, model_prop):
+        array_branch = next(branch for branch in prop["anyOf"] if branch.get("type") == "array")
+        assert array_branch["items"]["maxLength"] == FORMAT_FILTER_ITEM_MAX_LENGTH
+
+
+async def test_browse_tool_rejects_bare_item_at_published_max_length() -> None:
+    """裸 16 字符条目满足发布的条目 maxLength 而被服务端拒绝，残余偏差在此锁定。
+
+    客户端无法预知服务端补点，inputSchema 对无点原始条目偏宽一位；归一后触界拒绝
+    发生在输入模型构造层，经流水线返回 is_error 结果而非 ToolError。
+    """
+    result = await mcp.call_tool("browse_images", {"format_filter": ["a" * 16]})
+
+    assert isinstance(result, CallToolResult)
+    assert result.is_error
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["error"]["type"] == "validation_error"
 
 
 # ==================== 模型工具列表条目上限 ====================

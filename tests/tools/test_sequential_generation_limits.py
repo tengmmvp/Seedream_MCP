@@ -4,7 +4,10 @@ import pytest
 
 from seedream_mcp.tools.schemas import SequentialGenerationInput
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.utils.core.validators import validate_sequential_image_limit
+from seedream_mcp.utils.core.validators import (
+    validate_reference_image_count,
+    validate_sequential_image_limit,
+)
 
 
 def test_sequential_generation_total_limit_ok() -> None:
@@ -18,7 +21,7 @@ def test_sequential_generation_total_limit_ok() -> None:
 def test_sequential_generation_total_limit_exceed() -> None:
     """参考图数量与 max_images 之和超过总上限 15 时拒绝。"""
     images = [f"https://example.com/{i}.png" for i in range(6)]
-    with pytest.raises(ValueError, match="不能超过15"):
+    with pytest.raises(ValueError, match="不能超过 15"):
         SequentialGenerationInput(prompt="test", max_images=10, image=images)
 
 
@@ -83,7 +86,7 @@ _LITE = "doubao-seedream-5.0-lite"
 def test_validate_sequential_image_limit_pro_caps_at_10() -> None:
     """5.0 Pro 参考图上限由能力表驱动为 10，11 张须拒绝。"""
     images = [f"https://example.com/{i}.png" for i in range(11)]
-    with pytest.raises(SeedreamValidationError, match="不能超过10"):
+    with pytest.raises(SeedreamValidationError, match="image 数量不能超过 10"):
         validate_sequential_image_limit(1, images, _PRO)
 
 
@@ -98,5 +101,27 @@ def test_validate_sequential_image_limit_default_caps_at_14() -> None:
     ok = [f"https://example.com/{i}.png" for i in range(14)]
     validate_sequential_image_limit(1, ok)
     over = [f"https://example.com/{i}.png" for i in range(15)]
-    with pytest.raises(SeedreamValidationError, match="不能超过14"):
+    with pytest.raises(SeedreamValidationError, match="image 数量不能超过 14"):
         validate_sequential_image_limit(1, over)
+
+
+def test_validate_sequential_image_limit_reference_check_matches_shared_validator() -> None:
+    """组图入口的参考图超限报错与通用校验入口完全一致，二者共用同一实现。"""
+    images = [f"https://example.com/{i}.png" for i in range(11)]
+
+    with pytest.raises(SeedreamValidationError) as sequential_info:
+        validate_sequential_image_limit(1, images, _PRO)
+    with pytest.raises(SeedreamValidationError) as reference_info:
+        validate_reference_image_count(_PRO, images)
+
+    assert str(sequential_info.value) == str(reference_info.value)
+    assert sequential_info.value.field == reference_info.value.field
+    assert sequential_info.value.value == reference_info.value.value
+
+
+def test_validate_reference_image_count_returns_capability_limit() -> None:
+    """校验通过时返回所用上限，供调用方复用免于重复推导。"""
+    images = [f"https://example.com/{i}.png" for i in range(10)]
+
+    assert validate_reference_image_count(_PRO, images) == 10
+    assert validate_reference_image_count(_LITE, images) == 14

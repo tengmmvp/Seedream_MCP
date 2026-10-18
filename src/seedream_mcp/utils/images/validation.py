@@ -41,6 +41,7 @@ from ..io.path import (
     has_windows_colon_component,
     is_drive_relative,
     is_unc_path,
+    is_within_any,
     is_within_resolved,
     is_windows_rooted_without_drive,
     normalize_path,
@@ -330,7 +331,8 @@ def iter_local_candidates(
         except (OSError, ValueError, RuntimeError):
             continue
         if is_absolute:
-            if any(is_within_resolved(resolved_candidate, base) for base in read_scope):
+            # 基集合只用一次，判定走 is_within_any，内部逐基现算恰宜。
+            if is_within_any(resolved_candidate, read_scope):
                 yield resolved_candidate
         elif is_within_resolved(resolved_candidate, Path(base_dir)):
             yield resolved_candidate
@@ -629,8 +631,8 @@ def validate_image_path(path: str, skip_dimensions: bool = False) -> str | None:
             return None
 
         normalized_path = normalize_path(path, str(resolve_images_root()))
-        # 越界判定面向读权限集合（工作区 ∪ 图片目录），与候选定位同口径。
-        if not any(is_within_resolved(normalized_path, scope) for scope in get_read_scope()):
+        # 基集合只用一次，判定走 is_within_any，内部逐基现算恰宜。
+        if not is_within_any(normalized_path, get_read_scope()):
             return "路径不在读取范围内"
 
         try:

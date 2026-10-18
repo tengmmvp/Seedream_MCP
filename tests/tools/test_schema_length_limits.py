@@ -2,7 +2,7 @@
 
 pydantic 在 core schema 层强制 max_length 约束，超长值在字段校验器运行前即被拒绝。
 覆盖 prompt 100000、save_path 1024、custom_name 255、browse directory 1024、
-browse format_filter 单项 16 与条目数 32 的接受与超长拒绝边界、browse
+browse format_filter 补点后单项 16 与条目数 32 的接受与超长拒绝边界、browse
 数值控件区间、枚举字段归一与拒绝、可选字符串字段的空白拒绝与 None 放行、
 image 的空白拒绝、多图 image=None 的类型拒绝，以及多图与组图
 空白条目报错文案一致、空白包裹参考图 strip 归一后按 url/data_uri 分类，
@@ -107,16 +107,24 @@ def test_blank_directory_rejected_none_allowed() -> None:
 
 
 def test_browse_format_filter_accepts_item_max_length_boundary() -> None:
-    """format_filter 单项长度恰为 16 应被接受。"""
-    model = BrowseImagesInput.model_validate({"format_filter": ["a" * 16]})
+    """补点后单项恰为 16 的带点与裸输入两种边界形态被接受。"""
+    model = BrowseImagesInput.model_validate({"format_filter": ["." + "a" * 15, "a" * 15]})
 
-    assert model.format_filter == ["." + "a" * 16]
+    assert model.format_filter == ["." + "a" * 15, "." + "a" * 15]
 
 
-def test_browse_format_filter_rejects_exceeding_item_max_length() -> None:
-    """format_filter 单项长度 17 应被 pydantic 拒绝。"""
+@pytest.mark.parametrize("item", ["a" * 17, "." + "a" * 16])
+def test_browse_format_filter_rejects_exceeding_item_max_length(item: str) -> None:
+    """归一后长度超 16 的裸与带点两种输入形态均被 maxLength 拒绝。"""
     with pytest.raises(ValidationError):
-        BrowseImagesInput.model_validate({"format_filter": ["a" * 17]})
+        BrowseImagesInput.model_validate({"format_filter": [item]})
+
+
+def test_browse_format_filter_normalizes_common_suffixes() -> None:
+    """常规后缀 jpeg 与 .png 归一为点前缀小写形态，边界收口不影响日常取值。"""
+    model = BrowseImagesInput.model_validate({"format_filter": ["jpeg", ".PNG"]})
+
+    assert model.format_filter == [".jpeg", ".png"]
 
 
 def test_browse_format_filter_accepts_item_count_boundary() -> None:

@@ -28,11 +28,15 @@ from ...utils.core.logs import get_logger
 from ...utils.io.path import (
     get_read_context,
     get_workspace_roots,
+    is_within_any,
+    is_within_any_nc_parts,
     is_within_resolved,
     normalize_path,
+    normcase_parts,
     read_scope_denial_message,
 )
 from ...utils.io.scan import (
+    ScanEntry,
     ScanIncompleteCause,
     ScanResult,
     cached_find_images_in_directory,
@@ -147,17 +151,20 @@ class _BrowseRequestState:
 
 
 def _format_file_info(
-    display_path: str, stat_path: Path, show_details: bool
+    display_path: str,
+    entry: ScanEntry,
+    show_details: bool,
 ) -> tuple[str, dict[str, Any]]:
-    """格式化单个文件的展示文本与结构化详情字段。
+    """格式化单个扫描条目的展示文本与结构化详情字段。
 
-    show_details 为真时附带大小与修改时间，文本格式为「路径 | 大小 | 修改时间」，结构化
-    详情含 size_mb 与 modified 两键；stat 或时间戳解析失败时降级为「文件信息不可用」。
-    show_details 为假时仅返回路径文本与空详情字典。
+    show_details 为真时附带大小与修改时间，对条目的 resolved_path 活体 stat；
+    文本格式为「路径 | 大小 | 修改时间」，结构化详情含 size_mb 与 modified
+    两键；stat 或时间戳解析失败时降级为「文件信息不可用」。show_details
+    为假时仅返回路径文本与空详情字典。
 
     Args:
         display_path: 展示给用户的路径字符串。
-        stat_path: 读取文件属性的实际路径对象。
+        entry: 待展示的扫描条目。
         show_details: 是否附带大小与修改时间详情。
 
     Returns:
@@ -166,7 +173,7 @@ def _format_file_info(
     if not show_details:
         return display_path, {}
     try:
-        stat_result = stat_path.stat()
+        stat_result = entry.resolved_path.stat()
     except OSError:
         return f"{display_path} | 文件信息不可用", {"size_mb": None, "modified": None}
     size_mb = stat_result.st_size / (1024 * 1024)
@@ -291,7 +298,8 @@ def _scan_and_filter_directory(
     同步执行，由调用方经 ``asyncio.to_thread`` 在线程内调用。图片的 resolve 结果由
     扫描缓存共享；越界复核不随缓存固化，经 include 谓词传入扫描层、每次按
     当前读权限重新执行，读范围签名随调用并入缓存键，谓词派生信号不跨读范围
-    回放。配额填充与扩窗由扫描层端到端承担，
+    回放。包含判定按预计算分量执行：条目分量随扫描条目携带，读范围分量每次
+    调用预计算一次。配额填充与扩窗由扫描层端到端承担，
     本函数不叠加补扫循环，增长与停滞语义单层收拢。越界剔除数由扫描层经
     excluded_count 回传（扩窗轮次间不重复计数，命中回放按考查前缀计），
     本函数按计数落单条聚合告警，防大目录翻页时越界项逐条刷屏；
@@ -316,12 +324,16 @@ def _scan_and_filter_directory(
     if not read_scope:
         return ScanResult(images=[], complete=False, incomplete_cause=ScanIncompleteCause.STALLED)
 
-    def _within_read_scope(pair: tuple[Path, Path]) -> bool:
-        # resolve 结果来自扫描缓存；权限目录已 resolve，直接比较。
-        return any(is_within_resolved(pair[1], scope) for scope in read_scope)
+    # 读范围分量随调用预计算一次，条目按分量原语直判，免逐条目重建范围分量。
+    scope_parts = [normcase_parts(base) for base in read_scope]
+
+    def _within_read_scope(entry: ScanEntry) -> bool:
+        # 条目分量已随扫描条目预计算，包含判定仅做分量比较、不触发文件系统解析。
+        return is_within_any_nc_parts(entry.resolved_nc_parts, scope_parts)
 
     try:
-        # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
+        # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性
+        # 即可生效。
         scan_result = cached_find_images_in_directory(
             resolved_dir=resolved_dir,
             recursive=recursive,
@@ -343,7 +355,7 @@ def _scan_and_filter_directory(
 
 def _build_display_entries(
     *,
-    image_pairs: list[tuple[Path, Path]],
+    image_entries: list[ScanEntry],
     show_details: bool,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """组装展示文本与结构化图片条目，条目为可直接使用的绝对路径。
@@ -354,8 +366,7 @@ def _build_display_entries(
     回显不做脱敏，保证模型按条目回流时路径可命中。
 
     Args:
-        image_pairs: 当前页的 (原始路径, resolved 路径) 对列表，
-            已经扫描层越界过滤与去重。
+        image_entries: 当前页的扫描条目列表，已经扫描层越界过滤与去重。
         show_details: 是否附带大小与修改时间详情。
 
     Returns:
@@ -363,17 +374,18 @@ def _build_display_entries(
     """
     lines: list[str] = []
     structured_images: list[dict[str, Any]] = []
-    for idx, (_, img_resolved) in enumerate(image_pairs, 1):
+    for idx, image_entry in enumerate(image_entries, 1):
+        img_resolved = image_entry.resolved_path
         # as_posix 仅归一分隔符，POSIX 文件名中的字面反斜杠保持原样可回流。
         display_path = img_resolved.as_posix()
         # 文本通道压平控制字符，防止含控制字符文件名伪造清单行；口径与 errors 的
         # 净化共用 CONTROL_CHARS_PATTERN；结构化路径保持原样供回流。
         text_path = CONTROL_CHARS_PATTERN.sub(" ", display_path)
-        detail_text, details = _format_file_info(text_path, img_resolved, show_details)
+        detail_text, details = _format_file_info(text_path, image_entry, show_details)
         lines.append(f"{idx}. {detail_text}")
-        entry: dict[str, Any] = {"index": idx, "path": display_path}
-        entry.update(details)
-        structured_images.append(entry)
+        structured: dict[str, Any] = {"index": idx, "path": display_path}
+        structured.update(details)
+        structured_images.append(structured)
     return lines, structured_images
 
 
@@ -402,10 +414,12 @@ def _normalize_format_filter(raw: list[str] | None) -> tuple[list[str] | None, b
 
 def _narrow_scope_to_bounds(read_scope: list[Path], bounds_scope: list[Path]) -> list[Path]:
     """仅保留落在读权限内的替代界，未落入者整界剔除。"""
+    # 读范围分量随调用预计算一次，替代界按分量原语直判，免逐替代界重建范围分量。
+    read_scope_parts = [normcase_parts(base) for base in read_scope]
     return [
         bound
         for bound in bounds_scope
-        if any(is_within_resolved(bound, scope) for scope in read_scope)
+        if is_within_any_nc_parts(normcase_parts(bound), read_scope_parts)
     ]
 
 
@@ -477,7 +491,8 @@ async def _resolve_browse_directories(
                 None,
                 "相对路径仅限图片保存目录内，其他位置请使用绝对路径",
             )
-        if not any(is_within_resolved(resolved_dir, scope) for scope in read_scope):
+        # 基集合只用一次，判定走 is_within_any，内部逐基现算恰宜。
+        if not is_within_any(resolved_dir, read_scope):
             return workspace_roots, read_scope, None, None
         return workspace_roots, read_scope, resolved_dir, None
 
@@ -491,13 +506,13 @@ async def _scan_browse_entries(
     resolved_dir: Path,
     read_scope: list[Path],
     format_filter_exhausted: bool,
-) -> tuple[list[tuple[Path, Path]], list[Path], ScanResult | None]:
-    """扫描阶段：扫描请求目录收集越界过滤后的条目对，上报扫描进度并回传扫描信号。"""
+) -> tuple[list[ScanEntry], list[Path], ScanResult | None]:
+    """扫描阶段：扫描请求目录收集越界过滤后的条目，上报扫描进度并回传扫描信号。"""
     # scan_limit 多取一张用于判定 has_more；越界剔除经 include 谓词由扫描层端到端
     # 承担，见 _scan_and_filter_directory。format_filter_exhausted 时跳过扫描与
     # 进度上报，由空结果分支统一返回。
     scan_limit = state.offset + state.limit + 1
-    image_pairs: list[tuple[Path, Path]] = []
+    image_entries: list[ScanEntry] = []
     unreadable_dirs: list[Path] = []
     scan_result: ScanResult | None = None
     if not format_filter_exhausted:
@@ -512,18 +527,18 @@ async def _scan_browse_entries(
             read_scope=read_scope,
             unreadable_dirs=unreadable_dirs,
         )
-        image_pairs = scan_result.images
-    return image_pairs, unreadable_dirs, scan_result
+        image_entries = scan_result.images
+    return image_entries, unreadable_dirs, scan_result
 
 
 def _paginate_browse_images(
     *,
-    image_pairs: list[tuple[Path, Path]],
+    image_entries: list[ScanEntry],
     offset: int,
     limit: int,
     scan_result: ScanResult | None,
-) -> tuple[list[tuple[Path, Path]], bool | None, int | None, int | None]:
-    """分页切片阶段：切出当前页条目对并派生 has_more、next_offset 与 total_count。
+) -> tuple[list[ScanEntry], bool | None, int | None, int | None]:
+    """分页切片阶段：切出当前页扫描条目并派生 has_more、next_offset 与 total_count。
 
     存在不完整成因（条目预算截断、扩窗停滞或条目剔除）时总数未知：
     total_count 置 None。截断或停滞使窗口未扫尽时，未翻满页也不以 has_more=False
@@ -534,13 +549,13 @@ def _paginate_browse_images(
     """
     # has_more 时未扫完全量、总数未知，total_count 置 None。
     page_end = offset + limit
-    page_pairs = image_pairs[offset:page_end]
-    has_more: bool | None = len(image_pairs) > page_end
+    page_entries = image_entries[offset:page_end]
+    has_more: bool | None = len(image_entries) > page_end
     next_offset: int | None = page_end if has_more else None
     if has_more:
         total_count = None
     elif scan_result is None or scan_result.incomplete_cause is None:
-        total_count = len(image_pairs)
+        total_count = len(image_entries)
     else:
         total_count = None
         if not (
@@ -548,7 +563,7 @@ def _paginate_browse_images(
         ):
             has_more = None
             next_offset = None
-    return page_pairs, has_more, next_offset, total_count
+    return page_entries, has_more, next_offset, total_count
 
 
 async def _build_empty_browse_result(
@@ -623,7 +638,7 @@ async def _build_browse_success_result(
     *,
     ctx: Context[Any, Any] | None,
     state: _BrowseRequestState,
-    page_pairs: list[tuple[Path, Path]],
+    page_entries: list[ScanEntry],
     has_more: bool | None,
     next_offset: int | None,
     total_count: int | None,
@@ -632,13 +647,13 @@ async def _build_browse_success_result(
     """成功装配阶段：生成展示条目与翻页引导并组装 completed 结果。"""
     display_lines, structured_images = await asyncio.to_thread(
         _build_display_entries,
-        image_pairs=page_pairs,
+        image_entries=page_entries,
         show_details=state.show_details,
     )
     lines = ["图片列表:"] + display_lines
     if has_more:
         # has_more 时 total_count 恒为 None，翻页引导仅给出当前页区间。
-        page_last = state.offset + len(page_pairs)
+        page_last = state.offset + len(page_entries)
         range_text = f"第 {state.offset + 1}-{page_last} 张"
         lines.append(f"{range_text}，仍有更多，继续翻页请传 offset={next_offset}")
     marker = _incomplete_marker_text(scan_result)
@@ -731,7 +746,7 @@ async def execute_browse_request(
         if bounds_scope is not None
         else read_scope
     )
-    image_pairs, unreadable_dirs, scan_result = await _scan_browse_entries(
+    image_entries, unreadable_dirs, scan_result = await _scan_browse_entries(
         ctx=ctx,
         state=state,
         resolved_dir=resolved_dir,
@@ -739,13 +754,13 @@ async def execute_browse_request(
         format_filter_exhausted=format_filter_exhausted,
     )
 
-    page_pairs, has_more, next_offset, total_count = _paginate_browse_images(
-        image_pairs=image_pairs,
+    page_entries, has_more, next_offset, total_count = _paginate_browse_images(
+        image_entries=image_entries,
         offset=state.offset,
         limit=state.limit,
         scan_result=scan_result,
     )
-    if not page_pairs:
+    if not page_entries:
         return await _build_empty_browse_result(
             ctx=ctx,
             state=state,
@@ -760,7 +775,7 @@ async def execute_browse_request(
     return await _build_browse_success_result(
         ctx=ctx,
         state=state,
-        page_pairs=page_pairs,
+        page_entries=page_entries,
         has_more=has_more,
         next_offset=next_offset,
         total_count=total_count,

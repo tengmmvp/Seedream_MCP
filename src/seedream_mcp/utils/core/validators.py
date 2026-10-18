@@ -791,6 +791,27 @@ def validate_parallel_generation_options(
     return validated_request_count, validated_parallelism
 
 
+def validate_reference_image_count(
+    model_id: str, images: list[str], *, field_name: str = "image"
+) -> int:
+    """校验参考图数量不超过模型参考图上限，上限由能力表按 model_id 判定。
+
+    Returns:
+        校验依据的模型参考图上限，供调用方复用免于重复推导。
+
+    Raises:
+        SeedreamValidationError: 数量超过模型参考图上限时抛出。
+    """
+    max_reference = get_max_reference_images(model_id)
+    if len(images) > max_reference:
+        raise SeedreamValidationError(
+            f"{field_name} 数量不能超过 {max_reference}",
+            field=field_name,
+            value=images,
+        )
+    return max_reference
+
+
 def validate_sequential_generation_support(model_id: str) -> None:
     """验证模型对组图生成的支持。
 
@@ -825,20 +846,14 @@ def validate_sequential_image_limit(
         SeedreamValidationError: 参考图数量超过模型能力上限，或与生成数量之和
             超过 15 时抛出。
     """
-    max_reference = get_max_reference_images(model_id)
-    reference_count = len(reference_images) if reference_images else 0
-    if reference_count > max_reference:
-        raise SeedreamValidationError(
-            f"参考图数量不能超过{max_reference}，"
-            f"且参考图数量与生成数量之和不能超过{MAX_SEQUENTIAL_TOTAL_IMAGES}",
-            field="image",
-            value={"reference_images": reference_count, "max_images": max_images},
-        )
-
+    # 空参考图经数量校验必然放行，统一调用以单次取得上限推导。
+    images = reference_images or []
+    max_reference = validate_reference_image_count(model_id, images)
+    reference_count = len(images)
     if reference_count + max_images > MAX_SEQUENTIAL_TOTAL_IMAGES:
         raise SeedreamValidationError(
-            f"参考图数量与生成数量之和不能超过{MAX_SEQUENTIAL_TOTAL_IMAGES}"
-            f"（参考图最多{max_reference}）",
+            f"参考图数量与生成数量之和不能超过 {MAX_SEQUENTIAL_TOTAL_IMAGES}"
+            f"（参考图最多 {max_reference}）",
             field="image",
             value={"reference_images": reference_count, "max_images": max_images},
         )

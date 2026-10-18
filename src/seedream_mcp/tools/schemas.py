@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Callable, ClassVar, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 from ..utils.core.errors import SeedreamValidationError
 from ..utils.images.validation import MAX_IMAGE_FILE_SIZE
@@ -64,10 +64,10 @@ LIMIT_MAX = 200
 OFFSET_MIN = 0
 OFFSET_MAX = 100000
 
-# 后缀单项长度上限防止错误消息整体回显超大字符串。
+# 后缀单项长度上限按补点后终值计，防止错误消息整体回显超大字符串。
 FORMAT_FILTER_ITEM_MAX_LENGTH = 16
 
-# 后缀条目数上限：其余列表字段均有条目界，无界列表在大请求体下造成遍历与回显放大。
+# 后缀条目数上限：其余列表字段均已有界，无界列表在大请求体下造成遍历与回显放大。
 FORMAT_FILTER_MAX_ITEMS = 32
 
 # 非空语义镜像的 pattern：输入模型经 str_strip_whitespace 剥离空白后校验，纯空白
@@ -621,6 +621,19 @@ class SequentialGenerationInput(
         return self
 
 
+def _normalize_format_filter_item(value: object) -> object:
+    """strip 与小写归一并补齐缺失的点前缀，空白条目拒绝。"""
+
+    if not isinstance(value, str):
+        return value
+    cleaned = value.strip().lower()
+    if not cleaned:
+        raise ValueError("format_filter 条目不能为空白")
+    if not cleaned.startswith("."):
+        cleaned = f".{cleaned}"
+    return cleaned
+
+
 class BrowseImagesInput(BaseModel):
     """本地图片浏览：浏览工作目录中的图片文件，便于选择参考图或查看已生成内容。
 
@@ -671,12 +684,21 @@ class BrowseImagesInput(BaseModel):
         le=OFFSET_MAX,
         description=OFFSET_DESCRIPTION,
     )
-    format_filter: list[Annotated[str, Field(max_length=FORMAT_FILTER_ITEM_MAX_LENGTH)]] | None = (
-        Field(
-            default=None,
-            max_length=FORMAT_FILTER_MAX_ITEMS,
-            description=FORMAT_FILTER_DESCRIPTION,
-        )
+    # 条目经 before-validator 归一后入核心 schema，maxLength 校验最终存储形态；
+    # 对外发布的 maxLength 对无点原始条目仍偏宽一位，客户端无法预知服务端补点。
+    format_filter: (
+        list[
+            Annotated[
+                str,
+                Field(max_length=FORMAT_FILTER_ITEM_MAX_LENGTH),
+                BeforeValidator(_normalize_format_filter_item),
+            ]
+        ]
+        | None
+    ) = Field(
+        default=None,
+        max_length=FORMAT_FILTER_MAX_ITEMS,
+        description=FORMAT_FILTER_DESCRIPTION,
     )
     show_details: bool = Field(
         default=DEFAULT_SHOW_DETAILS,
@@ -692,22 +714,6 @@ class BrowseImagesInput(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("目录路径不能为空字符串")
-        return normalized
-
-    @field_validator("format_filter")
-    @classmethod
-    def normalize_suffixes(cls, value: list[str] | None) -> list[str] | None:
-        """后缀统一小写并补齐点前缀，空白条目拒绝，None 时返回 None。"""
-        if value is None:
-            return None
-        normalized = []
-        for suffix in value:
-            cleaned = suffix.strip().lower()
-            if not cleaned:
-                raise ValueError("format_filter 条目不能为空白")
-            if not cleaned.startswith("."):
-                cleaned = f".{cleaned}"
-            normalized.append(cleaned)
         return normalized
 
 

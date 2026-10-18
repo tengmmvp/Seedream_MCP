@@ -2,9 +2,9 @@
 
 find_images_in_directory 为按 normcase 稳定顺序的深度优先遍历，条目预算封顶
 物化量；cached_find_images_in_directory 以 (目录路径, recursive, max_depth,
-格式过滤元组, 扫描函数, 读范围签名) 为键缓存有序扫描结果，供 browse_images 翻页
-共享，消除深翻页的重复文件系统扫描。条目存储 (原始路径, resolved 路径) 对，扫描
-完成时 resolve 一次，深翻页命中免于逐文件重复 resolve；
+格式过滤元组, 扫描函数, 读范围签名) 为键缓存有序扫描结果，供 browse_images
+翻页共享，消除深翻页的重复文件系统扫描。条目存储 ScanEntry（resolved 路径
+与 normcase 分量），扫描完成时 resolve 一次，深翻页命中免于逐文件重复 resolve；
 结果以冻结 ScanResult 外传，是否扫到目录末尾按原始扫描量判定，
 resolve 失败剔除不折损早停事实，不完整成因（截断/停滞/剔除）
 由本层单点归一并随缓存条目回放，resolve 剔除数经 skipped_count
@@ -35,11 +35,12 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
 from .files import has_reparse_attribute
-from .path import ResolveResultCache, is_unc_path
+from .path import ResolveResultCache, fold_case, is_unc_path, normcase_parts
 
 logger = get_logger()
 
@@ -77,13 +78,14 @@ _SCAN_PREFIX_GROWTH_FACTOR = 2
 # 恰占满扩展窗的有限坏段由次轮扩窗跨过，真停滞目录多付一轮翻倍扫描。
 _SCAN_STALL_ZERO_PROGRESS_ROUNDS = 2
 
-# raw→resolved 的进程级复用缓存，TTL 过期重扫免逐文件重复 resolve；缓存值同时
-# 供回显与读权限判定消费，符号链接改向的陈旧窗口由 TTL 封顶在扫描条目陈旧窗口
-# 的两倍。骨架与配置根缓存共用 path 的 ResolveResultCache。
+# raw→ScanEntry 的进程级复用缓存，TTL 过期重扫免逐文件重复 resolve 与分量
+# 重建，扩窗重扫的已缓存条目零重算；缓存值同时供回显与读权限判定消费，
+# 符号链接改向的陈旧窗口由 TTL 封顶在扫描条目陈旧窗口的两倍。
+# 骨架与配置根缓存共用 path 的 ResolveResultCache。
 # 扫描 resolve 复用缓存的进程级条目上限：派生自扫描缓存单目录上限，恒容纳
 # 一个最大可缓存目录的全量条目。
 _RESOLVE_CACHE_TTL_SECONDS = 60.0
-_SCAN_RESOLVE_CACHE = ResolveResultCache[Path](
+_SCAN_RESOLVE_CACHE: ResolveResultCache[ScanEntry] = ResolveResultCache(
     _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN, ttl_seconds=_RESOLVE_CACHE_TTL_SECONDS
 )
 
@@ -104,12 +106,25 @@ class ScanIncompleteCause(enum.Enum):
     SKIPPED = enum.auto()  # resolve 失败或负缓存剔除条目
 
 
+class ScanEntry(NamedTuple):
+    """扫描与缓存链路的单图片条目。
+
+    Attributes:
+        resolved_path: resolve 后路径，展示与包含判定均以其为准。
+        resolved_nc_parts: resolved 路径各分量的 normcase 形式，缓存命中回放的
+            包含判定免逐条重算。
+    """
+
+    resolved_path: Path
+    resolved_nc_parts: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class ScanResult:
     """cached_find_images_in_directory 的冻结返回结构，新扫描信号以加属性扩展。
 
     Attributes:
-        images: 有序 (原始路径, resolved 路径) 对列表的独立副本。
+        images: 有序扫描条目列表的独立副本，条目形态见 ScanEntry。
         complete: 扫描是否已到目录末尾，按原始扫描量判定。
         incomplete_cause: 结果不完整的成因，完整或普通前缀早停为 None；SKIPPED
             陈述窗口内有条目被剔除，不预设扫尽事实，可与 complete 并存。
@@ -119,7 +134,7 @@ class ScanResult:
             前轮超集，最终轮计数即全程去重总量，命中回放按考查前缀计。
     """
 
-    images: list[tuple[Path, Path]]
+    images: list[ScanEntry]
     complete: bool
     incomplete_cause: ScanIncompleteCause | None
     skipped_count: int = 0
@@ -201,17 +216,23 @@ def _is_scan_entry_fresh(
     return time.monotonic() - entry.captured_at < _DIRECTORY_SCAN_CACHE_TTL_SECONDS
 
 
-def _resolve_scan_pairs(images: list[Path]) -> list[tuple[Path, Path]]:
-    """将扫描结果的每个原始路径 resolve 一次，返回 (原始路径, resolved 路径) 对列表。
+def _resolve_entry(image_path: Path) -> ScanEntry:
+    """resolve 单个扫描路径并派生其 normcase 分量。"""
+    resolved = image_path.resolve()
+    return ScanEntry(resolved, normcase_parts(resolved))
 
-    resolve 是扫描链路中开销最大的逐文件调用，经进程级 TTL 缓存复用，TTL 过期
-    重扫免逐文件重复 resolve；网络挂载临时不可达与符号链接环等 resolve 失败的
-    条目按更短 TTL 负缓存，倍增重扫的后续各轮不再逐条重试，到期自动重试。失败键
-    判定以趟为单位：负缓存未过期键快照与趟窗口键集求交，新失败按趟收集后批量
-    登记；快照的单个锁定小节遍历缓存条目而非趟窗口，临界区随失败键数封顶，
-    热路径不付逐条目锁往返。
+
+def _resolve_scan_entries(images: list[Path]) -> list[ScanEntry]:
+    """将扫描结果的每个原始路径 resolve 一次，返回携带预计算分量的扫描条目。
+
+    resolve 是扫描链路中开销最大的逐文件调用，经进程级 TTL 缓存复用，normcase
+    分量随 resolved 同键缓存，TTL 过期重扫免逐文件重复 resolve；网络挂载临时
+    不可达与符号链接环等 resolve 失败的条目按更短 TTL 负缓存，倍增重扫的后续
+    各轮不再逐条重试，到期自动重试。失败键判定以趟为单位：负缓存未过期键快照
+    与趟窗口键集求交，新失败按趟收集后批量登记；快照的单个锁定小节遍历缓存
+    条目而非趟窗口，临界区随失败键数封顶，热路径不付逐条目锁往返。
     """
-    pairs: list[tuple[Path, Path]] = []
+    entries: list[ScanEntry] = []
     # 与首笔失败登记的竞态仅多付一次 resolve 重试。
     recent_failures = _SCAN_RESOLVE_FAILURE_CACHE.fresh_keys()
     new_failures: list[str] = []
@@ -220,18 +241,16 @@ def _resolve_scan_pairs(images: list[Path]) -> list[tuple[Path, Path]]:
         if cache_key in recent_failures:
             continue
         try:
-            pairs.append(
-                (
-                    image_path,
-                    _SCAN_RESOLVE_CACHE.get_or_resolve(cache_key, image_path.resolve),
-                )
+            entry = _SCAN_RESOLVE_CACHE.get_or_resolve(
+                cache_key, lambda: _resolve_entry(image_path)
             )
         except (OSError, ValueError, RuntimeError):
             new_failures.append(cache_key)
             continue
+        entries.append(entry)
     if new_failures:
         _SCAN_RESOLVE_FAILURE_CACHE.update((cache_key, True) for cache_key in new_failures)
-    return pairs
+    return entries
 
 
 def _extend_unique(target: list[Path], additions: list[Path]) -> None:
@@ -287,23 +306,23 @@ def _store_scan_entry(
 
 
 def _filter_included(
-    pairs: list[tuple[Path, Path]],
-    include: Callable[[tuple[Path, Path]], bool] | None,
+    entries: list[ScanEntry],
+    include: Callable[[ScanEntry], bool] | None,
     limit: int | None = None,
-) -> tuple[list[tuple[Path, Path]], int]:
-    """按谓词过滤 (原始路径, resolved 路径) 对，返回 (结果列表, 谓词剔除数)。
+) -> tuple[list[ScanEntry], int]:
+    """按谓词过滤扫描条目，返回 (结果列表, 谓词剔除数)。
 
     limit 非 None 时凑满即停止考查，谓词求值成本随配额而非缓存窗口规模放大，
     剔除数按考查前缀计；None 时全窗考查。无谓词时维持全量浅拷贝的翻页共享契约
     （limit 失效），剔除数恒 0，返回列表独立于缓存条目，外传不被原地修改篡改。
     """
     if include is None:
-        return pairs[:], 0
-    collected: list[tuple[Path, Path]] = []
+        return entries[:], 0
+    collected: list[ScanEntry] = []
     excluded = 0
-    for pair in pairs:
-        if include(pair):
-            collected.append(pair)
+    for entry in entries:
+        if include(entry):
+            collected.append(entry)
             if limit is not None and len(collected) >= limit:
                 break
         else:
@@ -328,7 +347,7 @@ def cached_find_images_in_directory(
     scan_limit: int,
     scanner: Callable[..., list[Path]] | None = None,
     unreadable_dirs: list[Path] | None = None,
-    include: Callable[[tuple[Path, Path]], bool] | None = None,
+    include: Callable[[ScanEntry], bool] | None = None,
     scope_signature: str = "",
 ) -> ScanResult:
     """扫描目录图片并经进程级缓存翻页共享有序结果，支持前缀增量扩展。
@@ -361,8 +380,8 @@ def cached_find_images_in_directory(
             默认实现。
         unreadable_dirs: 可选收集列表，扫描中无法读取的目录追加至此；缓存命中时
             回放条目内记录的不可读目录。
-        include: 可选 (原始路径, resolved 路径) 对的保留谓词，resolve 后过滤返回
-            条目；None 表示不过滤；非 None 时必须配对传入非空 scope_signature。
+        include: 可选扫描条目的保留谓词，resolve 后过滤返回条目；None 表示不过滤；
+            非 None 时必须配对传入非空 scope_signature。
         scope_signature: 调用方读范围的规范化签名，经 read_scope_signature 从实际
             读范围派生后传入，并入缓存键；不同读范围的调用不共享条目，谓词派生
             信号不跨读范围回放。缺省空串为不分读范围调用的共享键，携带 include
@@ -457,12 +476,12 @@ def cached_find_images_in_directory(
         scan_truncated = any(round_truncated)
         # complete 按扫描器原始扫描量判定：resolve 失败与谓词剔除不影响目录
         # 已枚举完毕的事实；条目预算截断的扫描未到目录末尾，不得按 complete 缓存。
-        resolved_pairs = _resolve_scan_pairs(scanned_images)
-        included_pairs, excluded_count = _filter_included(resolved_pairs, include)
+        resolved_entries = _resolve_scan_entries(scanned_images)
+        included_entries, excluded_count = _filter_included(resolved_entries, include)
         complete = len(scanned_images) < scan_limit and not scan_truncated
-        if complete or len(included_pairs) >= requested_limit or scan_truncated:
+        if complete or len(included_entries) >= requested_limit or scan_truncated:
             break
-        if len(included_pairs) == previous_included:
+        if len(included_entries) == previous_included:
             zero_progress_rounds += 1
             if zero_progress_rounds >= _SCAN_STALL_ZERO_PROGRESS_ROUNDS:
                 # 连续两轮扩窗零新增即停：恰占满扩展窗的有限坏段由次轮扩窗跨过，
@@ -472,11 +491,11 @@ def cached_find_images_in_directory(
                 break
         else:
             zero_progress_rounds = 0
-        previous_included = len(included_pairs)
+        previous_included = len(included_entries)
         # resolve 或谓词剔除使满足配额口径的条目短于请求量：倍增扩窗跨过坏段重扫，
         # 足量契约由本层兑现。
         scan_limit *= _SCAN_PREFIX_GROWTH_FACTOR
-    skipped_count = len(scanned_images) - len(resolved_pairs)
+    skipped_count = len(scanned_images) - len(resolved_entries)
     incomplete_cause = _derive_incomplete_cause(
         truncated=scan_truncated,
         stalled=stalled,
@@ -491,7 +510,7 @@ def cached_find_images_in_directory(
             settled=settled,
             unreadable_dirs=list(scan_unreadable),
             result=ScanResult(
-                images=resolved_pairs,
+                images=resolved_entries,
                 complete=complete,
                 incomplete_cause=incomplete_cause,
                 skipped_count=skipped_count,
@@ -500,7 +519,7 @@ def cached_find_images_in_directory(
     if unreadable_dirs is not None:
         _extend_unique(unreadable_dirs, scan_unreadable)
     return ScanResult(
-        images=included_pairs,
+        images=included_entries,
         complete=complete,
         incomplete_cause=incomplete_cause,
         skipped_count=skipped_count,
@@ -594,10 +613,10 @@ def find_images_in_directory(
                         entries = heapq.nsmallest(
                             prefix_len,
                             it,
-                            key=lambda entry: os.path.normcase(entry.path),
+                            key=lambda entry: fold_case(entry.path),
                         )
                     else:
-                        entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
+                        entries = sorted(it, key=lambda entry: fold_case(entry.path))
             except OSError as e:
                 logger.warning("无法访问目录 {}: {}", path, e)
                 if unreadable_dirs is not None:
@@ -696,7 +715,7 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
                 logger.warning("拒绝 UNC 形式的建议搜索目录，跳过该目录: {}", search_dir)
                 continue
             resolved_dir = Path(search_dir).resolve()
-            matched_pairs = cached_find_images_in_directory(
+            matched_entries = cached_find_images_in_directory(
                 resolved_dir=resolved_dir,
                 recursive=True,
                 max_depth=2,
@@ -705,9 +724,9 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
                 scanner=find_images_in_directory,
             ).images
 
-            for _, resolved in matched_pairs:
-                if target_name in resolved.name.lower():
-                    suggestions.append(str(resolved))
+            for entry in matched_entries:
+                if target_name in entry.resolved_path.name.lower():
+                    suggestions.append(str(entry.resolved_path))
 
                 if len(suggestions) >= 5:
                     break

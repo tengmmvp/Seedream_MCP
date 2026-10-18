@@ -8,6 +8,7 @@ SEEDREAM_WORKSPACE_ROOT 回退取得，图片目录为工作区派生的 .seedre
 """
 
 import asyncio
+import datetime
 import os
 import shutil
 import tempfile
@@ -23,16 +24,21 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from _lib.log_fakes import RecordingLogger, capture_loguru_messages
-from _lib.os_fakes import _install_counting_realpath, _install_failing_resolve_for
+from _lib.os_fakes import (
+    _install_counting_normcase_parts,
+    _install_counting_realpath,
+    _install_failing_resolve_for,
+)
 from _lib.progress_fakes import RecordingProgressContext
+from _lib.scan_fakes import _scan_entry
 from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools import BrowseImagesInput
 from seedream_mcp.tools.handlers import browse_images as browse_core_module
 from seedream_mcp.tools.handlers import browse_images as browse_images_module
 from seedream_mcp.tools.handlers.browse_images import handle_browse_images
 from seedream_mcp.utils.core.errors import SeedreamConfigError
-from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR
-from seedream_mcp.utils.io.scan import ScanIncompleteCause, ScanResult
+from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR, is_within_any_nc_parts
+from seedream_mcp.utils.io.scan import ScanEntry, ScanIncompleteCause, ScanResult
 
 
 def _seed_images_root(ws: Path) -> Path:
@@ -89,12 +95,12 @@ def _fake_cached_find(
         assert windows, "扫描轮数超出预期"
         scan_limits.append(cast(int, kwargs["scan_limit"]))
         window, complete, incomplete_cause = windows.pop(0)
-        pairs = [(path, path) for path in window]
-        include = cast("Callable[[tuple[Path, Path]], bool] | None", kwargs.get("include"))
+        entries = [_scan_entry(path) for path in window]
+        include = cast("Callable[[ScanEntry], bool] | None", kwargs.get("include"))
         if include is not None:
-            pairs = [pair for pair in pairs if include(pair)]
+            entries = [entry for entry in entries if include(entry)]
         return ScanResult(
-            images=pairs,
+            images=entries,
             complete=complete,
             incomplete_cause=incomplete_cause,
         )
@@ -358,7 +364,7 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
 ) -> None:
     """深翻页命中扫描缓存时不重复 resolve 图片文件。
 
-    (原始, resolved) 对随首次扫描缓存；深页命中完整缓存时免于 O(offset) 次逐文件
+    扫描条目随首次扫描缓存；深页命中完整缓存时免于 O(offset) 次逐文件
     resolve，仅剩图片目录与请求目录的目录级 resolve。Path.resolve 委托
     os.path.realpath，计数后者即可覆盖，统计第二次浏览期间 .png 的调用数并断言为零。
     """
@@ -366,7 +372,7 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
     for i in range(5):
         (images_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    # 首页 scan_limit = 0+5+1 = 6 > 5，扫到目录末尾缓存完整的 (原始, resolved) 对列表。
+    # 首页 scan_limit = 0+5+1 = 6 > 5，扫到目录末尾缓存完整的扫描条目列表。
     page1 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=5, offset=0)
     )
@@ -467,17 +473,17 @@ async def test_browse_images_hit_path_predicate_bounded_by_quota(
     )
     assert seed.structured_content["count"] == 12
 
-    from seedream_mcp.utils.io import path as io_path
-
-    real_within = io_path.is_within_resolved
+    real_within_parts = is_within_any_nc_parts
     entry_checks = {"count": 0}
 
-    def _counting_within(path: Path, scope: Path) -> bool:
-        if str(path).endswith(".png"):
+    def _counting_within_parts(
+        path_parts: tuple[str, ...], bases_parts: list[tuple[str, ...]]
+    ) -> bool:
+        if path_parts[-1].endswith(".png"):
             entry_checks["count"] += 1
-        return real_within(path, scope)
+        return real_within_parts(path_parts, bases_parts)
 
-    monkeypatch.setattr(browse_core_module, "is_within_resolved", _counting_within)
+    monkeypatch.setattr(browse_core_module, "is_within_any_nc_parts", _counting_within_parts)
 
     result = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
@@ -490,6 +496,44 @@ async def test_browse_images_hit_path_predicate_bounded_by_quota(
     assert sc["next_offset"] == 2
     # 谓词考查条数 = offset+limit+1 = 3，而非整个 12 条缓存窗口。
     assert entry_checks["count"] == 3
+
+
+async def test_browse_images_hit_replay_containment_skips_normcase_recompute(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缓存命中回放的包含判定不重算 normcase：条目分量随缓存条目直接比较。
+
+    包含判定若回落 is_within_any 纯路径形态或在 browse 模块本地重算，每条考查
+    条目都重算 normcase 分量；browse 与 path 各持 normcase_parts 的直接导入
+    绑定，计数同时装在两处模块绑定上，统计回放请求期间收到的图片路径并断言为零。
+    """
+    images_root = _seed_images_root(workspace_root)
+    for i in range(4):
+        (images_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    # 种子请求扫到目录末尾，缓存完整窗口。
+    seed = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=4, offset=0)
+    )
+    assert seed.structured_content["count"] == 4
+
+    from seedream_mcp.utils.io import path as path_module
+
+    local_parts_calls = _install_counting_normcase_parts(
+        monkeypatch, browse_core_module, suffix=".png"
+    )
+    path_module_parts_calls = _install_counting_normcase_parts(
+        monkeypatch, path_module, suffix=".png"
+    )
+
+    replay = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+    )
+
+    assert replay.structured_content["count"] == 2
+    assert local_parts_calls == [], "回放谓词不得在 browse 模块绑定处对图片条目重算 normcase"
+    assert path_module_parts_calls == [], "回放谓词不得回落纯路径形态对图片条目重算 normcase"
 
 
 def test_browse_images_input_rejects_oversized_offset() -> None:
@@ -826,10 +870,72 @@ def test_format_file_info_degrades_on_malformed_timestamp(
     fake_datetime_module = SimpleNamespace(datetime=_ExplodingDatetime)
     monkeypatch.setattr(browse_core_module, "datetime", fake_datetime_module)
 
-    text, details = browse_core_module._format_file_info("a.png", image, True)
+    text, details = browse_core_module._format_file_info("a.png", _scan_entry(image), True)
 
     assert text == "a.png | 文件信息不可用"
     assert details == {"size_mb": None, "modified": None}
+
+
+async def test_browse_images_details_read_live_stat(workspace_root: Path) -> None:
+    """详情一律对条目活体 stat：缓存回放页不读旧载荷，原地改写后取值即时可见。"""
+    images_root = _seed_images_root(workspace_root)
+    image = images_root / "a.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    first_expected = image.stat()
+
+    first = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, show_details=True)
+    )
+    # 原地改写不动目录 mtime，扫描缓存照旧命中回放；活体 stat 仍取新值。
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"pad" * 512)
+    second_expected = image.stat()
+
+    second = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, show_details=True)
+    )
+
+    sc = first.structured_content
+    assert isinstance(sc, dict)
+    first_entry = sc["images"][0]
+    sc = second.structured_content
+    assert isinstance(sc, dict)
+    second_entry = sc["images"][0]
+    assert first_entry["size_mb"] == first_expected.st_size / (1024 * 1024)
+    assert second_entry["size_mb"] == second_expected.st_size / (1024 * 1024)
+    assert second_entry["modified"] == (
+        datetime.datetime.fromtimestamp(second_expected.st_mtime)
+        .astimezone()
+        .isoformat(sep=" ", timespec="seconds")
+    )
+
+
+async def test_browse_details_shares_scan_cache_with_plain_browse(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """详情请求与普通浏览共享扫描缓存：后随详情请求命中回放，不重扫目录。"""
+    (_seed_images_root(workspace_root) / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    from seedream_mcp.utils.io import scan as io_scan
+
+    scan_calls: list[dict[str, Any]] = []
+    real_scan = io_scan.find_images_in_directory
+
+    def _counting_scan(**kwargs: Any) -> list[Path]:
+        scan_calls.append(kwargs)
+        return real_scan(**kwargs)
+
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _counting_scan)
+
+    await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, show_details=True)
+    )
+
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["count"] == 1
+    assert sc["images"][0]["modified"] is not None
+    assert len(scan_calls) == 1
 
 
 def test_build_display_entries_keeps_file_name_verbatim(
@@ -840,7 +946,7 @@ def test_build_display_entries_keeps_file_name_verbatim(
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
 
     lines, entries = browse_core_module._build_display_entries(
-        image_pairs=[(image, image.resolve())],
+        image_entries=[_scan_entry(image, image.resolve())],
         show_details=False,
     )
 
@@ -858,7 +964,7 @@ def test_build_display_entries_flattens_newlines_in_text_channel(tmp_path: Path)
     image = tmp_path / "a\nb\r.png"
 
     lines, entries = browse_core_module._build_display_entries(
-        image_pairs=[(image, image)],
+        image_entries=[_scan_entry(image)],
         show_details=False,
     )
 
@@ -875,7 +981,7 @@ def test_build_display_entries_flattens_unicode_line_separator(tmp_path: Path) -
     image = tmp_path / "a\u2028b.png"
 
     lines, entries = browse_core_module._build_display_entries(
-        image_pairs=[(image, image)],
+        image_entries=[_scan_entry(image)],
         show_details=False,
     )
 
@@ -888,7 +994,7 @@ def test_build_display_entries_preserves_backslash_in_posix_filename() -> None:
     image = cast("Path", PurePosixPath("/tmp_dir/a\\b.png"))
 
     lines, entries = browse_core_module._build_display_entries(
-        image_pairs=[(image, image)],
+        image_entries=[_scan_entry(image)],
         show_details=False,
     )
 
@@ -1237,10 +1343,10 @@ def test_resolve_failure_negative_cache_skips_retry_within_ttl(
     io_scan.reset_directory_scan_cache()
     bad_entry = Path("definitely/missing/bad.png")
     try:
-        assert io_scan._resolve_scan_pairs([bad_entry]) == []
+        assert io_scan._resolve_scan_entries([bad_entry]) == []
         assert failure_counts == {"bad.png": 1}
         # TTL 内的第二次扫描直接跳过负缓存条目，不再触发 resolve。
-        assert io_scan._resolve_scan_pairs([bad_entry]) == []
+        assert io_scan._resolve_scan_entries([bad_entry]) == []
         assert failure_counts == {"bad.png": 1}
     finally:
         io_scan.reset_directory_scan_cache()
@@ -1259,10 +1365,10 @@ def test_resolve_negative_cache_absent_key_not_recent_near_clock_epoch(
     bad_entry = Path("definitely/missing/bad.png")
     io_scan.reset_directory_scan_cache()
     try:
-        assert len(io_scan._resolve_scan_pairs([good_entry])) == 1
-        assert io_scan._resolve_scan_pairs([bad_entry]) == []
+        assert len(io_scan._resolve_scan_entries([good_entry])) == 1
+        assert io_scan._resolve_scan_entries([bad_entry]) == []
         # 同窗口内再次扫描经负缓存略过失败键，不再触发 resolve。
-        assert io_scan._resolve_scan_pairs([bad_entry]) == []
+        assert io_scan._resolve_scan_entries([bad_entry]) == []
         assert failure_counts == {"bad.png": 1}
     finally:
         io_scan.reset_directory_scan_cache()
@@ -1705,7 +1811,7 @@ def test_scan_and_filter_directory_passes_include_and_quota(
     def _fake_cached_find(**kwargs: object) -> ScanResult:
         captured.update(kwargs)
         return ScanResult(
-            images=[(seeding.images["a"], seeding.images["a"])],
+            images=[_scan_entry(seeding.images["a"])],
             complete=True,
             incomplete_cause=None,
         )
@@ -1731,12 +1837,42 @@ def test_scan_and_filter_directory_passes_include_and_quota(
     assert captured["scope_signature"] == io_scan.read_scope_signature(
         [seeding.workspace.resolve()]
     )
-    include = cast("Callable[[tuple[Path, Path]], bool]", captured["include"])
-    assert include((seeding.images["a"], seeding.images["a"])) is True
-    assert include((seeding.images["out_0"], seeding.images["out_0"])) is False
-    assert result.images == [(seeding.images["a"], seeding.images["a"])]
+    include = cast("Callable[[ScanEntry], bool]", captured["include"])
+    assert include(_scan_entry(seeding.images["a"])) is True
+    assert include(_scan_entry(seeding.images["out_0"])) is False
+    assert result.images == [_scan_entry(seeding.images["a"])]
     assert result.complete is True
     assert result.incomplete_cause is None
+
+
+def test_scan_and_filter_directory_scope_excludes_sibling_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """读范围为 b 目录时同前缀兄弟目录 bc 的条目在扫描源头剔除并计入 excluded_count。
+
+    分量级判定杜绝纯字符串前缀误含：bc 不得因 b 在界内而被误含。
+    """
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
+    scope_dir = tmp_path / "b"
+    sibling = tmp_path / "bc"
+    scope_dir.mkdir()
+    sibling.mkdir()
+    (scope_dir / "in.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (sibling / "out.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = browse_core_module._scan_and_filter_directory(
+        resolved_dir=tmp_path.resolve(),
+        recursive=True,
+        max_depth=1,
+        format_filter=None,
+        remaining=5,
+        read_scope=[scope_dir.resolve()],
+        unreadable_dirs=[],
+    )
+
+    assert [entry.resolved_path.name for entry in result.images] == ["in.png"]
+    assert result.excluded_count == 1
 
 
 async def test_browse_images_out_of_bounds_symlink_keeps_pagination_reachable(

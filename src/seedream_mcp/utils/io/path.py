@@ -615,10 +615,63 @@ def get_workspace_root() -> Path:
 # ==================== 路径验证和规范化 ====================
 
 
+def fold_case(text: str) -> str:
+    """大小写折叠与 pathlib 等值比较同口径：win32 str.lower()，POSIX 恒等。"""
+    if sys.platform == "win32":
+        return text.lower()
+    return text
+
+
+def normcase_parts(path: Path) -> tuple[str, ...]:
+    """路径各分量的 normcase 形式，折叠经 fold_case 与 pathlib 等值比较同口径。"""
+    return tuple(fold_case(part) for part in path.parts)
+
+
+def is_within_nc_parts(path_parts: tuple[str, ...], base_parts: tuple[str, ...]) -> bool:
+    """normcase 分量级包含判定，is_within_any_nc_parts 委托的底层唯一实现。
+
+    基分量序列恰为候选前缀（含相等）即界内，分量边界杜绝 /a/b 误含 /a/bc；
+    空基匹配一切候选（本原语自身约定，resolve 后绝对路径链路不可达）。
+
+    Args:
+        path_parts: 已 resolve 候选路径的 normcase 分量序列。
+        base_parts: 已 resolve 基目录的 normcase 分量序列。
+
+    Returns:
+        候选等于基或位于其内返回 True，否则返回 False。
+    """
+    return len(path_parts) >= len(base_parts) and path_parts[: len(base_parts)] == base_parts
+
+
+def is_within_any_nc_parts(
+    path_parts: tuple[str, ...], bases_parts: Iterable[tuple[str, ...]]
+) -> bool:
+    """判断 normcase 分量序列是否位于任一基分量序列内。
+
+    逐基委托 is_within_nc_parts，空基分量序列与空基集合均单点判不包含，
+    is_within_resolved 与 is_within_any 的空基护栏经本函数收口。常量范围的
+    重复判定按预计算分量共用本原语，免逐条重算 normcase。
+
+    Args:
+        path_parts: 已 resolve 候选路径的 normcase 分量序列。
+        bases_parts: 已 resolve 基目录集合的 normcase 分量序列。
+
+    Returns:
+        候选等于任一基或位于其内返回 True，否则返回 False。
+    """
+    return any(
+        bool(base_parts) and is_within_nc_parts(path_parts, base_parts)
+        for base_parts in bases_parts
+    )
+
+
 def is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
     """判断已 resolve 的路径是否位于已 resolve 的基目录内。
 
-    直接做 relative_to 比较，不再重复 resolve。供循环场景复用以避免重复解析。
+    镜像 is_within_any 的委托形态，单基经 is_within_any_nc_parts 完成判定与
+    空基护栏，不再重复 resolve；供循环场景复用以避免重复解析。包含语义与
+    pathlib relative_to 等价，等价性随 normcase_parts 的 pathlib 同口径折叠
+    按构造成立。
 
     Args:
         path_resolved: 已 resolve 的待判定路径。
@@ -627,11 +680,26 @@ def is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
     Returns:
         路径等于基目录或位于其内返回 True，否则返回 False。
     """
-    try:
-        path_resolved.relative_to(base_resolved)
-        return True
-    except ValueError:
-        return False
+    return is_within_any_nc_parts(normcase_parts(path_resolved), (normcase_parts(base_resolved),))
+
+
+def is_within_any(path_resolved: Path, bases_resolved: Iterable[Path]) -> bool:
+    """判断已 resolve 的路径是否位于任一已 resolve 的基目录内。
+
+    委托 is_within_any_nc_parts 完成多基循环与空基护栏，候选分量单次预计算；
+    适用于基集合只用一次的单次判定，同一常量范围的重复判定应预计算基分量后
+    直调 is_within_any_nc_parts。
+
+    Args:
+        path_resolved: 已 resolve 的待判定路径。
+        bases_resolved: 已 resolve 的基目录集合。
+
+    Returns:
+        路径等于任一基目录或位于其内返回 True，否则返回 False。
+    """
+    return is_within_any_nc_parts(
+        normcase_parts(path_resolved), [normcase_parts(base) for base in bases_resolved]
+    )
 
 
 def is_unc_path(path_str: str) -> bool:
