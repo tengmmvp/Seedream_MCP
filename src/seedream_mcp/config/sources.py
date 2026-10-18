@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import MISSING, field, fields
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, NamedTuple, Sequence
 
 from dotenv import dotenv_values
 
@@ -46,11 +46,15 @@ _NON_METADATA_FIELD_ENV: dict[str, str] = {"api_key": "ARK_API_KEY"}
 # SeedreamConfig 定义完成后经 init_env_registry 填充。
 _FIELD_ENV_MAP: dict[str, str] = {}
 
+# 环境变量名到 override 键名的反查映射，api_key 特例经 _NON_METADATA_FIELD_ENV
+# 反转补充；注入与覆盖告警经它反查取值链入口。经 init_env_registry 填充。
+_ENV_OVERRIDE_KEY_MAP: dict[str, str] = {}
+
 
 def init_env_registry(config_cls: type) -> None:
-    """从配置类反射派生字段环境变量映射与默认值表，config 模块加载尾部调用。
+    """从配置类反射派生字段环境变量映射、默认值表与 override 键反查表；config 模块加载尾部调用。
 
-    两个表原地填充，早于本调用建立的模块属性绑定同步生效。
+    各表原地填充，早于本调用建立的模块属性绑定同步生效。
     """
     _FIELD_ENV_MAP.clear()
     _FIELD_ENV_MAP.update(
@@ -67,6 +71,17 @@ def init_env_registry(config_cls: type) -> None:
             for field_name, env_key in _FIELD_ENV_MAP.items()
         }
     )
+    _ENV_OVERRIDE_KEY_MAP.clear()
+    # api_key 无 env metadata，其字段名即 override 键。
+    _ENV_OVERRIDE_KEY_MAP.update(
+        {env_key: field_name for field_name, env_key in _NON_METADATA_FIELD_ENV.items()}
+    )
+    _ENV_OVERRIDE_KEY_MAP.update(
+        {
+            env_key: _override_key_for_field(field_name)
+            for field_name, env_key in _FIELD_ENV_MAP.items()
+        }
+    )
 
 
 def env_family_prefixes() -> tuple[str, ...]:
@@ -77,6 +92,11 @@ def env_family_prefixes() -> tuple[str, ...]:
     """
     names = (*_NON_METADATA_FIELD_ENV.values(), *_FIELD_ENV_MAP.values())
     return tuple(sorted({name.partition("_")[0] + "_" for name in names}))
+
+
+def override_key_for_env(env_key: str) -> str | None:
+    """反查环境变量名对应的 override 键名，未登记的环境名无取值消费方、返回 None。"""
+    return _ENV_OVERRIDE_KEY_MAP.get(env_key)
 
 
 def _env_var_suffix(field_name: str) -> str:
@@ -164,11 +184,26 @@ def parse_int(value: object) -> int:
         raise SeedreamConfigError(f"无法解析整数值: {value}") from exc
 
 
-def _read_env_values(env_file: str | None) -> dict[str, str]:
+class _RuntimeEnvInjection(NamedTuple):
+    """当前工作目录 .env 与项目根 .env 并存时的告警素材。
+
+    overlapping_keys 与 exclusive_keys 分别为两层同名与 CWD 独有的原始文件键，
+    是否实际生效由构建器逐键反查取值链判定。
+    """
+
+    env_path: Path
+    default_env_path: Path
+    overlapping_keys: frozenset[str]
+    exclusive_keys: frozenset[str]
+
+
+def _read_env_values(env_file: str | None) -> tuple[dict[str, str], _RuntimeEnvInjection | None]:
     """读取 .env 文件键值为字典，不写入进程环境变量。
 
     显式传入 env_file 时只读取该文件，空白串视同未提供；未提供时按项目根
-    .env 与当前工作目录 .env 合并读取，当前工作目录覆盖项目根。
+    .env 与当前工作目录 .env 合并读取，当前工作目录覆盖项目根。项目根 .env
+    存在有效键且当前工作目录另有一份 .env 时一并返回两层键集素材，供构建器经
+    供值层判定生成覆盖与注入告警，其余情形素材为 None。
     """
 
     def _load_single_env_file(path: Path) -> dict[str, str]:
@@ -193,7 +228,7 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
         env_path = _prepare_env_path(env_file)
         if not env_path.is_file():
             raise SeedreamConfigError(f"配置文件不存在: {env_path}")
-        return _load_single_env_file(env_path)
+        return _load_single_env_file(env_path), None
 
     default_values: dict[str, str] = {}
     runtime_values: dict[str, str] = {}
@@ -203,17 +238,16 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
     if default_env_path.is_file():
         default_values = _load_single_env_file(default_env_path)
 
+    injection: _RuntimeEnvInjection | None = None
     if runtime_env_path.is_file() and runtime_env_path != default_env_path:
         runtime_values = _load_single_env_file(runtime_env_path)
         if default_values:
-            # 同名键才构成真实覆盖，键集不相交的并存不告。
-            if runtime_values.keys() & default_values:
-                _BUILD_WARNINGS.append(
-                    "ERROR",
-                    f"当前工作目录 .env（{runtime_env_path}）覆盖了项目根 .env"
-                    f"（{default_env_path}）的配置值；"
-                    "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
-                )
+            injection = _RuntimeEnvInjection(
+                runtime_env_path,
+                default_env_path,
+                frozenset(runtime_values.keys() & default_values.keys()),
+                frozenset(runtime_values.keys() - default_values.keys()),
+            )
         else:
             # 项目根 .env 缺失或无有效键时 CWD .env 是唯一来源，属隐式加载。
             _BUILD_WARNINGS.append(
@@ -222,12 +256,44 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
                 "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
             )
 
-    return {**default_values, **runtime_values}
+    return {**default_values, **runtime_values}, injection
 
 
 def _value_is_set(value: object) -> bool:
     """判定取值是否视为已设置，缺失口径单源于 errors.has_message_value。"""
     return has_message_value(value)
+
+
+# 供值层标识：override 覆盖、os_env 系统环境变量、file .env 文件、default 默认值。
+_SupplyingLayer = Literal["override", "os_env", "file", "default"]
+
+# 挤占项目根 .env 的供值层：file 直供值；空白 CWD 值挤掉项目根已设值落到 default 层。
+_ROOT_DISPLACING_LAYERS = frozenset({"file", "default"})
+# 注入告警唯一计入的供值层：空白文件值穿透到 default 层，文件未实际供值。
+_FILE_SUPPLYING_LAYERS = frozenset({"file"})
+
+
+def _supplying_layer_and_value(
+    overrides: Mapping[str, object],
+    key: str,
+    env_key: str,
+    env_values: Mapping[str, str],
+    default_value: object = None,
+) -> tuple[_SupplyingLayer, object]:
+    """判定配置值的有效供值层并返回该层值，优先级为 overrides > 系统环境变量 > env 文件 > 默认值。
+
+    各层统一以 _value_is_set 判空，空白字符串视为未设置而穿透到下一层；取值链
+    与覆盖、注入告警共用本判定。
+    """
+    if key in overrides and _value_is_set(overrides[key]):
+        return "override", overrides[key]
+    os_env_value = os.getenv(env_key)
+    if _value_is_set(os_env_value):
+        return "os_env", os_env_value
+    file_value = env_values.get(env_key)
+    if _value_is_set(file_value):
+        return "file", file_value
+    return "default", default_value
 
 
 def _pick_config_value(
@@ -237,27 +303,16 @@ def _pick_config_value(
     env_values: Mapping[str, str],
     default_value: object,
 ) -> object:
-    """按优先级选取配置值：overrides > 系统环境变量 > env 文件 > 默认值。
-
-    各层统一以 _value_is_set 判空，空白字符串视为未设置而穿透到下一层。
-    """
-    if key in overrides and _value_is_set(overrides[key]):
-        return overrides[key]
-
-    env_value = os.getenv(env_key)
-    if _value_is_set(env_value):
-        return env_value
-
-    file_value = env_values.get(env_key)
-    if _value_is_set(file_value):
-        return file_value
-
-    return default_value
+    """选取配置值：经 _supplying_layer_and_value 单点判定供值层后返回该层值。"""
+    return _supplying_layer_and_value(overrides, key, env_key, env_values, default_value)[1]
 
 
 # 类型化取值辅助：经 _pick_config_value 按优先级取值后再做类型转换。
 def _pick_str(
-    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object],
+    field_name: str,
+    env_key: str,
+    env_values: Mapping[str, str],
 ) -> str:
     return str(
         _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
@@ -265,7 +320,10 @@ def _pick_str(
 
 
 def _pick_optional_str(
-    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object],
+    field_name: str,
+    env_key: str,
+    env_values: Mapping[str, str],
 ) -> str | None:
     raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     return str(raw).strip() or None
@@ -291,7 +349,10 @@ def _split_optional_str_tuple(raw: object) -> tuple[str, ...] | None:
 
 
 def _pick_optional_str_tuple(
-    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object],
+    field_name: str,
+    env_key: str,
+    env_values: Mapping[str, str],
 ) -> tuple[str, ...] | None:
     """按优先级取值后经 _split_optional_str_tuple 拆分为去空白条目元组。"""
     return _split_optional_str_tuple(
@@ -327,7 +388,10 @@ def _decode_request_state_key_entries(
 
 
 def _pick_request_state_key_bytes(
-    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object],
+    field_name: str,
+    env_key: str,
+    env_values: Mapping[str, str],
 ) -> tuple[bytes, ...] | None:
     """按优先级取值并拆分为条目后，解码委托 _decode_request_state_key_entries。"""
     return _decode_request_state_key_entries(
@@ -347,7 +411,10 @@ def _parse_int_with_env_hint(value: object, field_name: str) -> int:
 
 
 def _pick_int(
-    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object],
+    field_name: str,
+    env_key: str,
+    env_values: Mapping[str, str],
 ) -> int:
     return _parse_int_with_env_hint(
         _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key]),
@@ -356,7 +423,10 @@ def _pick_int(
 
 
 def _pick_optional_int(
-    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object],
+    field_name: str,
+    env_key: str,
+    env_values: Mapping[str, str],
 ) -> int | None:
     raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     if raw is None or not str(raw).strip():
@@ -373,7 +443,10 @@ def _parse_bool_with_env_hint(value: object, field_name: str) -> bool:
 
 
 def _pick_bool(
-    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object],
+    field_name: str,
+    env_key: str,
+    env_values: Mapping[str, str],
 ) -> bool:
     return _parse_bool_with_env_hint(
         _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key]),
@@ -385,10 +458,11 @@ def _pick_bool(
 # 返回具体字段类型的取值。
 _ConfigValuePicker = Callable[[Mapping[str, object], str, str, Mapping[str, str]], object]
 
-# 配置字段的声明式取值表：字段到取值辅助与 override 键名覆盖的映射，覆盖为 None 时
-# override 键名即字段名；model_id、default_watermark 与 web_enabled 的 override 键名是 CLI 简称的
-# 有意命名间接映射，模型别名展开统一由 validate 完成，构建侧不重复规范化。构建循环遍历
-# _FIELD_ENV_MAP 并索引本表，新增 env metadata 字段漏登记时以 KeyError 在构建期暴露。
+# 配置字段的声明式取值表：字段到取值辅助与 override 键名覆盖的映射，override 键名
+# 经 _override_key_for_field 单点派生；model_id、default_watermark 与 web_enabled 的
+# override 键名是 CLI 简称的有意命名间接映射，模型别名展开统一由 validate 完成，
+# 构建侧不重复规范化。构建循环遍历 _FIELD_ENV_MAP 并索引本表，新增 env metadata
+# 字段漏登记时以 KeyError 在构建期暴露。
 _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "base_url": (_pick_str, None),
     "allow_http_base_url": (_pick_bool, None),
@@ -430,10 +504,16 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "request_state_secret_keys": (_pick_request_state_key_bytes, None),
 }
 
+
+def _override_key_for_field(field_name: str) -> str:
+    """返回字段名对应的 override 键名，无别名覆盖时即字段名。"""
+    return _FIELD_PICKERS[field_name][1] or field_name
+
+
 # 合法的 overrides 键集合：各字段的 override 键名与 api_key，未知键在构建期告警。
 # 有别名的字段以别名为键，字段名形态经 _normalize_field_name_overrides 归一后同样生效。
 _KNOWN_OVERRIDE_KEYS = frozenset(
-    {"api_key"} | {alias or field_name for field_name, (_, alias) in _FIELD_PICKERS.items()}
+    {"api_key"} | {_override_key_for_field(field_name) for field_name in _FIELD_PICKERS}
 )
 
 

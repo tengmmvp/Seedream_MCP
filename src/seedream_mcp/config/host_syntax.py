@@ -1,14 +1,15 @@
 """Host 语法内核：允许列表条目分解与绑定地址合法性判定。
 
-中立语法模块，除 utils/core/sanitizers 的字符集判定外无项目内依赖，
-config 的构建期条目校验、transport 的中间件匹配与绑定地址守卫、
-cli 的参数期早拒共用同一语法与判定，形态演化在此单点维护。
+中立语法模块，除 utils/core/sanitizers 的字符集判定与 utils/core/http_int 的
+整数解析外无项目内依赖，config 的构建期条目校验、transport 的中间件匹配与
+绑定地址守卫、cli 的参数期早拒共用同一语法与判定，形态演化在此单点维护。
 """
 
 from __future__ import annotations
 
 import ipaddress
 
+from ..utils.core.http_int import strict_http_int
 from ..utils.core.sanitizers import is_printable_ascii
 
 
@@ -70,10 +71,11 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
         port_text = suffix[1:]
         # SDK 的 Host 校验为精确串比较，前导零端口虽数值合法但与客户端规范化形态
         # 不匹配，按无效条目拒绝。
-        if port_text.isascii() and port_text.isdigit() and not port_text.startswith("0"):
-            port = int(port_text)
-            if 1 <= port <= 65535:
-                return host, suffix
+        # 数值解析委托 strict_http_int：超长数字串归 None，避免裸 int() 的 ValueError
+        # 逃逸破坏配置层错误契约。
+        port = strict_http_int(port_text)
+        if port is not None and not port_text.startswith("0") and 1 <= port <= 65535:
+            return host, suffix
     return None
 
 

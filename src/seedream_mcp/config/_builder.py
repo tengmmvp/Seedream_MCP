@@ -24,14 +24,19 @@ from .sources import (
     _BUILD_WARNINGS,
     _FIELD_ENV_MAP,
     _FIELD_PICKERS,
+    _FILE_SUPPLYING_LAYERS,
     _KNOWN_OVERRIDE_KEYS,
+    _ROOT_DISPLACING_LAYERS,
     _decode_request_state_key_entries,
     _normalize_field_name_overrides,
+    _override_key_for_field,
     _pick_config_value,
     _read_env_values,
     _split_optional_str_tuple,
+    _supplying_layer_and_value,
     env_family_prefixes,
     init_env_registry,
+    override_key_for_env,
 )
 
 
@@ -97,16 +102,10 @@ def _build_config_unlocked_body(
             "WARNING",
             f"配置覆盖包含未知键，已忽略: {', '.join(unknown_keys)}",
         )
-    env_values = _read_env_values(env_file)
+    env_values, runtime_injection = _read_env_values(env_file)
 
     api_key = str(
-        _pick_config_value(
-            override_values,
-            "api_key",
-            "ARK_API_KEY",
-            env_values,
-            "",
-        )
+        _pick_config_value(override_values, "api_key", "ARK_API_KEY", env_values, "")
     ).strip()
     if not api_key:
         raise SeedreamConfigError(
@@ -115,13 +114,50 @@ def _build_config_unlocked_body(
 
     config_kwargs: dict[str, Any] = {"api_key": api_key}
     for field_name, env_key in _FIELD_ENV_MAP.items():
-        picker, override_key = _FIELD_PICKERS[field_name]
+        picker = _FIELD_PICKERS[field_name][0]
         config_kwargs[field_name] = picker(
-            override_values, override_key or field_name, env_key, env_values
+            override_values, _override_key_for_field(field_name), env_key, env_values
         )
+    if runtime_injection is not None:
+        # 重叠键按供值层判定：被 override 或系统环境变量供值的键 CWD 值不生效，不构成覆盖。
+        if any(
+            _env_supplying_layer(override_values, env_key, env_values) in _ROOT_DISPLACING_LAYERS
+            for env_key in runtime_injection.overlapping_keys
+        ):
+            _BUILD_WARNINGS.append(
+                "ERROR",
+                f"当前工作目录 .env（{runtime_injection.env_path}）覆盖了项目根 .env"
+                f"（{runtime_injection.default_env_path}）的配置值；"
+                "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
+            )
+        # 注入清单对独有键逐键反查取值链判定，仅实际由文件层供值的登记键计入。
+        effective_keys = sorted(
+            env_key
+            for env_key in runtime_injection.exclusive_keys
+            if _env_supplying_layer(override_values, env_key, env_values) in _FILE_SUPPLYING_LAYERS
+        )
+        if effective_keys:
+            _BUILD_WARNINGS.append(
+                "WARNING",
+                f"当前工作目录 .env（{runtime_injection.env_path}）注入了项目根 .env"
+                f"未包含的配置键（{', '.join(effective_keys)}）；"
+                "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
+            )
     config = SeedreamConfig(**config_kwargs)
     _BUILD_WARNINGS.extend(config._build_warnings)
     return config
+
+
+def _env_supplying_layer(
+    override_values: Mapping[str, object],
+    env_key: str,
+    env_values: Mapping[str, str],
+) -> str | None:
+    """经 override_key_for_env 反查登记键后判定环境变量的有效供值层，未登记的环境名返回 None。"""
+    override_key = override_key_for_env(env_key)
+    if override_key is None:
+        return None
+    return _supplying_layer_and_value(override_values, override_key, env_key, env_values)[0]
 
 
 # 配置构建串行化锁：保护 .env 读取与配置构建，避免并发构建竞态。

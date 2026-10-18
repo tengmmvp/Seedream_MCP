@@ -9,7 +9,13 @@ import pytest
 
 from _lib.log_fakes import capture_loguru_messages
 from conftest import _scrub_host_prefixed_env
-from seedream_mcp.config.sources import _FIELD_ENV_MAP, _FIELD_PICKERS
+from seedream_mcp.config.sources import (
+    _FIELD_ENV_MAP,
+    _FIELD_PICKERS,
+    _KNOWN_OVERRIDE_KEYS,
+    _NON_METADATA_FIELD_ENV,
+    override_key_for_env,
+)
 from seedream_mcp.config import (
     SeedreamConfig,
     build_config_from_sources,
@@ -290,6 +296,8 @@ def test_build_config_merges_default_and_cwd_env_when_cwd_missing_keys(
     assert config.model_id == "doubao-seedream-4-0-250828"
     # CWD .env 覆盖项目根属部署风险，告警锁定为 ERROR 级。
     assert any("覆盖了项目根 .env" in record for record in records)
+    # 告警不回显 .env 键值。
+    assert not any("doubao-seedream-4.0" in record for record in records)
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
@@ -331,6 +339,231 @@ def test_build_config_disjoint_env_layers_coexist_without_override_warning(
     assert not any("覆盖了项目根" in record for record in records)
 
 
+def test_build_config_disjoint_env_injection_warning_lists_effective_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """键集不相交且注入生效时输出 WARNING，列实际生效键名；遮蔽键、空白值键、未登记键与键值不出现。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("SEEDREAM_PREVIEW_ENABLED", raising=False)
+    monkeypatch.setenv("SEEDREAM_TIMEOUT", "120")
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "ARK_API_KEY=default_key\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+    _write_env_file(
+        runtime_dir / ".env",
+        "SEEDREAM_LOG_LEVEL=DEBUG\nSEEDREAM_TIMEOUT=9999\nSEEDREAM_PREVIEW_ENABLED=\n"
+        "SEEDREAM_UNREGISTERED=1\n",
+    )
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="WARNING"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
+
+    assert config.log_level == "DEBUG"
+    assert config.timeout == 120
+    assert config.preview_enabled is False
+    injection_warnings = [record for record in records if "注入了" in record]
+    assert len(injection_warnings) == 1
+    assert "SEEDREAM_LOG_LEVEL" in injection_warnings[0]
+    # 被系统环境变量遮蔽的键取值不生效，不入告警。
+    assert "SEEDREAM_TIMEOUT" not in injection_warnings[0]
+    # 空白文件值穿透回默认值，不入告警。
+    assert "SEEDREAM_PREVIEW_ENABLED" not in injection_warnings[0]
+    # 未登记键无取值消费方，不入告警。
+    assert "SEEDREAM_UNREGISTERED" not in injection_warnings[0]
+    # 告警列键名，不回显 .env 键值。
+    assert "DEBUG" not in injection_warnings[0]
+
+
+def test_build_config_partial_overlap_env_injection_warning_lists_effective_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """键集部分重叠时覆盖 ERROR 之外，CWD .env 独有且实际生效的键照常列入注入告警。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_LOG_LEVEL", raising=False)
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "ARK_API_KEY=default_key\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+    _write_env_file(runtime_dir / ".env", "ARK_API_KEY=cwd_key\nSEEDREAM_LOG_LEVEL=DEBUG\n")
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="WARNING"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
+
+    assert config.api_key == "cwd_key"
+    assert config.log_level == "DEBUG"
+    assert any("覆盖了项目根 .env" in record for record in records)
+    injection_warnings = [record for record in records if "注入了" in record]
+    assert len(injection_warnings) == 1
+    # 重叠键由覆盖 ERROR 描述，注入清单只含 CWD .env 独有且实际生效的键。
+    assert "SEEDREAM_LOG_LEVEL" in injection_warnings[0]
+    assert "ARK_API_KEY" not in injection_warnings[0]
+    # 告警列键名，不回显 .env 键值。
+    assert "DEBUG" not in injection_warnings[0]
+    assert "cwd_key" not in injection_warnings[0]
+
+
+def test_build_config_injection_warning_excludes_override_supplied_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """override 供值的注入键不入告警，空白 override 穿透回 .env 层的键照常列入。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+    monkeypatch.delenv("SEEDREAM_TIMEOUT", raising=False)
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "SEEDREAM_API_TIMEOUT=600\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+    _write_env_file(
+        runtime_dir / ".env",
+        "ARK_API_KEY=cwd_key\n"
+        "SEEDREAM_LOG_LEVEL=DEBUG\n"
+        "SEEDREAM_MODEL_ID=doubao-seedream-4.0\n"
+        "SEEDREAM_TIMEOUT=9999\n",
+    )
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="WARNING"):
+        config = build_config_from_sources(
+            overrides={
+                "api_key": "k",
+                "log_level": "ERROR",
+                "model": "doubao-seedream-4.5",
+                "timeout": "   ",
+            }
+        )
+        drain_pending_build_warnings()
+
+    assert config.api_key == "k"
+    assert config.log_level == "ERROR"
+    assert config.model_id == "doubao-seedream-4-5-251128"
+    assert config.timeout == 9999
+    injection_warnings = [record for record in records if "注入了" in record]
+    assert len(injection_warnings) == 1
+    # override 供值的键（api_key、字段名与别名形态）不入告警。
+    assert "ARK_API_KEY" not in injection_warnings[0]
+    assert "SEEDREAM_LOG_LEVEL" not in injection_warnings[0]
+    assert "SEEDREAM_MODEL_ID" not in injection_warnings[0]
+    # 空白 override 按未设置穿透，.env 键照常生效并入告警。
+    assert "SEEDREAM_TIMEOUT" in injection_warnings[0]
+
+
+def test_build_config_shadowed_overlap_keys_skip_override_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重叠键全部被系统环境变量或 override 供值时不发覆盖 ERROR，取值来自遮蔽层。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_LOG_LEVEL", raising=False)
+    monkeypatch.setenv("SEEDREAM_MODEL_ID", "doubao-seedream-4.5")
+    default_env = tmp_path / "default.env"
+    _write_env_file(
+        default_env,
+        "ARK_API_KEY=default_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.5\nSEEDREAM_LOG_LEVEL=DEBUG\n",
+    )
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+    _write_env_file(
+        runtime_dir / ".env",
+        "ARK_API_KEY=cwd_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.0\nSEEDREAM_LOG_LEVEL=WARNING\n",
+    )
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="ERROR"):
+        config = build_config_from_sources(overrides={"api_key": "k", "log_level": "ERROR"})
+        drain_pending_build_warnings()
+
+    assert not any("覆盖了项目根" in record for record in records)
+    assert config.api_key == "k"
+    assert config.model_id == "doubao-seedream-4-5-251128"
+    assert config.log_level == "ERROR"
+
+
+def test_build_config_partially_shadowed_overlap_still_emits_override_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重叠键部分被遮蔽时，仍由文件层供值的重叠键照常触发覆盖 ERROR。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.setenv("SEEDREAM_MODEL_ID", "doubao-seedream-4.5")
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "ARK_API_KEY=default_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.5\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+    _write_env_file(
+        runtime_dir / ".env", "ARK_API_KEY=cwd_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.0\n"
+    )
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="ERROR"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
+
+    assert any("覆盖了项目根 .env" in record for record in records)
+    assert config.api_key == "cwd_key"
+    assert config.model_id == "doubao-seedream-4-5-251128"
+
+
+def test_build_config_unregistered_overlap_keys_skip_override_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """仅未登记键重叠时不发覆盖告警，无取值消费方即无配置值被覆盖。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "ARK_API_KEY=default_key\nSEEDREAM_UNREGISTERED=1\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+    _write_env_file(runtime_dir / ".env", "SEEDREAM_UNREGISTERED=2\n")
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="WARNING"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
+
+    assert not any("当前工作目录 .env" in record for record in records)
+    assert config.api_key == "default_key"
+
+
+def test_build_config_blank_overlap_value_displacing_root_keeps_override_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空白重叠值挤掉项目根配置、穿透到默认值时仍构成覆盖，照常发 ERROR。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_LOG_LEVEL", raising=False)
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "ARK_API_KEY=default_key\nSEEDREAM_LOG_LEVEL=DEBUG\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+    _write_env_file(runtime_dir / ".env", "SEEDREAM_LOG_LEVEL=\n")
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="ERROR"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
+
+    assert any("覆盖了项目根 .env" in record for record in records)
+    assert config.api_key == "default_key"
+    assert config.log_level == "INFO"
+
+
 def test_build_config_comment_only_default_env_keeps_implicit_load_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -349,6 +582,8 @@ def test_build_config_comment_only_default_env_keeps_implicit_load_warning(
 
     assert config.api_key == "cwd_key"
     assert any("已加载当前工作目录 .env" in record for record in records)
+    # 告警不回显 .env 键值。
+    assert not any("cwd_key" in record for record in records)
 
 
 def test_build_config_same_path_loaded_once_without_override_warning(
@@ -595,6 +830,21 @@ def test_build_config_rejects_malformed_http_allowed_hosts_entries(
         build_config_from_sources(env_file=str(env_file))
 
     assert raw_value in excinfo.value.message
+    assert "环境变量 SEEDREAM_HTTP_ALLOWED_HOSTS" in excinfo.value.message
+
+
+def test_build_config_rejects_overlong_port_as_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """端口数字超出 int 字串转换上限时按无效条目归一为 SeedreamConfigError，不裸抛 ValueError。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS=h:{'9' * 5000}\n")
+
+    with pytest.raises(SeedreamConfigError, match="host、host:port、host:\\*") as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert "h:9" in excinfo.value.message
     assert "环境变量 SEEDREAM_HTTP_ALLOWED_HOSTS" in excinfo.value.message
 
 
@@ -989,6 +1239,19 @@ def test_field_env_map_covers_all_optional_config_fields() -> None:
         f.name for f in dataclass_fields(SeedreamConfig) if f.init and f.name != "api_key"
     }
     assert set(_FIELD_ENV_MAP) == optional_field_names
+
+
+def test_override_key_for_env_covers_registered_env_names() -> None:
+    """反查映射与正向登记同步：覆盖全部登记环境名且键值均为合法 override 键，未登记返回 None。"""
+    registered_env_names = set(_NON_METADATA_FIELD_ENV.values()) | set(_FIELD_ENV_MAP.values())
+    resolved = {env_name: override_key_for_env(env_name) for env_name in registered_env_names}
+
+    assert None not in resolved.values()
+    assert set(resolved.values()) <= _KNOWN_OVERRIDE_KEYS
+    assert resolved["ARK_API_KEY"] == "api_key"
+    assert resolved["SEEDREAM_MODEL_ID"] == "model"
+    assert resolved["SEEDREAM_WEB_ENABLED"] == "web"
+    assert override_key_for_env("SEEDREAM_UNREGISTERED") is None
 
 
 def test_build_config_missing_picker_registration_fails_loudly(
