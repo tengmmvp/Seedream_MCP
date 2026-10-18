@@ -2,7 +2,8 @@
 
 wheel 与 sdist 的打包清单由 CI 侧断言另行锁定，本文件守护源码树形态：
 入口页、404 页、五个前端 JS 模块齐备，且入口页引用的静态相对路径全部可解析；
-静态直出响应头的缓存口径亦在此守护。
+前端 JS 的解析口径以每模块一个粗粒度契约守护（解析出口、类型化错误与关键
+文案俱在）；静态直出响应头的缓存口径亦在此守护。
 """
 
 from __future__ import annotations
@@ -31,6 +32,19 @@ from seedream_mcp.webapp.constants import (
 
 _JS_DIR = "js"
 _JS_MODULES = ("api.js", "generate.js", "gallery.js", "main.js", "refs.js")
+
+
+def _js_source(module: str) -> str:
+    """读取前端模块源文本，粗粒度契约断言共用。"""
+    return (STATIC_DIR / _JS_DIR / module).read_text(encoding="utf-8")
+
+
+def _assert_imported_from_api(source: str, *names: str) -> None:
+    """断言指定符号经统一导入块引自 api.js，不私有复制。"""
+    block = re.search(r'import \{[^}]*\} from "\./api\.js";', source)
+    assert block is not None, "缺 api.js 导入块"
+    for name in names:
+        assert name in block.group(0), f"未从 api.js 引入 {name}"
 
 
 def test_static_pages_exist() -> None:
@@ -88,9 +102,9 @@ def test_frontend_js_modules_exist() -> None:
 def test_bearer_token_uses_session_storage_only() -> None:
     """Bearer 令牌只经 sessionStorage 会话内暂存，前端源码不得回退 localStorage。"""
     for name in ("api.js", "main.js"):
-        source = (STATIC_DIR / _JS_DIR / name).read_text(encoding="utf-8")
+        source = _js_source(name)
         assert "localStorage" not in source, f"{name} 出现 localStorage 持久化"
-    api_js = (STATIC_DIR / _JS_DIR / "api.js").read_text(encoding="utf-8")
+    api_js = _js_source("api.js")
     assert "sessionStorage" in api_js
 
 
@@ -100,8 +114,8 @@ def test_url_reference_goes_through_add_reference() -> None:
     无 JS 运行时测试基建，以稳定结构锚点为契约：消费侧调用形态存在、消费侧
     无直写 state.refs 的绕过、refs.js 保有汇聚实现。
     """
-    main_js = (STATIC_DIR / _JS_DIR / "main.js").read_text(encoding="utf-8")
-    refs_js = (STATIC_DIR / _JS_DIR / "refs.js").read_text(encoding="utf-8")
+    main_js = _js_source("main.js")
+    refs_js = _js_source("refs.js")
     assert 'addReference("url", url)' in main_js
     assert "state.refs.push" not in main_js
     assert "addReference" in refs_js
@@ -115,16 +129,97 @@ def test_generate_and_gallery_consume_web_path_contract() -> None:
     退化为仅展示远端 url。
     """
     for name in ("generate.js", "gallery.js"):
-        source = (STATIC_DIR / _JS_DIR / name).read_text(encoding="utf-8")
+        source = _js_source(name)
         assert "web_path" in source, f"{name} 不再消费 web_path 字段"
         assert "/web/api/thumbnail" in source, f"{name} 不再请求 /web/api/thumbnail 端点"
-    gallery_js = (STATIC_DIR / _JS_DIR / "gallery.js").read_text(encoding="utf-8")
+    gallery_js = _js_source("gallery.js")
     assert "/web/api/image" in gallery_js, "gallery.js 灯箱不再请求 /web/api/image 端点"
+
+
+def test_api_js_parse_contract() -> None:
+    """api.js 解析契约：JSON 解析出口唯一，类型化错误与关键文案俱在。
+
+    裸 response.json() 只允许存在于宽松解析内，且以 SyntaxError 区分非法
+    JSON（undefined 哨兵）与体读取失败（原样上抛）；严格解析拒绝非对象载荷
+    （数组/标量）并归 bad_response 档；错误体尽力读取助手吞一切异常不回抛，
+    非 ok 分支的消费契约由 generate/gallery 各自守护。
+    """
+    source = _js_source("api.js")
+    assert source.count("await response.json()") == 1, "裸 response.json() 须仅存于宽松解析"
+    assert "instanceof SyntaxError" in source, "宽松解析未区分非法 JSON 与体读取失败"
+    assert "export class PayloadError" in source, "缺载荷哨兵类型化错误导出"
+    assert "export async function parseJsonRequired" in source, "缺严格解析导出"
+    assert "export function isAbortError" in source, "缺中止类判定导出"
+    for literal in ('error.name === "TimeoutError"', 'error.name === "AbortError"'):
+        assert literal in source, "中止类判定缺名称档位"
+    for literal in ("bad_response", "empty_response"):
+        assert literal in source, f"缺 {literal} 载荷档位"
+    assert "响应不是有效的 JSON，服务可能异常，请稍后重试。" in source
+    assert "服务返回了空响应，请稍后重试。" in source
+    for literal in ('typeof payload !== "object"', "Array.isArray(payload)"):
+        assert literal in source, f"严格解析缺对象判定: {literal}"
+    assert "响应不是预期的 JSON 对象，服务可能异常，请稍后重试。" in source
+    guard = re.search(
+        r"export async function readErrorPayload.*?^}", source, re.DOTALL | re.MULTILINE
+    )
+    assert guard is not None, "缺错误体尽力读取导出"
+    assert "await parseJsonLoose(response)" in guard.group(0), "错误体助手未复用宽松解析"
+    assert "rethrowIfAbort" not in guard.group(0), "错误体助手不得回抛中止类"
+
+
+def test_generate_js_parse_contract() -> None:
+    """generate.js 解析契约：ok 载荷经严格解析，四档失败文案俱在。
+
+    解析与中止判定统一引自 api.js，不私开裸 response.json() 与中止名判定；
+    非 ok 失败体经尽力读取助手消费，读取异常（含中止）不逃逸外层超时档；
+    失败分流（令牌、超时、网络、生成失败）的用户文案不因重构丢失。
+    """
+    source = _js_source("generate.js")
+    _assert_imported_from_api(
+        source, "isAbortError", "readErrorPayload", "parseJsonRequired", "PayloadError"
+    )
+    assert "await parseJsonRequired(response)" in source, "ok 载荷未经严格解析"
+    assert "await readErrorPayload(response)" in source, "非 ok 失败体未经尽力读取"
+    assert "parseJsonLoose" not in source, "绕过尽力读取助手私解析失败体"
+    assert "await response.json()" not in source, "回归裸 response.json()"
+    for literal in ('error.name === "TimeoutError"', 'error.name === "AbortError"'):
+        assert literal not in source, "残留私有中止判定"
+    for message in ("需要重新输入令牌。", "生成耗时异常。", "请求失败。", "生成失败。"):
+        assert message in source, f"失败分流文案丢失: {message}"
+
+
+def test_gallery_js_parse_contract() -> None:
+    """gallery.js 解析契约：ok 载荷经严格解析，四档图库文案俱在。
+
+    非 ok 失败体同样经尽力读取助手消费，读取异常（含中止）不逃逸外层超时档。
+    """
+    source = _js_source("gallery.js")
+    _assert_imported_from_api(source, "isAbortError", "readErrorPayload", "parseJsonRequired")
+    assert "await parseJsonRequired(response)" in source, "ok 载荷未经严格解析"
+    assert "await readErrorPayload(response)" in source, "非 ok 失败体未经尽力读取"
+    assert "parseJsonLoose" not in source, "绕过尽力读取助手私解析失败体"
+    assert "await response.json()" not in source, "回归裸 response.json()"
+    for literal in ('error.name === "TimeoutError"', 'error.name === "AbortError"'):
+        assert literal not in source, "残留私有中止判定"
+    for message in (
+        "图库加载失败，请稍后重试。",
+        "图库加载超时，请稍后重试。",
+        "图库响应异常，请稍后重试。",
+        "图库渲染失败，请稍后重试。",
+    ):
+        assert message in source, f"图库分流文案丢失: {message}"
+
+
+def test_gallery_browse_binds_timeout_signal() -> None:
+    """图库 browse 请求绑定超时 signal，停滞请求最终走中止分流并释放忙碌态。"""
+    source = _js_source("gallery.js")
+    _assert_imported_from_api(source, "timeoutSignal")
+    assert "signal: timeoutSignal(" in source, "browse 请求未绑定超时 signal"
 
 
 def test_refs_fallback_budget_matches_server_derivation() -> None:
     """refs.js 回退预算常量与服务端按默认请求体上限的推导一致。"""
-    refs_js = (STATIC_DIR / _JS_DIR / "refs.js").read_text(encoding="utf-8")
+    refs_js = _js_source("refs.js")
     match = re.search(r"DEFAULT_UPLOAD_BUDGET_CHARS = (\d+) \* 1024 \* 1024;", refs_js)
     assert match, "refs.js 回退预算常量形态改变，守护需同步"
     default_body = SeedreamConfig(api_key="guard-key").http_max_body_size
@@ -146,7 +241,7 @@ def test_tool_slug_literals_confined_to_api_js() -> None:
     """带引号工具 slug 字面量仅存于 api.js 常量定义处。"""
     slugs = ("text-to-image", "image-to-image", "multi-image-fusion", "sequential-generation")
     for name in ("generate.js", "gallery.js", "main.js", "refs.js"):
-        source = (STATIC_DIR / _JS_DIR / name).read_text(encoding="utf-8")
+        source = _js_source(name)
         for slug in slugs:
             assert f'"{slug}"' not in source, f"{name} 出现脱离常量定义的 slug 字面量: {slug}"
 

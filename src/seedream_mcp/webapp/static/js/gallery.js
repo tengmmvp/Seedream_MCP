@@ -10,11 +10,15 @@ import {
   apiFetch,
   clearInlineError,
   fetchBlobUrl,
+  isAbortError,
   normalizePayloadError,
-  parseJsonLoose,
+  parseJsonRequired,
+  readErrorPayload,
+  rethrowIfAbort,
   revokeObjectUrls,
   showInlineError,
   state,
+  timeoutSignal,
   TOOL_IMAGE_TO_IMAGE,
   TOOL_TEXT_TO_IMAGE,
   UNAUTHORIZED_MESSAGE,
@@ -23,6 +27,10 @@ import { addReference, toolConfig } from "./refs.js";
 
 /** 图库单页条数。 */
 export const GALLERY_PAGE_SIZE = 60;
+
+// browse 是服务端目录扫描，大目录与网络挂载可能到数十秒；60 秒兜底中止停滞
+// 请求，量级介于外链取图（30 秒）与生成（20 分钟）之间。
+const BROWSE_TIMEOUT_MS = 60000;
 
 // 缩略图分批并发：整页 60 张串行加载过慢，批大小 6 做受限并发。
 const THUMBNAIL_BATCH_SIZE = 6;
@@ -55,7 +63,8 @@ function showGalleryError(message) {
 
 /**
  * 按当前偏移与格式过滤请求图库并渲染缩略图网格与翻页器；连点由请求序号
- * 守卫收敛到最后一次，刷新按钮在请求期间保持 busy 旋转。
+ * 守卫收敛到最后一次，刷新按钮在请求期间保持 busy 旋转；异常兜底为图库
+ * 错误提示，不向调用方抛出。
  */
 export async function refreshGallery() {
   const seq = ++requestSeq;
@@ -66,6 +75,18 @@ export async function refreshGallery() {
   $("gallery-next").disabled = true;
   try {
     await refreshGalleryForSeq(seq);
+  } catch (error) {
+    // 渲染段兜底：请求与解析各有 try/catch，渲染期异常外溢会成为未处理
+    // rejection。
+    if (seq === requestSeq) {
+      // 中止类异常属请求期超时或中止，分流提示以免误标渲染失败。
+      if (isAbortError(error)) {
+        showGalleryError("图库加载超时，请稍后重试。");
+      } else {
+        console.error("图库渲染失败:", error);
+        showGalleryError("图库渲染失败，请稍后重试。");
+      }
+    }
   } finally {
     // 仅最新请求有权摘除 busy，旧请求的收尾不得打断新请求的旋转。
     if (seq === requestSeq) $("gallery-refresh").classList.remove("busy");
@@ -104,27 +125,34 @@ async function refreshGalleryForSeq(seq) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: timeoutSignal(BROWSE_TIMEOUT_MS),
     });
   } catch (error) {
-    // 401 已弹令牌门，令牌补齐后由提交回调补刷；其余网络异常落图库错误提示。
+    // 401 已弹令牌门，令牌补齐后由提交回调补刷；中止类上抛走超时档，其余网络
+    // 异常落图库错误提示。
     if (error.message === UNAUTHORIZED_MESSAGE) return;
+    rethrowIfAbort(error);
     if (seq === requestSeq) showGalleryError("图库加载失败，请稍后重试。");
     return;
   }
   if (!response.ok) {
     if (seq !== requestSeq) return;
     // 结构化错误优先展示后端消息：offset 越界等可指导用户刷新，未知形态回退
-    // HTTP 状态码文案。
-    const payload = await parseJsonLoose(response);
+    // HTTP 状态码文案；错误体尽力读取，一切读取失败同入回退档。
+    const payload = await readErrorPayload(response);
     if (seq !== requestSeq) return;
     showGalleryError(
       `图库加载失败：${normalizePayloadError(payload, response).message}`,
     );
     return;
   }
-  const payload = await parseJsonLoose(response);
-  if (payload === null) {
-    // 响应体非 JSON 或中途截断，按网络失败同口径提示。
+  let payload;
+  try {
+    payload = await parseJsonRequired(response);
+  } catch (error) {
+    // 中止类上抛走超时档；PayloadError 与体读取失败同按响应异常提示，
+    // 图库刷新可安全重试。
+    rethrowIfAbort(error);
     if (seq === requestSeq) showGalleryError("图库响应异常，请稍后重试。");
     return;
   }

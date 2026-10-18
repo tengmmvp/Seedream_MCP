@@ -11,7 +11,11 @@ import {
   currentModel,
   fetchBlobUrl,
   fetchExternalBlobUrl,
+  isAbortError,
   normalizePayloadError,
+  parseJsonRequired,
+  PayloadError,
+  readErrorPayload,
   revokeObjectUrls,
   setActiveTool,
   showInlineError,
@@ -28,12 +32,13 @@ import { openLightbox } from "./gallery.js";
 /**
  * config-info 是启动面：填充尺寸档位与能力开关；模型跟随服务器配置无下拉。
  *
- * @throws {Error} 请求失败时上抛，由调用方走令牌门或错误文案。
+ * @throws {Error} 请求失败时上抛；响应体非 JSON、非对象或为字面 null 抛
+ *   PayloadError，中止与体读取异常原样上抛，均由调用方走令牌门或错误文案。
  */
 export async function loadConfigInfo() {
   const response = await apiFetch("/web/api/config-info");
   if (!response.ok) throw new Error("config-info 请求失败");
-  const info = await response.json();
+  const info = await parseJsonRequired(response);
   state.configInfo = info;
 
   const current = currentModel();
@@ -416,35 +421,48 @@ export async function submitGenerate(event) {
       body: JSON.stringify(buildRequestBody()),
       signal: timeoutSignal(1200000),
     });
-    const payload = await response.json();
-    if (response.ok) {
-      const { failedCount, total } = await renderResults(payload);
-      if (failedCount === total && total > 0) {
-        setStatus("failed", "生成失败，全部请求未成功，原因见卡片。");
-      } else if (failedCount) {
-        setStatus(
-          "failed",
-          `部分完成：${total - failedCount}/${total} 成功，失败原因见卡片。`,
-        );
-      } else {
-        setStatus("done", "完成。");
-      }
-    } else {
+    // 非 ok 失败体尽力读取——服务端已拒绝、重试安全，读取异常（含中止）吞为
+    // 无载荷，不逃逸外层超时档误导勿重试；ok 载荷经严格解析，非 JSON、非对象
+    // 与空响应抛 PayloadError 就地展示，体读取失败与中止类上抛走网络/超时档——
+    // 2xx 意味着服务端已生成，断连误劝重试会重复生成。
+    if (!response.ok) {
+      const failure = normalizePayloadError(
+        await readErrorPayload(response),
+        response,
+      );
       setStatus("failed", "生成失败。");
-      showResultError(normalizePayloadError(payload, response));
+      showResultError(failure);
+      return;
+    }
+    let payload;
+    try {
+      payload = await parseJsonRequired(response);
+    } catch (error) {
+      // PayloadError 属载荷档就地展示；体读取失败与中止类上抛走网络/超时档。
+      if (error instanceof PayloadError) {
+        setStatus("failed", "生成失败。");
+        showResultError(error);
+        return;
+      }
+      throw error;
+    }
+    const { failedCount, total } = await renderResults(payload);
+    if (failedCount === total && total > 0) {
+      setStatus("failed", "生成失败，全部请求未成功，原因见卡片。");
+    } else if (failedCount) {
+      setStatus(
+        "failed",
+        `部分完成：${total - failedCount}/${total} 成功，失败原因见卡片。`,
+      );
+    } else {
+      setStatus("done", "完成。");
     }
   } catch (error) {
     if (error.message === UNAUTHORIZED_MESSAGE) {
       setStatus("failed", "需要重新输入令牌。");
-    } else if (error instanceof SyntaxError) {
-      setStatus("failed", "生成失败。");
-      showResultError({
-        type: "bad_response",
-        message: "响应不是有效的 JSON，服务可能异常，请稍后重试。",
-      });
+    } else if (isAbortError(error)) {
       // AbortError 在无手动中止的代码里仅来自超时兜底与浏览器层中止，统一按
       // 超时引导：误劝勿重试的代价小于丢失引导诱发重复生成。
-    } else if (error.name === "TimeoutError" || error.name === "AbortError") {
       setStatus("failed", "生成耗时异常。");
       showResultError({
         type: "timeout",

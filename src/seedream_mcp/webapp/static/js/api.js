@@ -1,6 +1,6 @@
 /**
- * @fileoverview 基础层：全局状态、鉴权封装与对象 URL 管理。其余模块均依赖
- * 本文件；本文件不依赖任何兄弟模块。
+ * @fileoverview 基础层：全局状态、鉴权封装、响应解析与对象 URL 管理。其余
+ * 模块均依赖本文件；本文件不依赖任何兄弟模块。
  */
 
 "use strict";
@@ -188,6 +188,16 @@ export function timeoutSignal(ms) {
   return controller.signal;
 }
 
+/** 中止类异常判定：超时与手动中止按 name 统一识别，各捕获点共用。 */
+export function isAbortError(error) {
+  return error.name === "TimeoutError" || error.name === "AbortError";
+}
+
+/** 中止类异常原样上抛，交上层超时档分流。 */
+export function rethrowIfAbort(error) {
+  if (isAbortError(error)) throw error;
+}
+
 /**
  * 外链图片走裸 fetch：不携带 Authorization，避免令牌外送到上游 CDN；对象 URL
  * 登记入指定池后统一回收。
@@ -225,7 +235,7 @@ export function hideTokenGate() {
  * 失败载荷归一：error.message、error_description、状态码三级回退，未知响应
  * 形态也给出可读信息。生成与图库端点共用。
  *
- * @param {Object|null} payload - 已解析的响应体，可为 null。
+ * @param {Object|null|undefined} payload - 已解析的响应体，非法 JSON 为 undefined。
  * @param {Response} response - 原始响应。
  * @returns {Object} 形如 {type, message} 的错误对象。
  */
@@ -239,15 +249,81 @@ export function normalizePayloadError(payload, response) {
 }
 
 /**
- * 宽松解析响应体为 JSON：非 JSON 或中途截断返回 null，不抛异常。
+ * 宽松解析响应体为 JSON：非法 JSON（SyntaxError）归 undefined 哨兵，与合法
+ * null 区分；中止类与其余体读取异常原样上抛，交调用方分档处置。框定一致的
+ * 截断体同样以 SyntaxError 归 undefined（无法与真非法 JSON 可靠区分），
+ * 为接受的残余缺口。
  *
  * @param {Response} response - 原始响应。
- * @returns {Promise<Object|null>} 解析结果，失败为 null。
+ * @returns {Promise<Object|null|undefined>} 解析结果，非法 JSON 为 undefined。
+ * @throws {DOMException} 响应体读取中止，name 为 TimeoutError/AbortError。
  */
 export async function parseJsonLoose(response) {
   try {
     return await response.json();
-  } catch {
-    return null;
+  } catch (error) {
+    rethrowIfAbort(error);
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
   }
+}
+
+/**
+ * 尽力而为读取已拒绝响应的错误载荷：读取与解析的一切异常（含中止类）吞为
+ * 无载荷——状态码已知，失败定性不依赖体内容，非 ok 分支共用。
+ *
+ * @param {Response} response - 已判定非 ok 的原始响应。
+ * @returns {Promise<Object|null|undefined>} 解析结果，任何失败为 undefined。
+ */
+export async function readErrorPayload(response) {
+  try {
+    return await parseJsonLoose(response);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * ok 响应的载荷异常：bad_response（非 JSON 或非对象）与 empty_response
+ * （字面 null）两档，message 携带用户可见文案，消费方按档位直接展示。
+ */
+export class PayloadError extends Error {
+  /**
+   * @param {"bad_response"|"empty_response"} type - 载荷异常档位。
+   * @param {string} message - 用户可见文案。
+   */
+  constructor(type, message) {
+    super(message);
+    this.name = "PayloadError";
+    this.type = type;
+  }
+}
+
+/**
+ * 严格解析 ok 响应体为 JSON 对象：非 JSON、非对象（数组/标量）与字面 null
+ * 的载荷抛 PayloadError；体读取失败与中止类异常经 parseJsonLoose 原样上抛。
+ *
+ * @param {Response} response - 已判定 ok 的原始响应。
+ * @returns {Promise<Object>} 解析出的载荷对象。
+ * @throws {PayloadError} 响应体非 JSON、非对象或为字面 null。
+ */
+export async function parseJsonRequired(response) {
+  const payload = await parseJsonLoose(response);
+  if (payload === undefined) {
+    throw new PayloadError(
+      "bad_response",
+      "响应不是有效的 JSON，服务可能异常，请稍后重试。",
+    );
+  }
+  if (payload === null) {
+    throw new PayloadError("empty_response", "服务返回了空响应，请稍后重试。");
+  }
+  // 数组与标量是合法 JSON 但非载荷对象，与非法 JSON 分开如实提示。
+  if (typeof payload !== "object" || Array.isArray(payload)) {
+    throw new PayloadError(
+      "bad_response",
+      "响应不是预期的 JSON 对象，服务可能异常，请稍后重试。",
+    );
+  }
+  return payload;
 }
