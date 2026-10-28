@@ -30,6 +30,7 @@ from seedream_mcp.utils.io.sse import (
 
 from _lib.client_fakes import _FakeLog, _FakeSSEResponse, _parse_sse
 from _lib.cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
+from _lib.stream_fakes import _ReadyChunks
 
 if TYPE_CHECKING:
     from loguru import Logger
@@ -843,7 +844,7 @@ async def test_parse_sse_response_item_limit_floor_keeps_legal_batches() -> None
 
 
 async def test_parse_sse_response_terminates_on_deadline() -> None:
-    """逐块检查截止时间：预算耗尽后关闭响应、停止读取并抛 asyncio.TimeoutError。"""
+    """截止到达时等块超时路径终止：关闭响应、停止读取并抛 asyncio.TimeoutError。"""
     event = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
     consumed = 0
     closed = 0
@@ -868,7 +869,7 @@ async def test_parse_sse_response_terminates_on_deadline() -> None:
             event_truncate_threshold=4096,
             total_bytes_limit=64 * 1024,
             log=_log(),
-            # 截止时间已过，首个块即触发终止。
+            # 截止时间已过，首次等块挂起即超时终止。
             deadline=time.monotonic() - 1.0,
         )
 
@@ -881,22 +882,26 @@ async def test_parse_sse_response_deadline_keeps_collected_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """预算耗尽时已收完整事件是确定性产出，保留为部分结果且不再抛超时。"""
+    consumed = 0
 
     def _advancing_monotonic() -> float:
-        # 首块消费前时间在预算内，次块到达时已超限，超时检查先于其入缓冲。
+        # 首块拉取时时间在预算内，次块拉取后越界，下一取块的入口墙钟复查直接中止。
         return 0.0 if consumed <= 1 else 100.0
 
     monkeypatch.setattr(time, "monotonic", _advancing_monotonic)
     first = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
     second = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/2.png"}\n\n'
-    consumed = 0
 
     class _CountingResponse(_FakeSSEResponse):
         async def aiter_bytes(self) -> AsyncIterator[bytes]:
             nonlocal consumed
-            for c in self._chunks:
+            for index, chunk in enumerate(self._chunks):
                 consumed += 1
-                yield c
+                if index:
+                    # 次块前置真实延迟：到点取消先于次块入队落地，次块不落入同批打捞；
+                    # 仅让出事件循环轮次会被生产者流水线抢先入队而按已就绪数据打捞。
+                    await asyncio.sleep(0.05)
+                yield chunk
 
     result = await parse_sse_response(
         cast(httpx.Response, _CountingResponse([first, second])),
@@ -905,14 +910,90 @@ async def test_parse_sse_response_deadline_keeps_collected_results(
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
         log=_log(),
-        deadline=50.0,
+        # 截止值须落在假时钟两档（0.0 与 100.0）之间。
+        deadline=time.monotonic() + 0.02,
     )
 
     assert result["deadline_exceeded"] is True
     assert result["status"] == "partial"
-    # 超时检查先于次块入缓冲，产出为首块的确定性事件
+    # 次块等待截止终止，产出为首块的确定性事件。
     assert [item["url"] for item in result["data"]] == ["http://x/1.png"]
     assert consumed == 2
+
+
+async def test_parse_sse_response_straddling_deadline_chunk_still_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """块在截止前就绪、任务恢复落在截止后：照常解析入列，不抛超时也不触发重试。"""
+    delivered = 0
+
+    def _straddling_monotonic() -> float:
+        # 等块期间时钟在预算内，超时不触发；块交付后的恢复侧时钟已越界。
+        return 0.0 if delivered == 0 else 100.0
+
+    monkeypatch.setattr(time, "monotonic", _straddling_monotonic)
+    event = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
+
+    class _StraddlingResponse(_FakeSSEResponse):
+        async def aiter_bytes(self) -> AsyncIterator[bytes]:
+            nonlocal delivered
+            for chunk in self._chunks:
+                await asyncio.sleep(0)
+                delivered += 1
+                yield chunk
+
+    result = await parse_sse_response(
+        cast(httpx.Response, _StraddlingResponse([event])),
+        model_id="m",
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=_log(),
+        deadline=time.monotonic() + 0.02,
+    )
+
+    # 恢复侧时钟越界不得丢弃就绪数据或以零产出抛超时引发对已计费请求的重试。
+    assert [item["url"] for item in result["data"]] == ["http://x/1.png"]
+    assert result["deadline_exceeded"] is False
+
+
+async def test_parse_sse_response_ready_stream_stops_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """持续就绪的流等块可不挂起：取块入口的墙钟复查越过截止后中止读取并保留结果。"""
+    consumed = 0
+
+    def _monotonic() -> float:
+        # 前 40 块时钟在预算内，此后越界；首个越界的取块入口即命中中止。
+        return 0.0 if consumed < 40 else 100.0
+
+    monkeypatch.setattr(time, "monotonic", _monotonic)
+
+    class _ReadyForeverResponse(_FakeSSEResponse):
+        async def aiter_bytes(self) -> AsyncIterator[bytes]:
+            nonlocal consumed
+            event = (
+                b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
+            )
+            while True:
+                consumed += 1
+                yield event
+
+    result = await parse_sse_response(
+        cast(httpx.Response, _ReadyForeverResponse([])),
+        model_id="m",
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=_log(),
+        deadline=time.monotonic() + 0.02,
+    )
+
+    # 无墙钟复查时该流一路读到字节/条目上限；入口复查命中后有限收场。
+    assert result["deadline_exceeded"] is True
+    assert result["status"] == "partial"
+    assert result["data"]
+    assert consumed < 100
 
 
 def _resp_with_content_type(content_type: str) -> httpx.Response:
@@ -950,7 +1031,7 @@ def test_is_sse_response_rejects_missing_content_type() -> None:
     assert is_sse_response(cast(httpx.Response, SimpleNamespace(headers={}))) is False
 
 
-async def test_next_stream_chunk_prefers_ready_eof_over_expired_deadline() -> None:
+async def test_next_data_chunk_prefers_ready_eof_over_expired_deadline() -> None:
     """已就绪的流结束优先于超时判定，防止已完成的响应被误判超时触发重试。"""
 
     async def _single_chunk() -> AsyncIterator[bytes]:
@@ -959,20 +1040,124 @@ async def test_next_stream_chunk_prefers_ready_eof_over_expired_deadline() -> No
     iterator = _single_chunk().__aiter__()
     await anext(iterator)
 
-    outcome = await stream_module.next_stream_chunk(iterator, time.monotonic() - 1)
-    assert outcome is stream_module.STREAM_ENDED
+    session = stream_module.StreamSession(iterator)
+    assert await session.next_data_chunk(time.monotonic() - 1) is None
+    # 流结束后续取块直接返回 None，不再触队。
+    assert await session.next_data_chunk(time.monotonic() - 1) is None
 
 
-async def test_next_stream_chunk_reports_deadline_on_pending_wait() -> None:
+async def test_next_data_chunk_reports_deadline_on_pending_wait() -> None:
     """无就绪数据且截止已过时如实报超时。"""
 
     async def _slow() -> AsyncIterator[bytes]:
         await asyncio.sleep(0.3)
         yield b"late"
 
-    iterator = _slow().__aiter__()
-    outcome = await stream_module.next_stream_chunk(iterator, time.monotonic() - 0.1)
-    assert outcome is stream_module.STREAM_DEADLINE_HIT
+    session = stream_module.StreamSession(_slow().__aiter__())
+    with pytest.raises(stream_module.StreamDeadlineExceeded):
+        await session.next_data_chunk(time.monotonic() - 0.1)
+
+
+async def test_next_data_chunk_salvages_chunk_ready_in_deadline_batch() -> None:
+    """首块交付回调与到点 timer 落同一事件循环批次且交付在前：返回首块而非误判超时。"""
+    loop = asyncio.get_running_loop()
+    first = loop.create_future()
+
+    async def _delivered() -> AsyncIterator[bytes]:
+        await first
+        yield b"first"
+
+    def _deliver() -> None:
+        first.set_result(None)
+
+    # 交付回调先于生产者首步入队，使块先于入口越界打捞就绪，复现真实时钟竞态。
+    loop.call_soon(_deliver)
+    session = stream_module.StreamSession(_delivered().__aiter__())
+    assert await session.next_data_chunk(time.monotonic() - 1.0) == b"first"
+    # 该块即末块且迭代器已拉尽：结束标记随取消丢弃后仍按流结束收场，不误判超时。
+    assert await session.next_data_chunk(time.monotonic() - 1.0) is None
+
+
+async def test_next_data_chunk_salvage_converges_over_ready_stream() -> None:
+    """持续就绪的上游到点打捞仅发生一次：首块打捞返回，次块立即按截止命中收场。"""
+    iterator = _ReadyChunks()
+    session = stream_module.StreamSession(iterator)
+    # 截止已过仍打捞首块：已计费数据不丢；流水线预取至多一块。
+    assert await session.next_data_chunk(time.monotonic() - 1) == b"chunk"
+    assert iterator.anext_calls == 2
+    # 次块不再打捞也不再次拉取，立即按截止命中收场。
+    with pytest.raises(stream_module.StreamDeadlineExceeded):
+        await session.next_data_chunk(time.monotonic() - 1)
+    assert iterator.anext_calls == 2
+
+
+async def test_next_data_chunk_immediate_empty_stream_hits_deadline() -> None:
+    """从不挂起、每次立即交付空块的无终止流在截止到达后抛截止异常，不自旋。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 0.05
+
+    async def _drain() -> None:
+        session = stream_module.StreamSession(_ReadyChunks(payload=b""))
+        while True:
+            await session.next_data_chunk(deadline)
+
+    # wait_for 仅作防挂死保险：打捞空块的实现在此超时失败。
+    with pytest.raises(stream_module.StreamDeadlineExceeded):
+        await asyncio.wait_for(_drain(), timeout=5.0)
+
+
+async def test_next_data_chunk_propagates_iterator_exception() -> None:
+    """迭代器异常经取块原样上抛，作为流终态交由调用方处置。"""
+
+    class _FailingIterator:
+        """__anext__ 抛 RuntimeError 的迭代器。"""
+
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise RuntimeError("upstream read failed")
+
+    session = stream_module.StreamSession(_FailingIterator())
+    with pytest.raises(RuntimeError, match="upstream read failed"):
+        await session.next_data_chunk(None)
+
+
+async def test_next_data_chunk_propagates_iterator_cancelled_error() -> None:
+    """迭代器自发抛 CancelledError 时原样上抛，消费侧收到取消而非挂起。"""
+
+    class _CancellingIterator:
+        """__anext__ 自发抛 CancelledError 的迭代器。"""
+
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise asyncio.CancelledError
+
+    session = stream_module.StreamSession(_CancellingIterator())
+    # wait_for 仅作防挂死保险：吞掉该异常的实现在此超时失败。
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(session.next_data_chunk(None), timeout=5.0)
+
+
+async def test_session_exit_cancels_producer_on_early_leave() -> None:
+    """消费方提前离开经 async with 收尾：常驻生产者取消，在途迭代器拉取收到取消。"""
+    cancelled = asyncio.Event()
+
+    async def _gated() -> AsyncIterator[bytes]:
+        try:
+            yield b"first"
+            await asyncio.sleep(3600)
+            yield b"never"
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async with stream_module.StreamSession(_gated().__aiter__()) as session:
+        assert await session.next_data_chunk(None) == b"first"
+
+    assert cancelled.is_set()
 
 
 @pytest.mark.parametrize("status", [None, "completed"])

@@ -13,15 +13,17 @@ import time
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from ..core.errors import SeedreamAPIError, has_message_value
+from ..core.errors import (
+    SeedreamAPIError,
+    normalized_upstream_error_code,
+    upstream_message_fragment,
+)
 from ..core.executors import run_in_cpu_pool, should_offload_size
-from ..core.sanitizers import truncate_upstream_message_fragment
 from .stream import (
     RESPONSE_BODY_LIMIT_HINT,
-    STREAM_DEADLINE_HIT,
-    STREAM_ENDED,
+    StreamDeadlineExceeded,
+    StreamSession,
     escalate_partial_status,
-    next_stream_chunk,
 )
 
 if TYPE_CHECKING:
@@ -433,18 +435,13 @@ def _classify_sse_event(
             # format_sse_failed_event 构造失败项，不覆盖先到的 usage 与 status。
             items.append(format_sse_failed_event({"error": err}, model_id))
             return False, None, None
-        raw_code = err.get("code")
-        raw_message = err.get("message")
+        message_fragment = upstream_message_fragment(err.get("message"))
         raise SeedreamAPIError(
-            # 缺失判定与 handle_api_error 共用 has_message_value，流式与非流式对
-            # 同一上游载荷的诊断同口径；其余形态经截断辅助归一化为文本。
-            message=truncate_upstream_message_fragment(
-                raw_message if has_message_value(raw_message) else "流式请求失败"
-            ),
+            # 错误码收窄与 message 缺失判定及截断归一经 errors 的共享辅助，
+            # 流式与非流式对同一上游载荷的诊断同口径。
+            message=message_fragment if message_fragment is not None else "流式请求失败",
             status_code=400,
-            # 仅接受非空字符串错误码，与 errors.handle_api_error 同口径：上游数字码
-            # 转字符串属臆测语义，其余类型置 None 丢弃。
-            error_code=raw_code if isinstance(raw_code, str) and raw_code else None,
+            error_code=normalized_upstream_error_code(err.get("code")),
         )
     if event_type == "image_generation.partial_succeeded":
         items.append(format_sse_success_event(event, model_id))
@@ -528,74 +525,66 @@ async def _consume_sse_chunks(
     # 凑不满一块的字节被扣留到 EOF，小流量 SSE 流因此失去增量性，且 deadline 分支
     # 看不到滞留字节内的已交付事件而误判零产出并重试已计费的生成请求。分帧缓冲
     # 本就处理任意块边界，内存由字节总量与条目上限约束。
-    chunk_iterator = response.aiter_bytes()
-    while True:
-        outcome = await next_stream_chunk(chunk_iterator, deadline)
-        if outcome is STREAM_ENDED:
-            break
-        if outcome is STREAM_DEADLINE_HIT:
-            await _terminate_sse_stream_on_deadline(response, collector.items, log)
-            deadline_exceeded = True
-            break
-        chunk = cast(bytes, outcome)
-        if not chunk:
-            continue
+    async with StreamSession(response.aiter_bytes()) as session:
+        while True:
+            try:
+                chunk = await session.next_data_chunk(deadline)
+            except StreamDeadlineExceeded:
+                await _terminate_sse_stream_on_deadline(response, collector.items, log)
+                deadline_exceeded = True
+                break
+            if chunk is None:
+                break
 
-        # 逐块检查截止时间封顶整个解析阶段，检查点在 extend 之前。
-        if deadline is not None and time.monotonic() > deadline:
-            await _terminate_sse_stream_on_deadline(response, collector.items, log)
-            deadline_exceeded = True
-            break
+            processed_bytes += frames.extend(chunk)
 
-        processed_bytes += frames.extend(chunk)
+            # 累计接收字节超限即终止解析并关闭响应，防止恶意或受损上游无限送数撑爆内存。
+            if processed_bytes > total_bytes_limit:
+                log.warning(
+                    "SSE 响应流总量超限: 已接收 {} 字节，上限 {} 字节",
+                    processed_bytes,
+                    total_bytes_limit,
+                )
+                await _close_stream_response(response)
+                raise SeedreamAPIError(
+                    f"SSE 响应流总量超限: 已接收 {processed_bytes} 字节，"
+                    f"超过上限 {total_bytes_limit} 字节{RESPONSE_BODY_LIMIT_HINT}"
+                )
 
-        # 累计接收字节超限即终止解析并关闭响应，防止恶意或受损上游无限送数撑爆内存。
-        if processed_bytes > total_bytes_limit:
-            log.warning(
-                "SSE 响应流总量超限: 已接收 {} 字节，上限 {} 字节",
-                processed_bytes,
-                total_bytes_limit,
+            if processed_bytes - last_progress_log_bytes >= _SSE_PROGRESS_LOG_INTERVAL_BYTES:
+                last_progress_log_bytes = processed_bytes
+                log.debug("已处理 {} 字节数据", processed_bytes)
+
+            truncated_events += await _drain_sse_complete_events(
+                frames, collector, model_id=model_id, log=log, apply_completed=apply_completed
             )
-            await _close_stream_response(response)
-            raise SeedreamAPIError(
-                f"SSE 响应流总量超限: 已接收 {processed_bytes} 字节，"
-                f"超过上限 {total_bytes_limit} 字节{RESPONSE_BODY_LIMIT_HINT}"
-            )
 
-        if processed_bytes - last_progress_log_bytes >= _SSE_PROGRESS_LOG_INTERVAL_BYTES:
-            last_progress_log_bytes = processed_bytes
-            log.debug("已处理 {} 字节数据", processed_bytes)
+            # 条目数触顶：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
+            if collector.reached_cap():
+                log.warning(
+                    "SSE 事件条目数超过上限 {}: 已累计 {} 条，终止解析",
+                    collector.max_items,
+                    len(collector.items),
+                )
+                await _close_stream_response(response)
+                truncated_events += 1
+                collector.capped = True
+                break
 
-        truncated_events += await _drain_sse_complete_events(
-            frames, collector, model_id=model_id, log=log, apply_completed=apply_completed
-        )
+            # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少
+            # buffer_max_size 字节。
+            frames.recycle(buffer_max_size)
 
-        # 条目数触顶：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
-        if collector.reached_cap():
-            log.warning(
-                "SSE 事件条目数超过上限 {}: 已累计 {} 条，终止解析",
-                collector.max_items,
-                len(collector.items),
-            )
-            await _close_stream_response(response)
-            truncated_events += 1
-            collector.capped = True
-            break
-
-        # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少
-        # buffer_max_size 字节。
-        frames.recycle(buffer_max_size)
-
-        # drain 已抽干全部完整事件，未消费尾部必为单个未完成事件；超阈值丢弃该
-        # 尾部以免内存无限增长，已处理事件不会跨界错位。
-        dropped_bytes = frames.truncate_oversized_tail(event_truncate_threshold)
-        if dropped_bytes:
-            log.warning(
-                "单个 SSE 事件超过截断阈值 ({} > {})，丢弃该不完整事件",
-                dropped_bytes,
-                event_truncate_threshold,
-            )
-            truncated_events += 1
+            # drain 已抽干全部完整事件，未消费尾部必为单个未完成事件；超阈值丢弃该
+            # 尾部以免内存无限增长，已处理事件不会跨界错位。
+            dropped_bytes = frames.truncate_oversized_tail(event_truncate_threshold)
+            if dropped_bytes:
+                log.warning(
+                    "单个 SSE 事件超过截断阈值 ({} > {})，丢弃该不完整事件",
+                    dropped_bytes,
+                    event_truncate_threshold,
+                )
+                truncated_events += 1
 
     return truncated_events, deadline_exceeded
 
@@ -695,10 +684,12 @@ async def parse_sse_response(
             非流式/流式 JSON 路径共用同一限额。解析产物条目数另按该限额除以单条
             解析产物的内存开销估计派生独立硬上限，防止产物内存放大。
         log: loguru logger 实例，用于记录进度与告警。
-        deadline: 解析全程的 time.monotonic 截止时间，None 表示不施加。读取超时按
-            单次读操作计时，持续滴流时永不触发，截止时间逐块封顶整个解析阶段；
-            超时时关闭响应：尚无已解析条目则抛 asyncio.TimeoutError 交由 client
-            并入超时重试，已有条目则保留部分结果返回。
+        deadline: 解析全程的 time.monotonic 截止时间，None 表示不施加。
+            读取超时按单次读操作计时，持续滴流时永不触发，截止时间封顶每次等块，
+            到点经等块超时路径终止解析，持续就绪的流等块从不挂起，另经周期性
+            墙钟复查终止；同批已入队的块经打捞交付、不因取消丢弃。超时时关闭
+            响应：尚无已解析条目则抛 asyncio.TimeoutError 交由 client 并入超时
+            重试，已有条目则保留部分结果返回。
 
     Returns:
         包含 success/data/usage/status/tools 的统一结果字典；deadline 截止且已有
