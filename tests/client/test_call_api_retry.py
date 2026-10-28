@@ -28,6 +28,7 @@ from seedream_mcp.utils.core.errors import (
 )
 
 from _lib.client_fakes import _install_mock_transport
+from _lib.time_fakes import _install_stepping_monotonic
 
 # 重试循环的两条分发目标：请求体不含 stream 标志经 _send_standard_request 发送，
 # 含 stream=True 经 _send_stream_request 发送，其余重试语义完全共用。
@@ -47,8 +48,13 @@ _SUCCESS_RESULT: dict[str, Any] = {
 
 def _fake_send_by_call(
     outcome: Callable[[int], dict[str, Any] | BaseException],
+    *,
+    budgets: list[float] | None = None,
 ) -> tuple[Callable[..., Awaitable[dict[str, Any]]], Callable[[], int]]:
-    """构造按尝试序号取结果的 fake_send 替身，异常即抛出，返回替身与调用计数读取器。"""
+    """构造按尝试序号取结果的 fake_send 替身，异常即抛出，返回替身与调用计数读取器。
+
+    budgets 传入列表时逐次记录 attempt_timeout_seconds，供单次尝试时限断言。
+    """
     calls = 0
 
     async def fake_send(
@@ -57,10 +63,13 @@ def _fake_send_by_call(
         url: str,
         request_body: bytes,
         request_timeout: httpx.Timeout,
+        attempt_timeout_seconds: float,
     ) -> dict[str, Any]:
         nonlocal calls
         del client, url, request_body, request_timeout
         calls += 1
+        if budgets is not None:
+            budgets.append(attempt_timeout_seconds)
         value = outcome(calls)
         if isinstance(value, BaseException):
             raise value
@@ -552,26 +561,91 @@ async def test_call_api_retry_budget_terminates_before_exhausting_attempts(
     monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """跨尝试累计超过 api_timeout×2 总预算时提前终止重试，不逐次耗尽配置次数。"""
-    import time
-
     config = SeedreamConfig(api_key="k", max_retries=9, api_timeout=1)
 
-    # 假时钟每次调用前进 1 秒：预算 2 秒允许第二次尝试发出，第三次尝试入口耗尽
-    fake_now = 10.0
-
-    def _advance_monotonic() -> float:
-        nonlocal fake_now
-        fake_now += 1.0
-        return fake_now
-
-    monkeypatch.setattr(time, "monotonic", _advance_monotonic)
+    # 假时钟每次调用前进 0.5 秒（每次尝试入口与退避各读一次时钟）：
+    # 预算 2 秒允许第二次尝试发出，第三次尝试入口耗尽，剩余为负钳 0 展示。
+    _install_stepping_monotonic(0.5, monkeypatch)
 
     async with SeedreamClient(config) as client:
         fake_send, send_calls = _fake_send_by_call(
             lambda _call: httpx.ReadTimeout("read timed out")
         )
         monkeypatch.setattr(client, "_send_standard_request", fake_send)
-        with pytest.raises(SeedreamTimeoutError, match="总预算"):
+        with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.00 秒不足以支撑一次完整尝试"):
             await client._call_api("text_to_image", {"prompt": "p"})
 
     assert send_calls() == 2
+
+
+async def test_call_api_attempt_timeout_clamped_to_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """单次尝试时限取 min(api_timeout, 剩余总预算)，派发的尝试整体不越过总预算。"""
+    config = SeedreamConfig(api_key="k", max_retries=9, api_timeout=1)
+
+    # 假时钟每次调用前进 0.6 秒：第二次尝试入口剩余预算 0.2 秒，低于单次 api_timeout，
+    # 最后一次尝试不再拿全新完整 api_timeout，跨尝试硬闭合在 api_timeout×2 内。
+    _install_stepping_monotonic(0.6, monkeypatch)
+
+    attempt_budgets: list[float] = []
+
+    async with SeedreamClient(config) as client:
+        fake_send, _ = _fake_send_by_call(
+            lambda _call: SeedreamAPIError("server error", status_code=500),
+            budgets=attempt_budgets,
+        )
+        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.00 秒不足以支撑一次完整尝试"):
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert attempt_budgets[0] == 1.0
+    assert attempt_budgets[1] == pytest.approx(0.2)
+    assert len(attempt_budgets) == 2
+
+
+async def test_call_api_retry_budget_floor_blocks_fractional_remainder(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """剩余预算为正零头（低于单次 api_timeout 10%）时不再发起新尝试，直接抛预算类超时。"""
+    config = SeedreamConfig(api_key="k", max_retries=9, api_timeout=1)
+
+    # 假时钟每次调用前进 0.64 秒：第二次尝试入口剩余 0.08 秒，高于 0 而低于可行性下限 0.1 秒，
+    # 若派发则新尝试时限被钳到近零、大概率中途被取消，故不派发提前终止。
+    _install_stepping_monotonic(0.64, monkeypatch)
+
+    async with SeedreamClient(config) as client:
+        fake_send, send_calls = _fake_send_by_call(
+            lambda _call: SeedreamAPIError("server error", status_code=500)
+        )
+        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.08 秒不足以支撑一次完整尝试"):
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert send_calls() == 1
+
+
+async def test_call_api_retry_budget_floor_allows_remainder_above_floor(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """剩余预算高于下限时照常派发新尝试，单次尝试时限仍钳制到剩余预算。"""
+    config = SeedreamConfig(api_key="k", max_retries=9, api_timeout=1)
+
+    # 假时钟每次调用前进 0.62 秒：第二次尝试入口剩余 0.14 秒，高于下限 0.1 秒，照常
+    # 派发且单次尝试时限钳到 0.14 秒；第三次入口预算耗尽终止。
+    _install_stepping_monotonic(0.62, monkeypatch)
+
+    attempt_budgets: list[float] = []
+
+    async with SeedreamClient(config) as client:
+        fake_send, _ = _fake_send_by_call(
+            lambda _call: SeedreamAPIError("server error", status_code=500),
+            budgets=attempt_budgets,
+        )
+        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.00 秒不足以支撑一次完整尝试"):
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert attempt_budgets[0] == 1.0
+    assert attempt_budgets[1] == pytest.approx(0.14)
+    assert len(attempt_budgets) == 2

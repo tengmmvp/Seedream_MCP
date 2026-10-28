@@ -1497,8 +1497,9 @@ async def test_parallel_batch_validates_common_params_once(
         url: str,
         request_body: bytes,
         request_timeout: Any,
+        attempt_timeout_seconds: float,
     ) -> dict[str, Any]:
-        del self, client, url, request_body, request_timeout
+        del self, client, url, request_body, request_timeout, attempt_timeout_seconds
         return {"success": True, "data": [], "usage": {}, "status": "completed"}
 
     monkeypatch.setattr(SeedreamClient, "_send_standard_request", fake_send)

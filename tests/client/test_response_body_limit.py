@@ -2,8 +2,9 @@
 
 覆盖错误体独立上限与状态码重试语义、错误体 JSON 线程卸载与 message 截断、
 response_body_limit 显式配置与推导、成功体 data 条目硬上限、SSE 截断阈值边界
-与计数透传、慢滴流与头部停滞的总预算超时、错误体读取超时与传输错误的状态码
-归约。网络层经 httpx.MockTransport 模拟，不触达真实 API。
+与计数透传、慢滴流与头部停滞的总预算超时、末块到点打捞的完整交付、持续就绪
+流的周期性墙钟复查、错误体读取超时与传输错误的状态码归约。网络层经
+httpx.MockTransport 模拟，不触达真实 API。
 """
 
 from __future__ import annotations
@@ -545,6 +546,62 @@ async def test_standard_slow_drip_json_over_total_budget_times_out(no_sleep: Non
     assert attempts == config.max_retries + 1
 
 
+async def test_json_final_chunk_salvaged_at_deadline_completes_without_retry() -> None:
+    """末块在截止瞬间入队且结束标记因取消丢失：完整 JSON 体正常解析，不误判超时触发重试。"""
+    loop = asyncio.get_running_loop()
+    gate = loop.create_future()
+    body = json.dumps({"data": [{"url": "http://x/1.png"}]}).encode()
+
+    async def _single_chunk() -> AsyncIterator[bytes]:
+        await gate
+        yield body
+
+    def _deliver() -> None:
+        gate.set_result(None)
+
+    # 交付回调先于截止 timer 排队：末块入队与到点取消同批落地，结束标记停泊在
+    # 队列写入处随生产者取消丢弃，复现审查实证的误判超时重试场景。
+    loop.call_soon(_deliver)
+    response = httpx.Response(
+        200, content=_single_chunk(), headers={"content-type": "application/json"}
+    )
+
+    config = SeedreamConfig(api_key="k")
+    async with SeedreamClient(config) as client:
+        result = await client._parse_json_success_response(response, time.monotonic() - 1.0)
+
+    assert result["success"] is True
+    assert result["data"][0]["url"] == "http://x/1.png"
+
+
+async def test_read_body_ready_stream_aborts_after_deadline_recheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """持续就绪的读体流等块从不挂起：周期性墙钟复查越过截止后中止读取。"""
+    read_chunks = 0
+
+    def _monotonic() -> float:
+        # 前 40 块时钟在预算内，此后越界；复查在第二个边界（第 64 块）命中。
+        return 0.0 if read_chunks < 40 else 100.0
+
+    monkeypatch.setattr(time, "monotonic", _monotonic)
+
+    async def _ready_forever() -> AsyncIterator[bytes]:
+        nonlocal read_chunks
+        while True:
+            read_chunks += 1
+            yield b"x" * 16
+
+    response = httpx.Response(200, content=_ready_forever())
+    # 上限取小：复查缺失时该流会被字节上限以「响应体过大」拦截，测试快速失败。
+    config = SeedreamConfig(api_key="k", response_body_limit=64 * 1024)
+    async with SeedreamClient(config) as client:
+        with pytest.raises(asyncio.TimeoutError, match="总时长预算"):
+            await client._read_response_body_capped(response, deadline=50.0)
+
+    assert read_chunks < 100
+
+
 async def test_stream_header_stall_over_api_timeout_times_out(no_sleep: None) -> None:
     """流式路径响应头就绪慢于 api_timeout 时按超时重试，耗尽归一为超时异常。
 
@@ -674,13 +731,18 @@ async def test_error_body_read_timeout_reduced_with_status_and_retry_after() -> 
     """错误状态码下读体超时归约为携带状态码与 Retry-After 的 API 错误。
 
     经 MockTransport 取得真实流式 429 响应后以已过期的 deadline 直调读体路径，
-    首块到达即命中截止判定。
+    首块延迟送达使等待挂起，等块超时路径命中截止判定。
     """
     config = SeedreamConfig(api_key="k", max_retries=0)
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
-        return httpx.Response(429, headers={"retry-after": "3"}, content=b"x" * 32)
+
+        async def _stream() -> AsyncIterator[bytes]:
+            await _delay_outside_patched_sleep(0.05)
+            yield b"x" * 32
+
+        return httpx.Response(429, headers={"retry-after": "3"}, content=_stream())
 
     async with SeedreamClient(config) as client:
         async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as raw:

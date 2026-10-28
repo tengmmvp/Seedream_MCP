@@ -44,3 +44,15 @@ def _assert_due_flips_at_window_edges(
     assert registry.due(key) is False
     mono[0] = t_after + backoff + 1.0
     assert registry.due(key) is True
+
+
+def _install_stepping_monotonic(step: float, monkeypatch: pytest.MonkeyPatch) -> None:
+    """把 time.monotonic 替换为每次调用前进 step 秒的假时钟，供重试预算时序控制。"""
+    fake_now = 10.0
+
+    def _advance() -> float:
+        nonlocal fake_now
+        fake_now += step
+        return fake_now
+
+    monkeypatch.setattr(time, "monotonic", _advance)

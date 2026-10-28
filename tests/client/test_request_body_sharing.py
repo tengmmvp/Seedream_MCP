@@ -72,8 +72,9 @@ def _install_send_capture(monkeypatch: pytest.MonkeyPatch, bodies: list[bytes]) 
         url: str,
         request_body: bytes,
         request_timeout: Any,
+        attempt_timeout_seconds: float,
     ) -> dict[str, Any]:
-        del self, client, url, request_timeout
+        del self, client, url, request_timeout, attempt_timeout_seconds
         bodies.append(request_body)
         # 在途窗口：让同批请求先后进入序列化阶段再完成，模拟真实网络并发
         await asyncio.sleep(0)

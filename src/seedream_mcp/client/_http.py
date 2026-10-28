@@ -11,7 +11,7 @@ import json
 import random
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -20,6 +20,7 @@ from .request_plan import _ACTIVE_REQUEST_PLAN, serialize_request_body
 from ..utils.core.executors import CpuOffloadPoolClosedError, load_json_bytes
 from ..utils.core.http_int import strict_http_int
 from ..utils.core.loop_bound import loop_bound_semaphore
+from ..utils.core.retry_budget import api_retry_budget_seconds, retry_feasibility_floor
 from ..utils.core.errors import (
     SeedreamAPIError,
     SeedreamConfigError,
@@ -46,13 +47,12 @@ from ..utils.io.sse import (
 )
 from ..utils.io.stream import (
     RESPONSE_BODY_LIMIT_HINT,
-    STREAM_DEADLINE_HIT,
-    STREAM_ENDED,
+    StreamDeadlineExceeded,
+    StreamSession,
     data_items,
     escalate_partial_status,
     item_has_image_payload,
     item_reports_failure,
-    next_stream_chunk,
 )
 
 if TYPE_CHECKING:
@@ -70,10 +70,6 @@ _ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
 
 # 错误体完整 JSON 解析的输入上限，超限不做 dict 解析以避免大字典驻留异常对象。
 _ERROR_JSON_PARSE_LIMIT = 64 * 1024
-
-# _call_api 跨尝试累计预算按单次 api_timeout 的倍数推导，把重试风暴下单请求的
-# 最长占用约束在单次封顶的小常数倍内。
-_API_RETRY_BUDGET_FACTOR = 2
 
 # 未显式配置 response_body_limit 时按 auto_save_max_file_size 的倍数推导，覆盖
 # 组图 15 张 b64_json 图片的最坏合法响应体。
@@ -137,8 +133,8 @@ class _ClientHTTPMixin:
     def _build_http_timeout(self) -> httpx.Timeout:
         """构建并缓存统一超时策略：timeout 管连接、写入与连接池获取，api_timeout 管读取。
 
-        httpx 的 read 超时按单次读操作计时而非累计时长，响应头就绪与读体阶段由
-        发送路径的截止时间预算统一封顶。
+        httpx 的 read 超时按单次读操作计时而非累计时长，响应头就绪与读体的总时长
+        由发送路径的截止时间预算约束。
         """
         if self._timeout is None:
             base_timeout = float(self.config.timeout)
@@ -378,12 +374,15 @@ class _ClientHTTPMixin:
         """流式读取响应体并施加总量与总时长上限，超限抛出对应异常。
 
         max_bytes 缺省时取 _response_body_byte_limit，错误路径传入更小的独立上限。
-        status_code 由错误路径传入，使超限异常沿用 429/5xx 可重试、4xx 立即失败的
-        既有分类；成功路径不传，超限保持无状态码的立即失败。deadline 为
-        time.monotonic 截止时间，逐块检查封顶整个读体阶段。limit_adjustable 控制
-        超限消息是否提示环境变量调整。响应的关闭由调用方负责。
-        返回 bytearray 单份缓冲，json.loads 与解码可直接消费，避免 join 或
-        bytes 转换的峰值双驻留；增量拼接的 realloc 拷贝在事件循环线程执行，
+        status_code 由错误路径传入，使超限异常沿用 429/5xx 可重试、4xx 立即失败的既有分类；
+        成功路径不传，超限保持无状态码的立即失败。
+        deadline 为 time.monotonic 截止时间，在等待下一块的路径与持续就绪流的
+        周期性墙钟复查生效，到点时同批已入队的数据经打捞仍可交付，读取总量受
+        字节上限封顶。
+        limit_adjustable 控制超限消息是否提示环境变量调整。
+        响应的关闭由调用方负责。
+        返回 bytearray 单份缓冲，json.loads 与解码可直接消费，
+        避免 join 或 bytes 转换的峰值双驻留；增量拼接的 realloc 拷贝在事件循环线程执行，
         以单份驻留优先于卸载拷贝。
 
         Raises:
@@ -411,26 +410,24 @@ class _ClientHTTPMixin:
                     retry_after=retry_after,
                 )
         buffer = bytearray()
-        chunk_iterator = response.aiter_bytes()
-        while True:
-            outcome = await next_stream_chunk(chunk_iterator, deadline)
-            if outcome is STREAM_ENDED:
-                break
-            if outcome is STREAM_DEADLINE_HIT:
-                raise asyncio.TimeoutError(f"响应体读取超过总时长预算: 已读取 {len(buffer)} 字节")
-            chunk = cast("bytes", outcome)
-            if not chunk:
-                continue
-            if deadline is not None and time.monotonic() > deadline:
-                raise asyncio.TimeoutError(f"响应体读取超过总时长预算: 已读取 {len(buffer)} 字节")
-            buffer += chunk
-            if len(buffer) > max_bytes:
-                raise SeedreamAPIError(
-                    f"响应体过大: 已读取 {len(buffer)} 字节，超过上限 {max_bytes} 字节"
-                    f"{adjust_hint}",
-                    status_code=status_code,
-                    retry_after=retry_after,
-                )
+        async with StreamSession(response.aiter_bytes()) as session:
+            while True:
+                try:
+                    chunk = await session.next_data_chunk(deadline)
+                except StreamDeadlineExceeded:
+                    raise asyncio.TimeoutError(
+                        f"响应体读取超过总时长预算: 已读取 {len(buffer)} 字节"
+                    ) from None
+                if chunk is None:
+                    break
+                buffer += chunk
+                if len(buffer) > max_bytes:
+                    raise SeedreamAPIError(
+                        f"响应体过大: 已读取 {len(buffer)} 字节，超过上限 {max_bytes} 字节"
+                        f"{adjust_hint}",
+                        status_code=status_code,
+                        retry_after=retry_after,
+                    )
         return buffer
 
     @staticmethod
@@ -551,18 +548,19 @@ class _ClientHTTPMixin:
         url: str,
         request_body: bytes,
         request_timeout: httpx.Timeout,
+        attempt_timeout_seconds: float,
         handle_response: Callable[[httpx.Response, float], Awaitable[dict[str, Any]]],
     ) -> dict[str, Any]:
         """发送请求、检查状态码并委托回调解析响应，两条发送路径共用。
 
-        以流式发送实施总量限额，避免 client.post 先全量缓冲使 Content-Length 预检
-        失效。每次尝试按 config.api_timeout 记录总时长截止时间，约束响应头就绪与
-        读体；超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
+        以流式发送实施总量限额，避免 client.post 先全量缓冲使 Content-Length 预检失效。
+        attempt_timeout_seconds 为本次尝试的总时长上限，
+        响应头就绪与读体的截止约束经等待路径生效，到点已就绪的数据仍可交付；
+        超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
         """
-        api_timeout = float(self.config.api_timeout)
-        deadline = time.monotonic() + api_timeout
+        deadline = time.monotonic() + attempt_timeout_seconds
         request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
-        response = await self._send_with_header_deadline(client, request, api_timeout)
+        response = await self._send_with_header_deadline(client, request, attempt_timeout_seconds)
         try:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
             await self._raise_for_response_status(response, deadline=deadline)
@@ -601,6 +599,7 @@ class _ClientHTTPMixin:
         url: str,
         request_body: bytes,
         request_timeout: httpx.Timeout,
+        attempt_timeout_seconds: float,
     ) -> dict[str, Any]:
         """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。"""
         return await self._send_request(
@@ -608,6 +607,7 @@ class _ClientHTTPMixin:
             url=url,
             request_body=request_body,
             request_timeout=request_timeout,
+            attempt_timeout_seconds=attempt_timeout_seconds,
             handle_response=self._handle_stream_response,
         )
 
@@ -618,6 +618,7 @@ class _ClientHTTPMixin:
         url: str,
         request_body: bytes,
         request_timeout: httpx.Timeout,
+        attempt_timeout_seconds: float,
     ) -> dict[str, Any]:
         """发送非流式请求，将 JSON 响应解析为统一结果结构。"""
         return await self._send_request(
@@ -625,19 +626,20 @@ class _ClientHTTPMixin:
             url=url,
             request_body=request_body,
             request_timeout=request_timeout,
+            attempt_timeout_seconds=attempt_timeout_seconds,
             handle_response=self._parse_json_success_response,
         )
 
     async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
         """调用 Seedream API。
 
-        进程级生成准入约束同时在途的生成 API 请求数，覆盖 MCP 工具与 Web 生成
-        入口；准入在请求构建完成后获取，构建期不占进程级并发容量，重试期间保持
-        占槽。按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时
-        按错误类型分类：非 200 响应中仅 429 与 5xx 可重试，其余状态码立即抛出；
-        超时与网络错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的
-        Seedream 异常。CPU 卸载池关闭属服务退出窗口，归一为不可重试的服务关闭
-        错误。
+        进程级生成准入约束同时在途的生成 API 请求数，覆盖 MCP 工具与 Web 生成入口；
+        准入在请求构建完成后获取，构建期不占进程级并发容量，重试期间保持占槽。
+        按 request_data 是否含 stream 标志分发到流式或非流式发送路径。
+        失败时按错误类型分类：非 200 响应中仅 429 与 5xx 可重试，其余状态码立即抛出；
+        超时与网络错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的 Seedream 异常。
+        单次尝试时限取单次 api_timeout 与剩余总预算的较小值。
+        CPU 卸载池关闭属服务退出窗口，归一为不可重试的服务关闭错误。
         """
         async with loop_bound_semaphore(self.config.generate_concurrency, key="generate_admission"):
             try:
@@ -664,18 +666,24 @@ class _ClientHTTPMixin:
                 endpoint, request_data, self._serialize_request
             )
         total_attempts = max(1, self.config.max_retries + 1)
+        single_attempt_timeout = float(self.config.api_timeout)
 
         is_stream = bool(request_data.get("stream"))
-        total_budget = float(self.config.api_timeout) * _API_RETRY_BUDGET_FACTOR
+        total_budget = api_retry_budget_seconds(self.config.api_timeout)
         total_budget_deadline = time.monotonic() + total_budget
         last_error: BaseException | None = None
         for attempt in range(total_attempts):
-            if attempt > 0 and time.monotonic() > total_budget_deadline:
+            remaining_budget = total_budget_deadline - time.monotonic()
+            # 剩余预算低于可行性下限即不足以支撑一次完整尝试，
+            # 提前终止以免派发大概率中途取消的计费请求。
+            if attempt > 0 and remaining_budget < retry_feasibility_floor(single_attempt_timeout):
+                # 耗尽时剩余为负，钳 0 展示避免错误文案出现负数秒。
                 detail = f"，最后错误: {last_error}" if last_error is not None else ""
                 raise SeedreamTimeoutError(
-                    f"{endpoint} API 调用跨尝试累计超过总预算 {total_budget:.0f} 秒，"
-                    f"提前终止重试{detail}"
+                    f"{endpoint} API 调用剩余预算 {max(remaining_budget, 0.0):.2f} 秒"
+                    f"不足以支撑一次完整尝试，提前终止重试{detail}"
                 ) from last_error
+            attempt_timeout = min(single_attempt_timeout, remaining_budget)
             pending_retry_after: float | None = None
             try:
                 self._log_request_attempt(
@@ -692,6 +700,7 @@ class _ClientHTTPMixin:
                         url=url,
                         request_body=request_body,
                         request_timeout=request_timeout,
+                        attempt_timeout_seconds=attempt_timeout,
                     )
 
                 return await self._send_standard_request(
@@ -699,6 +708,7 @@ class _ClientHTTPMixin:
                     url=url,
                     request_body=request_body,
                     request_timeout=request_timeout,
+                    attempt_timeout_seconds=attempt_timeout,
                 )
             except SeedreamAPIError as exc:
                 last_error = exc
