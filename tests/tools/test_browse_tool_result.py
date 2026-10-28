@@ -38,7 +38,11 @@ from seedream_mcp.tools.handlers import browse_images as browse_images_module
 from seedream_mcp.tools.handlers.browse_images import handle_browse_images
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR, is_within_any_nc_parts
-from seedream_mcp.utils.io.scan import ScanEntry, ScanIncompleteCause, ScanResult
+from seedream_mcp.utils.io.scan import (
+    ScanEntry,
+    ScanIncompleteCause,
+    ScanResult,
+)
 
 
 def _seed_images_root(ws: Path) -> Path:
@@ -791,10 +795,11 @@ async def test_browse_images_truncated_empty_result_marks_incompleteness(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """条目预算截断的空页不声称完备：文本携带可见标记，总数与 has_more 置未知。
+    """条目预算截断的空页不声称完备也不导引原地重试：标记可见，总数与 has_more
+    置未知，next_offset 为 None，rescan_futile 置位供消费方门控无效重扫。
 
     截断静默时空页会误报「未找到图片文件」且 total_count=0，模型无从得知目录
-    可能仍有图片。
+    可能仍有图片；截断预算静态且与 offset 无关，同 offset 续扫提示会引导零进度死循环。
     """
     import seedream_mcp.utils.io.scan as path_module
 
@@ -812,16 +817,101 @@ async def test_browse_images_truncated_empty_result_marks_incompleteness(
     assert sc["count"] == 0
     assert sc["total_count"] is None
     assert sc["has_more"] is None
+    assert sc["next_offset"] is None
+    assert sc["rescan_futile"] is True
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "未找到图片文件" in text
+    assert "继续扫描请传" not in text
     assert "目录条目过多，结果可能不完整" in text
 
 
-async def test_browse_images_truncated_partial_page_marks_incompleteness(
+async def test_browse_images_truncated_no_match_empty_page_keeps_passive(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """截断前已收集的部分页携带标记，total_count 不以低报的精确值声称完备。"""
+    """预算窗口内无匹配图的目录截断空页保持被动：无同 offset 续扫提示、next_offset 为 None。
+
+    截断预算静态且与 offset 无关，同 offset 重试（缓存回放或 TTL 过期重扫）必然
+    返回同一空截断页；主动提示会引导模型零进度死循环，重复请求同样保持被动。
+    """
+    import seedream_mcp.utils.io.scan as path_module
+
+    images_root = _seed_images_root(workspace_root)
+    for i in range(8):
+        (images_root / f"note_{i:02d}.txt").write_bytes(b"x")
+    monkeypatch.setattr(path_module, "_SCAN_ENTRY_BUDGET", 5)
+
+    params = BrowseImagesInput(directory=".", recursive=False)
+    for _ in range(2):
+        result = await handle_browse_images(params)
+
+        assert result.is_error is False
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["status"] == "empty"
+        assert sc["count"] == 0
+        assert sc["total_count"] is None
+        assert sc["has_more"] is None
+        assert sc["next_offset"] is None
+        assert sc["rescan_futile"] is True
+        text = "".join(getattr(content, "text", "") for content in result.content)
+        assert "未找到图片文件" in text
+        assert "继续扫描请传" not in text
+        assert "目录条目过多，结果可能不完整" in text
+
+
+async def test_browse_images_truncated_empty_page_with_skips_keeps_resume_hint(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """带跳过条目的空截断页不作徒劳论：保持续扫导引与 rescan_futile=false。
+
+    截断预算虽静态，缓存按原始扫描量（含跳过条目）扩窗，跳过条目负缓存到期
+    重试可恢复为图片，原地重扫能增长窗口；与无跳过条目的空截断页对照
+    （test_browse_images_truncated_empty_result_marks_incompleteness 置
+    rescan_futile 并撤续扫偏移），此变体导引原偏移续扫。
+    """
+    import seedream_mcp.utils.io.scan as path_module
+
+    images_root = _seed_images_root(workspace_root)
+    early = images_root / "a"
+    early.mkdir()
+    (early / "x.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    late = images_root / "b"
+    late.mkdir()
+    for i in range(20):
+        (late / f"note_{i:02d}.txt").write_bytes(b"x")
+    _install_failing_resolve_for(monkeypatch, "x.png")
+    # 预算使子目录 a 产出坏图后子目录 b 触发截断，窗口唯一条目被 resolve 剔除。
+    monkeypatch.setattr(path_module, "_SCAN_ENTRY_BUDGET", 15)
+
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=True))
+
+    assert result.is_error is False
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["status"] == "empty"
+    assert sc["count"] == 0
+    assert sc["total_count"] is None
+    assert sc["has_more"] is None
+    assert sc["next_offset"] == 0
+    assert sc["rescan_futile"] is False
+    assert sc["skipped_count"] == 1
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "未找到图片文件" in text
+    assert "继续扫描请传 offset=0" in text
+    assert "目录条目过多，结果可能不完整" in text
+
+
+async def test_browse_images_truncated_partial_page_flags_rescan_futile(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """零跳过的截断部分页与空页同判徒劳：条目照常返回，撤续扫偏移并置 rescan_futile。
+
+    截断预算静态且与 offset 无关，窗口耗尽后续扫必落回同一前沿的空页，保留
+    窗口末尾偏移会引导模型多付一轮翻到徒劳空页。
+    """
     import seedream_mcp.utils.io.scan as path_module
 
     images_root = _seed_images_root(workspace_root)
@@ -844,8 +934,105 @@ async def test_browse_images_truncated_partial_page_marks_incompleteness(
     assert sc["count"] == 1
     assert sc["total_count"] is None
     assert sc["has_more"] is None
+    assert sc["next_offset"] is None
+    assert sc["rescan_futile"] is True
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "x.png" in text
+    assert "目录条目过多，结果可能不完整" in text
+    assert "继续扫描请传" not in text
+
+
+async def test_browse_truncated_nonempty_zero_skip_page_withdraws_resume_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """替身声明非空截断零跳过窗口耗尽页：分页层消费扫描层 rescan_futile 事实。
+
+    与真实预算截断用例（test_browse_images_truncated_partial_page_flags_rescan_futile）
+    对照，本用例锁定单层契约：分页不自行重推成因与跳过数组合。
+    """
+    seeding = _seed_rescan_layout(
+        tmp_path, monkeypatch, outside_names=[], workspace_names=["a", "b"]
+    )
+    windows: list[tuple[list[Path], bool, ScanIncompleteCause | None]] = [
+        ([seeding.images["a"], seeding.images["b"]], False, ScanIncompleteCause.TRUNCATED),
+    ]
+    scan_limits: list[int] = []
+
+    monkeypatch.setattr(
+        browse_core_module,
+        "cached_find_images_in_directory",
+        _fake_cached_find(windows, scan_limits),
+    )
+
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+    )
+
+    assert windows == []
+    assert scan_limits == [3]
+    assert result.is_error is False
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["status"] == "completed"
+    assert sc["count"] == 2
+    assert sc["total_count"] is None
+    assert sc["has_more"] is None
+    assert sc["next_offset"] is None
+    assert sc["rescan_futile"] is True
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "a.png" in text
+    assert "b.png" in text
+    assert "继续扫描请传" not in text
+    assert "目录条目过多，结果可能不完整" in text
+
+
+async def test_browse_truncated_page_with_window_entries_keeps_real_pagination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """窗口内仍有条目的截断页是真实分页：next_offset 照常、rescan_futile 不置位。
+
+    徒劳事实仅在窗口耗尽时生效，翻页取回窗口内更前条目不受截断成因影响。
+    """
+    seeding = _seed_rescan_layout(
+        tmp_path, monkeypatch, outside_names=[], workspace_names=["a", "b", "c"]
+    )
+    windows: list[tuple[list[Path], bool, ScanIncompleteCause | None]] = [
+        (
+            [seeding.images["a"], seeding.images["b"], seeding.images["c"]],
+            False,
+            ScanIncompleteCause.TRUNCATED,
+        ),
+    ]
+    scan_limits: list[int] = []
+
+    monkeypatch.setattr(
+        browse_core_module,
+        "cached_find_images_in_directory",
+        _fake_cached_find(windows, scan_limits),
+    )
+
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+    )
+
+    assert windows == []
+    assert scan_limits == [3]
+    assert result.is_error is False
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["status"] == "completed"
+    assert sc["count"] == 2
+    assert sc["has_more"] is True
+    assert sc["next_offset"] == 2
+    assert sc["rescan_futile"] is False
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "a.png" in text
+    assert "b.png" in text
+    assert "c.png" not in text
+    assert "仍有更多" in text
+    assert "继续翻页请传 offset=2" in text
     assert "目录条目过多，结果可能不完整" in text
 
 
@@ -1561,7 +1748,7 @@ async def test_browse_consumes_stall_signal_without_rescan_round(
 
     配额填充收敛扫描层后 browse 不再叠加补扫循环，替身 cached 层声明单个
     (条目, 终点, 成因) 三元组窗口，锁定单层契约：停滞信号不触发额外扫描轮，
-    末页成因未知是否扫尽时 has_more 置未知。
+    末页成因未知是否扫尽时 has_more 置未知，next_offset 给跳过本页条目的续扫偏移。
     窗口内越界条目经谓词剔除且无 resolve 失败，停滞标记按永久不可读表述。
     """
     outside_names = [f"out_{i}" for i in range(4)]
@@ -1595,9 +1782,10 @@ async def test_browse_consumes_stall_signal_without_rescan_round(
     assert sc["count"] == 2
     assert sc["total_count"] is None
     assert sc["has_more"] is None
-    assert sc["next_offset"] is None
+    assert sc["next_offset"] == 2
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "a.png" in text
+    assert "扫描未完成，继续扫描请传 offset=2" in text
     assert "b.png" in text
     assert "部分图片不在读取范围内，结果可能不完整" in text
     assert "暂时无法访问" not in text
@@ -1607,10 +1795,11 @@ async def test_browse_stalled_by_out_of_scope_drops_reports_permanent_marker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """谓词剔除致扩窗停滞的标记表述永久不可读，不以「暂时」诱导模型重试。
+    """谓词剔除致扩窗停滞的首答即按永久态计：不下发续扫偏移，不诱导同 scope 重扫。
 
     目录条目 resolve 后全部越出读权限时扩窗零进展判 STALLED 且无 resolve 失败，
-    越界为永久状态，按瞬时提示重试必然命中同一停滞。
+    越界为永久状态，与空 scope 同属确定性停滞，立即按 permanent 分类，不等谱系
+    三次 latch。
     """
     outside_names = [f"out_{index:02d}" for index in range(12)]
     seeding = _seed_rescan_layout(
@@ -1637,10 +1826,51 @@ async def test_browse_stalled_by_out_of_scope_drops_reports_permanent_marker(
     assert sc["total_count"] is None
     assert sc["has_more"] is None
     assert sc["next_offset"] is None
+    assert sc["stall_permanent"] is True
+    assert sc["rescan_futile"] is False
     assert sc["skipped_count"] is None
     text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "继续扫描请传" not in text
     assert "部分图片不在读取范围内，结果可能不完整" in text
     assert "暂时无法访问" not in text
+
+
+async def test_browse_stalled_empty_page_at_nonzero_offset_guides_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """界内条目尚存的停滞空页维持谱系机制：非零偏移导引续扫，不误判目录已尽。
+
+    窗口内仍有条目落在读范围内时停滞非确定（扩窗可能增长），不落入确定性
+    全外的立即永久分类；空页文本导引跳过本页已取得条目的续扫偏移。
+    """
+    # 界外条目须达扩窗序列末轮窗口（offset=4 配额 7，窗口最大 28），
+    # 返回量恒等于窗口才不误判扫尽，连续两轮零新增即停。
+    outside_names = [f"out_{index:02d}" for index in range(32)]
+    seeding = _seed_rescan_layout(
+        tmp_path, monkeypatch, outside_names=outside_names, workspace_names=["a", "b"]
+    )
+    scan_order = [seeding.images["a"], seeding.images["b"]]
+    scan_order += [seeding.images[name] for name in outside_names]
+
+    def _fake_scan(**kwargs: object) -> list[Path]:
+        limit = kwargs["limit"]
+        assert isinstance(limit, int)
+        return scan_order[:limit]
+
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=4)
+    )
+
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["has_more"] is None
+    assert sc["next_offset"] == 4
+    assert sc["stall_permanent"] is False
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "扫描未完成，继续扫描请传 offset=4" in text
 
 
 async def test_browse_stalled_by_resolve_failures_keeps_transient_marker(
@@ -1665,11 +1895,166 @@ async def test_browse_stalled_by_resolve_failures_keeps_transient_marker(
     assert sc["count"] == 0
     assert sc["total_count"] is None
     assert sc["has_more"] is None
-    assert sc["next_offset"] is None
+    assert sc["next_offset"] == 0
     assert sc["skipped_count"] == 12
     text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "扫描未完成，继续扫描请传 offset=0" in text
     assert "部分图片暂时无法访问，结果可能不完整" in text
     assert "不在读取范围内" not in text
+
+
+async def test_browse_stalled_out_of_scope_permanent_from_first_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """确定性范围外停滞首答即永久且跨重试稳定：不导引续扫，重试直接冻结窗回放。
+
+    读范围不随重试变化，扫描层不等谱系 latch 首答升永久并随缓存条目持久化，
+    重探窗口内的第 2、3 次调用不付注定复现的扩窗重扫。
+    """
+    # 界外条目须达首答判停的末轮窗口（3、6、12 逐次倍增），
+    # 各轮返回量恒等于窗口才不误判扫尽。
+    outside_names = [f"out_{index:02d}" for index in range(12)]
+    seeding = _seed_rescan_layout(
+        tmp_path, monkeypatch, outside_names=outside_names, workspace_names=[]
+    )
+    # 图片目录须真实存在，非递归扫描才有 mtime 指纹可缓存停滞谱系。
+    _seed_images_root(seeding.workspace)
+    scan_order = [seeding.images[name] for name in outside_names]
+    scan_limits: list[int] = []
+
+    def _fake_scan(**kwargs: object) -> list[Path]:
+        limit = kwargs["limit"]
+        assert isinstance(limit, int)
+        scan_limits.append(limit)
+        return scan_order[:limit]
+
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+
+    params = BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+    for result in [await handle_browse_images(params) for _ in range(3)]:
+        sc = result.structured_content
+        assert isinstance(sc, dict)
+        assert sc["has_more"] is None
+        assert sc["next_offset"] is None
+        assert sc["stall_permanent"] is True
+        text = "".join(getattr(content, "text", "") for content in result.content)
+        assert "继续扫描请传" not in text
+        assert "offset=" not in text
+        assert "部分图片不在读取范围内，结果可能不完整" in text
+
+    # 首答 3、6、12 三轮判停即升永久，第 2、3 次调用冻结窗回放、零 scanner 调用。
+    assert scan_limits == [3, 6, 12]
+
+
+async def test_browse_stalled_resolve_failures_marker_converges_to_permanent(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """resolve 失败停滞跨请求零进展收敛后，标记撤下「暂时」表述并不再导引重试。"""
+    # 坏条目须达三轮停滞末轮窗口（最大 192）才不中途扫尽。
+    images_root = _seed_images_root(workspace_root)
+    bad_names = [f"stall_{index:03d}.png" for index in range(192)]
+    for name in bad_names:
+        (images_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    _install_failing_resolve_for(monkeypatch, *bad_names)
+
+    params = BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+    transient = [await handle_browse_images(params) for _ in range(2)]
+    for result in transient:
+        text = "".join(getattr(content, "text", "") for content in result.content)
+        assert "部分图片暂时无法访问，结果可能不完整" in text
+        assert "扫描未完成，继续扫描请传 offset=0" in text
+
+    permanent = await handle_browse_images(params)
+    sc = permanent.structured_content
+    assert isinstance(sc, dict)
+    assert sc["next_offset"] is None
+    assert sc["has_more"] is None
+    assert sc["stall_permanent"] is True
+    assert sc["skipped_count"] == 192
+    text = "".join(getattr(content, "text", "") for content in permanent.content)
+    assert "部分图片持续无法访问，结果可能不完整" in text
+    assert "暂时无法访问" not in text
+    assert "继续扫描请传" not in text
+
+
+async def test_browse_permanent_stall_partial_page_suppresses_resume_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """永久停滞的部分页同样撤下续扫导引：谱系已证窗口不再增长，续扫必然空页。"""
+    seeding = _seed_rescan_layout(
+        tmp_path, monkeypatch, outside_names=["out_0", "out_1"], workspace_names=["a", "b"]
+    )
+
+    def _stalled_cached_find(**kwargs: object) -> ScanResult:
+        return ScanResult(
+            images=[_scan_entry(seeding.images["a"]), _scan_entry(seeding.images["b"])],
+            complete=False,
+            incomplete_cause=ScanIncompleteCause.STALLED,
+        ).as_permanent()
+
+    monkeypatch.setattr(browse_core_module, "cached_find_images_in_directory", _stalled_cached_find)
+
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+    )
+
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["status"] == "completed"
+    assert sc["count"] == 2
+    assert sc["total_count"] is None
+    assert sc["has_more"] is None
+    assert sc["next_offset"] is None
+    assert sc["stall_permanent"] is True
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "a.png" in text
+    assert "仍有更多" not in text
+    assert "继续扫描请传" not in text
+    assert "部分图片不在读取范围内，结果可能不完整" in text
+
+
+def test_scan_stall_streak_accumulates_then_resets_on_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """停滞谱系跨调用累计零进展次数，窗口增长后从头重计。"""
+    from seedream_mcp.utils.io import scan as io_scan
+
+    # 坏条目须达两次停滞与末次扩窗的末轮窗口（最大 48）。
+    images_root = tmp_path / "images"
+    images_root.mkdir()
+    bad_names = [f"bad{index:02d}.png" for index in range(48)]
+    for name in bad_names:
+        (images_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    _install_failing_resolve_for(monkeypatch, *bad_names)
+
+    def _call(scan_limit: int) -> ScanResult:
+        return io_scan.cached_find_images_in_directory(
+            resolved_dir=images_root,
+            recursive=False,
+            max_depth=1,
+            format_filter=None,
+            scan_limit=scan_limit,
+        )
+
+    io_scan.reset_directory_scan_cache()
+    try:
+        assert _call(3).stall_streak == 1
+        assert _call(3).stall_streak == 2
+        # 新增可解析条目使停滞窗口增长，谱系归零重计；显式前移目录 mtime
+        # 确保非递归指纹失效，不依赖文件系统时间戳粒度。
+        (images_root / "0_good.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        past_ns = int((time.time() - 3600.0) * 1_000_000_000)
+        os.utime(images_root, ns=(past_ns, past_ns))
+        grown = _call(3)
+        assert grown.stall_streak == 1
+        assert [entry.resolved_path.name for entry in grown.images] == ["0_good.png"]
+        assert _call(20).stall_streak == 2
+    finally:
+        io_scan.reset_directory_scan_cache()
 
 
 async def test_browse_single_scan_call_fills_quota_with_predicate(
@@ -2001,7 +2386,10 @@ async def test_browse_images_bounds_scope_wider_than_read_scope_dropped_entirely
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """超宽 bounds_scope 未落入读权限即整界剔除：界内图片也不返回，结果为空。"""
+    """超宽 bounds_scope 未落入读权限即整界剔除：界内图片也不返回，结果为空。
+
+    整界剔除为确定性停滞且无缓存谱系可计数，首答即按永久态计：不导引续扫重试。
+    """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     images_root = workspace / ".seedream" / "images"
@@ -2020,8 +2408,13 @@ async def test_browse_images_bounds_scope_wider_than_read_scope_dropped_entirely
     assert sc["status"] == "empty"
     assert sc["count"] == 0
     assert sc["images"] == []
+    assert sc["has_more"] is None
+    assert sc["next_offset"] is None
+    assert sc["stall_permanent"] is True
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "inside.png" not in text
+    assert "继续扫描请传" not in text
+    assert "部分图片不在读取范围内，结果可能不完整" in text
 
 
 async def test_browse_images_bounds_scope_narrower_filters_at_source(
