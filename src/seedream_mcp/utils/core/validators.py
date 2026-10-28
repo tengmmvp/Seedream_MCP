@@ -26,6 +26,8 @@ from ..model.capabilities import (
     supported_family_display_names,
 )
 
+from ...definitions.conventions import MAX_PARALLEL_REQUEST_COUNT, MAX_SEQUENTIAL_TOTAL_IMAGES
+
 logger = get_logger()
 
 
@@ -57,10 +59,6 @@ VALID_RESPONSE_FORMATS = frozenset({"url", "b64_json"})
 # 非 ASCII 数字串同样命中，int() 可正常转换，行为良性并按此声明；IGNORECASE 使
 # 分隔符接受大写 X，命中后输出统一归一为小写 x。
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
-# 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张。
-MAX_SEQUENTIAL_TOTAL_IMAGES = 15
-# 并行生成上限：request_count 与 parallelism 共用此上界。
-MAX_PARALLEL_REQUEST_COUNT = 10
 # CJK 字符计数范围：CJK 表意文字各区与假名，覆盖生僻字与日文避免计数偏低；
 # 仅影响超限告警计数，不参与任何放行判定。
 CJK_CHAR_PATTERN = re.compile("[㐀-䶿一-鿿豈-﫿" "\U00020000-\U0003ffffぁ-ヿｦ-ﾟ]")
@@ -722,6 +720,19 @@ def resolve_default_parallelism(
     return min(request_count, max_request_count)
 
 
+def resolve_wave_divisor(
+    request_count: int,
+    generate_concurrency: int,
+    *,
+    parallelism: int | None = None,
+) -> int:
+    """波次除数：缺省并行度经进程级生成准入与显式 parallelism 封顶。"""
+    divisor = min(resolve_default_parallelism(request_count), generate_concurrency)
+    if parallelism is not None:
+        divisor = min(divisor, parallelism)
+    return divisor
+
+
 def resolve_effective_generation_defaults(
     *,
     size: str | None,
@@ -861,17 +872,16 @@ def validate_sequential_image_limit(
 
 def resolve_sequential_max_images(
     max_images: int | None,
-    reference_images: list[str] | None = None,
+    reference_count: int | None = None,
 ) -> int:
-    """根据参考图数量推导组图最大生成数量。
+    """根据参考图张数推导组图最大生成数量。
 
-    未显式指定 max_images 时默认为 15 - len(reference_images)，保证「参考图数量 +
-    生成数量 <= 15」。
+    未显式指定 max_images 时默认为 15 减参考图张数，保证参考图张数与生成数量之和不超过 15；
+    reference_count 为 None 时按 0 张推导。
     """
     if max_images is not None:
         return max_images
-    reference_count = len(reference_images) if reference_images else 0
-    return MAX_SEQUENTIAL_TOTAL_IMAGES - reference_count
+    return MAX_SEQUENTIAL_TOTAL_IMAGES - (reference_count or 0)
 
 
 class ValidatedCommonParams(NamedTuple):

@@ -2,11 +2,13 @@
 
 pydantic 在 core schema 层强制 max_length 约束，超长值在字段校验器运行前即被拒绝。
 覆盖 prompt 100000、save_path 1024、custom_name 255、browse directory 1024、
-browse format_filter 补点后单项 16 与条目数 32 的接受与超长拒绝边界、browse
-数值控件区间、枚举字段归一与拒绝、可选字符串字段的空白拒绝与 None 放行、
-image 的空白拒绝、多图 image=None 的类型拒绝，以及多图与组图
-空白条目报错文案一致、空白包裹参考图 strip 归一后按 url/data_uri 分类，
-锁定 inputSchema 约束与跨字段约束描述不被回归。统一使用 model_validate 构造输入。
+browse format_filter 补点后单项 16 与条目数 32 的接受与超长拒绝边界、
+browse 数值控件区间、枚举字段归一与拒绝、可选字符串字段的空白拒绝与 None 放行、
+image 的空白拒绝、多图 image=None 的类型拒绝、多图融合计数界外中文拒绝、
+组图输入基类单字符串归一与空列表数量拒绝，以及多图与组图空白条目报错文案一致、
+空白包裹参考图 strip 归一后按 url/data_uri 分类，
+锁定 inputSchema 约束与跨字段约束描述不被回归。
+统一使用 model_validate 构造输入。
 """
 
 from typing import cast
@@ -168,6 +170,14 @@ def test_multi_image_rejects_oversized_item(monkeypatch: pytest.MonkeyPatch) -> 
         )
 
 
+@pytest.mark.parametrize("count", [1, 15])
+def test_multi_image_rejects_out_of_bounds_count(count: int) -> None:
+    """融合 image 数量界外以中文数量文案拒绝，先于 minItems/maxItems 的英文约束错误。"""
+    images = [f"https://example.com/{i}.png" for i in range(count)]
+    with pytest.raises(ValidationError, match="参考图片数量需在 2-14 之间"):
+        MultiImageFusionInput.model_validate({"prompt": "x", "image": images})
+
+
 def test_sequential_image_rejects_oversized_item(monkeypatch: pytest.MonkeyPatch) -> None:
     """组图参考图逐项超过防御上限时在 schema 级被拒绝，与其余带图工具同界。"""
     monkeypatch.setattr(schemas_module, "MAX_IMAGE_INPUT_CHARS", 100)
@@ -248,6 +258,13 @@ def test_sequential_image_mixin_strips_wrapped_items() -> None:
 
     assert model.image == ["https://example.com/a.png"]
     assert classify_image_reference(model.image[0]) == "url"
+
+
+def test_sequential_image_mixin_normalizes_and_enforces_count() -> None:
+    """归一与计数由组图输入基类单点执行，组合模型经继承走同一校验路径。"""
+    assert _SequentialImageInput.model_validate({"image": "a.png"}).image == ["a.png"]
+    with pytest.raises(ValidationError, match="参考图片数量需在 1-14 之间"):
+        _SequentialImageInput.model_validate({"image": []})
 
 
 def test_multi_image_rejects_none_input() -> None:

@@ -12,11 +12,12 @@ from typing import cast
 
 import pytest
 
+from seedream_mcp.definitions.conventions import MAX_SEQUENTIAL_TOTAL_IMAGES
 from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from seedream_mcp.utils.core.validators import (
-    MAX_SEQUENTIAL_TOTAL_IMAGES,
     _coerce_int_in_range,
     parse_bool,
+    resolve_sequential_max_images,
     validate_background,
     validate_common_generation_params,
     validate_generation_tools,
@@ -196,6 +197,29 @@ def test_validate_max_images_above_max() -> None:
     """高于上界抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须在"):
         validate_max_images(MAX_SEQUENTIAL_TOTAL_IMAGES + 1)
+
+
+# ==================== resolve_sequential_max_images ====================
+
+
+def test_resolve_sequential_max_images_explicit_value_passthrough() -> None:
+    """显式 max_images 原值返回，不参与推导。"""
+    assert resolve_sequential_max_images(7, 3) == 7
+
+
+def test_resolve_sequential_max_images_derives_from_reference_count() -> None:
+    """缺省 max_images 按总上限减参考图张数推导。"""
+    assert resolve_sequential_max_images(None, 3) == MAX_SEQUENTIAL_TOTAL_IMAGES - 3
+
+
+def test_resolve_sequential_max_images_defaults_to_no_reference() -> None:
+    """参考图张数缺省按 0 推导为总上限。"""
+    assert resolve_sequential_max_images(None) == MAX_SEQUENTIAL_TOTAL_IMAGES
+
+
+def test_resolve_sequential_max_images_none_count_as_zero() -> None:
+    """None 张数在 callee 内归零，null 守卫不向调用方转嫁。"""
+    assert resolve_sequential_max_images(None, None) == MAX_SEQUENTIAL_TOTAL_IMAGES
 
 
 # ==================== _coerce_int_in_range ====================

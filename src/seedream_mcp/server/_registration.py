@@ -56,6 +56,16 @@ from ..config import (
     SeedreamConfig,
     get_active_config,
 )
+from ..definitions.conventions import (
+    BROWSE_IMAGES_TOOL_NAME,
+    GET_MODEL_INFO_TOOL_NAME,
+    IMAGE_TO_IMAGE_TOOL_NAME,
+    MAX_PARALLEL_REQUEST_COUNT,
+    MAX_SEQUENTIAL_TOTAL_IMAGES,
+    MULTI_IMAGE_FUSION_TOOL_NAME,
+    SEQUENTIAL_GENERATION_TOOL_NAME,
+    TEXT_TO_IMAGE_TOOL_NAME,
+)
 from ..tools import (
     BrowseImagesInput,
     ImageToImageInput,
@@ -94,8 +104,9 @@ from ..tools.schemas import (
     MAX_IMAGES_DESCRIPTION,
     MAX_IMAGES_MIN,
     MULTI_IMAGE_DESCRIPTION,
-    MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION,
+    multi_image_field_type,
     MULTI_IMAGE_MIN_ITEMS,
+    MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION,
     NON_BLANK_PATTERN as _NON_BLANK_PATTERN,
     OFFSET_DESCRIPTION,
     OFFSET_MAX,
@@ -117,6 +128,7 @@ from ..tools.schemas import (
     SAVE_PATH_DESCRIPTION,
     SAVE_PATH_MAX_LENGTH,
     SEQUENTIAL_IMAGE_DESCRIPTION,
+    sequential_image_field_type,
     SEQUENTIAL_PROMPT_DESCRIPTION,
     SHOW_DETAILS_DESCRIPTION,
     SINGLE_IMAGE_DESCRIPTION,
@@ -132,16 +144,11 @@ from ..tools.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
     GetModelInfoStructuredOutput,
-    build_error_dict,
     build_error_structured,
     build_structured_tool_result,
 )
 from ..utils.core.errors import SeedreamConfigError
 from ..utils.core.logs import get_logger
-from ..utils.core.validators import (
-    MAX_PARALLEL_REQUEST_COUNT,
-    MAX_SEQUENTIAL_TOTAL_IMAGES,
-)
 from ..utils.io.path import get_workspace_roots
 from ..utils.io.roots import (
     modern_revision_negotiated,
@@ -154,10 +161,7 @@ from ..utils.io.roots import (
     session_or_none,
     workspace_roots_scope_from_result,
 )
-from ..utils.model.capabilities import (
-    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-    model_payloads,
-)
+from ..utils.model.capabilities import model_payloads
 
 # ==================== 工具注解常量 ====================
 
@@ -232,6 +236,11 @@ _CUSTOM_NAME_FIELD: str | None = Field(
     description=CUSTOM_NAME_DESCRIPTION,
 )
 
+# image 字段类型与输入模型共用 schemas 单一来源，平铺侧条目叠加非空 pattern。
+_FLAT_IMAGE_ITEM = Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]
+_MULTI_IMAGE_FLAT_TYPE: Any = multi_image_field_type(_FLAT_IMAGE_ITEM, MULTI_IMAGE_MIN_ITEMS)
+_SEQUENTIAL_IMAGE_FLAT_TYPE: Any = sequential_image_field_type(_FLAT_IMAGE_ITEM, 1)
+
 
 _PIPELINE_EXCLUDED_LOCALS = frozenset({"workspace_roots", "ctx"})
 
@@ -255,9 +264,12 @@ def _config_from_context(ctx: Context[Any, Any] | None) -> SeedreamConfig:
 def _filter_unset_params(kwargs: dict[str, Any]) -> dict[str, Any]:
     """过滤值为 None 的函数签名默认值，仅保留显式提供的字段。
 
-    剔除后组装输入模型使 model_fields_set 仅含显式提供的字段，组图 max_images 的
-    按参考图数量推导依赖该区分；response_format/stream/request_count 等带非 None
-    签名默认值的字段恒进入 fields_set，不参与该区分，新逻辑不得依赖其判定显式传入。
+    剔除后组装输入模型使 model_fields_set 仅含显式提供的字段；
+    组图 max_images 的推导按 None 判定缺省。
+    response_format/stream/request_count 等带非 None 签名默认值的字段恒进入 fields_set，
+    新逻辑不得依赖其判定显式传入。
+    此处剥离 MCP 入口的签名默认 None，Web 入口显式 null 直接进模型校验，
+    两入口 null 语义同构由 test_tool_parameter_order 锁定。
     """
     return {key: value for key, value in kwargs.items() if value is not None}
 
@@ -272,53 +284,33 @@ def _validation_error_message(exc: ValidationError) -> str:
     return "；".join(parts)
 
 
-async def _validation_error_result(
-    tool_name: str,
-    exc: ValidationError,
-    build_structured: Callable[[str, str], dict[str, Any]],
-) -> CallToolResult:
+async def _validation_error_result(tool_name: str, exc: ValidationError) -> CallToolResult:
     """输入模型构造失败的统一错误出口，返回携带 structuredContent 的 is_error 结果。
 
     跨字段校验不进入 SDK 参数模型，构造期 ValidationError 直接冒泡会得到无
     structuredContent 的错误结果，与流水线错误形态并存使按 structuredContent 消费
     的客户端须处理缺席分支。此处统一为流水线同款错误结果，error.type 固定
-    validation_error，structuredContent 由各工具的构造回调按声明的 outputSchema
+    validation_error，structuredContent 经输出族映射按各工具声明的 outputSchema
     组装；SDK 对 is_error 结果跳过输出校验，组装仅保证与流水线错误形态一致。
     单字段约束失败经 SDK 参数模型先行拒绝、错误结果不带 structuredContent，
     两形态并存为既定契约。
     """
     message = _validation_error_message(exc)
-    structured = build_structured(tool_name, message)
+    structured = build_error_structured(tool_name, "validation_error", message)
     return await build_structured_tool_result(message, structured, is_error=True)
-
-
-def _generation_validation_structured(tool_name: str, message: str) -> dict[str, Any]:
-    """生成类工具校验错误的 structuredContent，复用流水线的错误出口形态。"""
-    return build_error_structured(tool_name, "validation_error", message)
-
-
-def _browse_validation_structured(tool_name: str, message: str) -> dict[str, Any]:
-    """浏览工具校验错误的 structuredContent，按浏览工具声明的 outputSchema 组装。"""
-    return BrowseImagesStructuredOutput(
-        tool=tool_name,
-        success=False,
-        status="failed",
-        error=build_error_dict("validation_error", message),
-    ).model_dump()
 
 
 async def _run_tool_pipeline(
     tool_name: str,
     model_cls: type[BaseModel],
     kwargs: dict[str, Any],
-    build_structured: Callable[[str, str], dict[str, Any]],
     runner: Callable[..., Awaitable[CallToolResult]],
     *,
     config: SeedreamConfig | None,
     ctx: Context[Any, Any] | None,
     workspace_roots: ListRootsResult | None,
 ) -> CallToolResult:
-    """从平铺实参组装输入模型并委托 runner，构造期校验失败经构造回调返回错误结果。
+    """从平铺实参组装输入模型并委托 runner，构造期校验失败经输出族映射返回错误结果。
 
     参数字典含输入模型未声明的键时抛 TypeError，排除集配置错误在开发期即暴露，
     不下沉为运行时校验错误或被 None 过滤吞掉。config 为 None 时 runner 不接收
@@ -339,7 +331,7 @@ async def _run_tool_pipeline(
             tool_name,
             exc.errors(include_url=False, include_input=False),
         )
-        return await _validation_error_result(tool_name, exc, build_structured)
+        return await _validation_error_result(tool_name, exc)
     if config is None:
         return await runner(params, ctx=ctx, workspace_roots=workspace_roots)
     return await runner(params, config=config, ctx=ctx, workspace_roots=workspace_roots)
@@ -375,10 +367,10 @@ _ROOTS_DEPENDENCY = Annotated[ListRootsResult | None, Resolve(_workspace_roots_d
 
 
 @mcp.tool(
-    name="text_to_image",
+    name=TEXT_TO_IMAGE_TOOL_NAME,
     title="Seedream 文生图",
     annotations=GENERATION_TOOL_ANNOTATIONS,
-    icons=_tool_icons("text_to_image"),
+    icons=_tool_icons(TEXT_TO_IMAGE_TOOL_NAME),
 )
 async def text_to_image(
     prompt: str = Field(
@@ -408,10 +400,9 @@ async def text_to_image(
     不适用：需要基于已有图片修改时改用 image_to_image；需要一次生成多张风格一致的图片时改用 sequential_generation。
     """
     return await _run_tool_pipeline(
-        "text_to_image",
+        TEXT_TO_IMAGE_TOOL_NAME,
         TextToImageInput,
         _pipeline_kwargs(locals()),
-        _generation_validation_structured,
         run_text_to_image,
         config=_config_from_context(ctx),
         ctx=ctx,
@@ -420,10 +411,10 @@ async def text_to_image(
 
 
 @mcp.tool(
-    name="image_to_image",
+    name=IMAGE_TO_IMAGE_TOOL_NAME,
     title="Seedream 图文生图",
     annotations=GENERATION_TOOL_ANNOTATIONS,
-    icons=_tool_icons("image_to_image"),
+    icons=_tool_icons(IMAGE_TO_IMAGE_TOOL_NAME),
 )
 async def image_to_image(
     prompt: str | None = Field(
@@ -469,10 +460,9 @@ async def image_to_image(
     不适用：纯文字生图改用 text_to_image；融合多张图片特征改用 multi_image_fusion。
     """
     return await _run_tool_pipeline(
-        "image_to_image",
+        IMAGE_TO_IMAGE_TOOL_NAME,
         ImageToImageInput,
         _pipeline_kwargs(locals()),
-        _generation_validation_structured,
         run_image_to_image,
         config=_config_from_context(ctx),
         ctx=ctx,
@@ -481,10 +471,10 @@ async def image_to_image(
 
 
 @mcp.tool(
-    name="multi_image_fusion",
+    name=MULTI_IMAGE_FUSION_TOOL_NAME,
     title="Seedream 多图融合",
     annotations=GENERATION_TOOL_ANNOTATIONS,
-    icons=_tool_icons("multi_image_fusion"),
+    icons=_tool_icons(MULTI_IMAGE_FUSION_TOOL_NAME),
 )
 async def multi_image_fusion(
     prompt: str = Field(
@@ -494,9 +484,7 @@ async def multi_image_fusion(
         description=MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION,
     ),
     optimize_prompt_options: OptimizePromptOptions | None = _OPTIMIZE_PROMPT_OPTIONS_FIELD,
-    image: list[Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]] = Field(
-        min_length=MULTI_IMAGE_MIN_ITEMS,
-        max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+    image: _MULTI_IMAGE_FLAT_TYPE = Field(
         description=MULTI_IMAGE_DESCRIPTION,
     ),
     size: str | None = _SIZE_FIELD,
@@ -519,10 +507,9 @@ async def multi_image_fusion(
     不适用：仅编辑单张图片改用 image_to_image；生成一组连贯分镜改用 sequential_generation。
     """
     return await _run_tool_pipeline(
-        "multi_image_fusion",
+        MULTI_IMAGE_FUSION_TOOL_NAME,
         MultiImageFusionInput,
         _pipeline_kwargs(locals()),
-        _generation_validation_structured,
         run_multi_image_fusion,
         config=_config_from_context(ctx),
         ctx=ctx,
@@ -531,10 +518,10 @@ async def multi_image_fusion(
 
 
 @mcp.tool(
-    name="sequential_generation",
+    name=SEQUENTIAL_GENERATION_TOOL_NAME,
     title="Seedream 组图输出",
     annotations=GENERATION_TOOL_ANNOTATIONS,
-    icons=_tool_icons("sequential_generation"),
+    icons=_tool_icons(SEQUENTIAL_GENERATION_TOOL_NAME),
 )
 async def sequential_generation(
     prompt: str = Field(
@@ -544,14 +531,7 @@ async def sequential_generation(
         description=SEQUENTIAL_PROMPT_DESCRIPTION,
     ),
     optimize_prompt_options: OptimizePromptOptions | None = _OPTIMIZE_PROMPT_OPTIONS_FIELD,
-    image: (
-        Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]
-        | Annotated[
-            list[Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]],
-            Field(max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES),
-        ]
-        | None
-    ) = Field(
+    image: _SEQUENTIAL_IMAGE_FLAT_TYPE = Field(
         default=None,
         description=SEQUENTIAL_IMAGE_DESCRIPTION,
     ),
@@ -587,10 +567,9 @@ async def sequential_generation(
     不适用：融合多张参考图特征改用 multi_image_fusion。
     """
     return await _run_tool_pipeline(
-        "sequential_generation",
+        SEQUENTIAL_GENERATION_TOOL_NAME,
         SequentialGenerationInput,
         _pipeline_kwargs(locals()),
-        _generation_validation_structured,
         run_sequential_generation,
         config=_config_from_context(ctx),
         ctx=ctx,
@@ -599,10 +578,10 @@ async def sequential_generation(
 
 
 @mcp.tool(
-    name="browse_images",
+    name=BROWSE_IMAGES_TOOL_NAME,
     title="Seedream 图片浏览",
     annotations=READ_ONLY_TOOL_ANNOTATIONS,
-    icons=_tool_icons("browse_images"),
+    icons=_tool_icons(BROWSE_IMAGES_TOOL_NAME),
 )
 async def browse_images(
     directory: str | None = Field(
@@ -653,10 +632,9 @@ async def browse_images(
     默认浏览图片目录；返回的条目为绝对路径，可直接填入参考图参数。
     """
     return await _run_tool_pipeline(
-        "browse_images",
+        BROWSE_IMAGES_TOOL_NAME,
         BrowseImagesInput,
         _pipeline_kwargs(locals()),
-        _browse_validation_structured,
         run_browse_images,
         config=None,
         ctx=ctx,
@@ -665,10 +643,10 @@ async def browse_images(
 
 
 @mcp.tool(
-    name="get_model_info",
+    name=GET_MODEL_INFO_TOOL_NAME,
     title="Seedream 模型信息",
     annotations=READ_ONLY_TOOL_ANNOTATIONS,
-    icons=_tool_icons("get_model_info"),
+    icons=_tool_icons(GET_MODEL_INFO_TOOL_NAME),
     description=build_model_info_description(),
 )
 async def get_model_info(

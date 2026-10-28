@@ -10,14 +10,16 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Annotated, Any, cast, get_args, get_origin
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, BeforeValidator, TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 
+from _lib.generation_payloads import GENERATION_BASE_PAYLOADS
 from _lib.no_param_tools import NO_PARAM_TOOLS
 
 from seedream_mcp.server.runtime import mcp
@@ -25,6 +27,8 @@ from seedream_mcp.tools.schemas import (
     BrowseImagesInput,
     FORMAT_FILTER_ITEM_MAX_LENGTH,
     ImageToImageInput,
+    multi_image_field_type,
+    MULTI_IMAGE_MIN_ITEMS,
     MultiImageFusionInput,
     OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
     OUTPUT_FORMAT_DESCRIPTION,
@@ -32,6 +36,7 @@ from seedream_mcp.tools.schemas import (
     SIZE_WITH_LAYER_DESCRIPTION,
     STREAM_DESCRIPTION,
     SequentialGenerationInput,
+    sequential_image_field_type,
     TextToImageInput,
     TOOLS_DESCRIPTION,
 )
@@ -235,11 +240,22 @@ def _contains_pattern(node: Any, pattern: str) -> bool:
     return False
 
 
+def _schema_allows_null(prop: dict[str, Any]) -> bool:
+    """判定属性的 anyOf 声明是否含 null 分支。"""
+    return any(branch.get("type") == "null" for branch in prop.get("anyOf", ()))
+
+
+def _annotation_accepts_none(annotation: Any) -> bool:
+    """判定字段注解是否接受 None，顶层 Annotated 取底层类型。"""
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    return type(None) in get_args(annotation)
+
+
 async def test_flat_input_schema_field_definitions_match_model() -> None:
     """逐字段 schema 定义与模型 json schema 全等，锁定描述与约束不漂移。
 
-    两类刻意差异：max_images 平铺侧声明为 int | None 以区分未提供与显式传入，
-    仅比对整数分支；非空语义字段以 pattern 镜像，比对时剔除 pattern 键另行断言。
+    刻意差异仅一类：非空语义字段以 pattern 镜像，比对时剔除 pattern 键另行断言。
     """
     tools = await mcp.list_tools()
     by_name = {tool.name: tool for tool in tools}
@@ -250,14 +266,6 @@ async def test_flat_input_schema_field_definitions_match_model() -> None:
         for field in model.model_fields:
             tool_prop = schema["properties"][field]
             model_prop = model_schema["properties"][field]
-            if field == "max_images":
-                int_branch = next(
-                    branch for branch in tool_prop["anyOf"] if branch.get("type") == "integer"
-                )
-                assert int_branch["minimum"] == model_prop["minimum"], name
-                assert int_branch["maximum"] == model_prop["maximum"], name
-                assert tool_prop["description"] == model_prop["description"], name
-                continue
             if (name, field) in _NON_BLANK_MIRROR_FIELDS:
                 assert _contains_pattern(tool_prop, _NON_BLANK_PATTERN), (name, field)
                 assert _strip_pattern_keys(tool_prop) == _strip_pattern_keys(model_prop), (
@@ -267,6 +275,34 @@ async def test_flat_input_schema_field_definitions_match_model() -> None:
             else:
                 assert not _contains_pattern(tool_prop, _NON_BLANK_PATTERN), (name, field)
                 assert tool_prop == model_prop, (name, field)
+
+
+async def test_signature_nullable_fields_are_model_optional() -> None:
+    """平铺签名允许 null 的字段在输入模型必须 Optional，两入口 null 语义不因此分叉。
+
+    MCP 入口剥离签名默认 None，Web 入口显式 null 直接进模型校验；
+    签名允许 null 而模型字段非 Optional 时 Web 侧显式 null 被拒 400 与 MCP 缺省分叉。
+    """
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+
+    for name, model in _TOOL_INPUT_MODELS.items():
+        for field, prop in by_name[name].input_schema["properties"].items():
+            if _schema_allows_null(prop):
+                assert _annotation_accepts_none(model.model_fields[field].annotation), (
+                    name,
+                    field,
+                )
+
+
+@pytest.mark.parametrize("model", list(GENERATION_BASE_PAYLOADS))
+def test_generation_input_assignment_keeps_sibling_fields(model: type[BaseModel]) -> None:
+    """构造后属性赋值成功且全部字段仍可读，防 mode=before 的 model_validator 随赋值重跑剥除 None 兄弟字段。"""
+    instance = model(**GENERATION_BASE_PAYLOADS[model])
+    setattr(instance, "size", "2K")
+    assert getattr(instance, "size") == "2K"
+    for field in model.model_fields:
+        getattr(instance, field)
 
 
 # ==================== 参数 description 镜像与文案约束一致性 ====================
@@ -441,14 +477,41 @@ async def test_flat_tool_rejects_blank_string_inputs(
         await mcp.call_tool(tool_name, blank_args)
 
 
-# ==================== 组图参考图列表上限的 schema 层声明 ====================
+# ==================== 参考图列表数量上限的 schema 层声明与前置拒绝 ====================
 
 
-async def test_sequential_image_list_branch_declares_max_items() -> None:
-    """组图 image 列表分支的 inputSchema 声明 maxItems 14，与多图融合口径一致。
+@pytest.mark.parametrize("minimum", [1, 2, 3])
+def test_image_count_field_factories_couple_validator_message_with_schema_bounds(
+    minimum: int,
+) -> None:
+    """计数字段工厂按同一 minimum 派生中文计数文案与 schema 数量界，同界是去重单源的成立前提。
+
+    以任意 minimum 参数化，工厂任一侧硬编码界使闭包文案或 minItems/maxItems 偏离参数即失败。
+    """
+    maximum = SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+    for factory in (multi_image_field_type, sequential_image_field_type):
+        field_type = factory(str, minimum)
+        # BeforeValidator.func 在类型上允许带 ValidationInfo 的双参形态，闭包实际为单参。
+        validator = cast(
+            "Callable[[object], object]",
+            next(arg.func for arg in get_args(field_type) if isinstance(arg, BeforeValidator)),
+        )
+        schema = TypeAdapter(field_type).json_schema()
+        array_branch = next(
+            branch for branch in schema.get("anyOf", [schema]) if branch.get("type") == "array"
+        )
+        assert array_branch["minItems"] == minimum
+        assert array_branch["maxItems"] == maximum
+        for count in (minimum - 1, maximum + 1):
+            with pytest.raises(ValueError, match=f"参考图片数量需在 {minimum}-{maximum} 之间"):
+                validator([f"img{i}" for i in range(count)])
+
+
+async def test_sequential_image_list_branch_declares_item_bounds() -> None:
+    """组图 image 列表分支的 inputSchema 声明 minItems 1 与 maxItems 14，maxItems 与多图融合口径一致。
 
     镜像等价断言在两侧同时丢失声明时仍相等，本断言独立锁定声明存在，客户端本地
-    校验才能拒绝超量输入。
+    校验才能拒绝空列表与超量输入。
     """
     tools = await mcp.list_tools()
     by_name = {tool.name: tool for tool in tools}
@@ -456,21 +519,74 @@ async def test_sequential_image_list_branch_declares_max_items() -> None:
     array_branch = next(
         branch for branch in schema["properties"]["image"]["anyOf"] if branch.get("type") == "array"
     )
+    assert array_branch["minItems"] == 1
     assert array_branch["maxItems"] == SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 
 
 async def test_sequential_tool_rejects_oversized_image_list() -> None:
-    """组图参考图列表超过 14 张在 inputSchema 校验层即被拒绝，不进入工具体。
+    """组图参考图列表超过 14 张在 SDK 参数模型校验层即被拒绝，不进入工具体。
 
-    报错须源自平铺签名列表分支的 max_length 约束而非模型 before-validator 的
-    数量文案，据此锁定拒绝发生在 SDK 参数模型校验层。
+    平铺签名与输入模型同挂数量前置校验，用户可见文案为中文数量口径而非
+    union 分支的英文错误。
     """
     images = [f"https://example.com/{i}.png" for i in range(15)]
     with pytest.raises(ToolError) as exc_info:
         await mcp.call_tool("sequential_generation", {"prompt": "a cat", "image": images})
-    message = str(exc_info.value)
-    assert "参考图片数量" not in message
-    assert "14" in message
+    assert "参考图片数量需在 1-14 之间" in str(exc_info.value)
+
+
+async def test_sequential_tool_rejects_empty_image_list() -> None:
+    """组图参考图空列表在 SDK 参数模型校验层即被拒绝，不进入工具体，与多图融合同层。
+
+    拒绝以 ToolError 而非工具体内的 isError 结果呈现，据此锁定发生在参数模型校验层；
+    用户可见文案为中文数量口径而非 union 分支的英文错误。
+    """
+    with pytest.raises(ToolError) as exc_info:
+        await mcp.call_tool("sequential_generation", {"prompt": "a cat", "image": []})
+    assert "参考图片数量需在 1-14 之间" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("count", [1, 15])
+async def test_fusion_tool_rejects_out_of_bounds_image_list(count: int) -> None:
+    """融合参考图数量界外（1 张与 15 张）在 SDK 参数模型校验层即被拒绝，不进入工具体。
+
+    平铺签名与输入模型同挂数量前置校验，用户可见文案为中文数量口径而非
+    列表条数的英文约束错误。
+    """
+    images = [f"https://example.com/{i}.png" for i in range(count)]
+    with pytest.raises(ToolError) as exc_info:
+        await mcp.call_tool("multi_image_fusion", {"prompt": "a cat", "image": images})
+    assert "参考图片数量需在 2-14 之间" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "model_cls", "minimum"),
+    [
+        ("multi_image_fusion", MultiImageFusionInput, MULTI_IMAGE_MIN_ITEMS),
+        ("sequential_generation", SequentialGenerationInput, 1),
+    ],
+)
+async def test_image_count_validator_shared_by_flat_signature_and_model(
+    tool_name: str, model_cls: type[BaseModel], minimum: int
+) -> None:
+    """计数前置校验器同界同文案挂载于平铺签名与输入模型两侧的 image 字段。
+
+    BeforeValidator 不进入 JSON schema，等价性镜像断言对其不可见；校验器经字段类型工厂
+    按界闭包构建，两侧为不同函数对象，身份断言不可用，改经两侧字段元数据各取唯一挂载的
+    校验器并以界外输入的中文文案锁定，单边漏挂、异界或另起文案即失败。新增计数受限字段时
+    须接入 schemas 的字段类型工厂并同步扩充本参数表。
+    """
+    maximum = SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+    tool = mcp._tool_manager.get_tool(tool_name)
+    assert tool is not None
+    flat_field = tool.fn_metadata.arg_model.model_fields["image"]
+    for field in (flat_field, model_cls.model_fields["image"]):
+        mounted = [m.func for m in field.metadata if isinstance(m, BeforeValidator)]
+        assert len(mounted) == 1
+        count_validator = cast("Callable[[object], object]", mounted[0])
+        for count in (minimum - 1, maximum + 1):
+            with pytest.raises(ValueError, match=f"参考图片数量需在 {minimum}-{maximum} 之间"):
+                count_validator([f"img{i}" for i in range(count)])
 
 
 # ==================== 浏览后缀单项上限的 schema 层声明 ====================

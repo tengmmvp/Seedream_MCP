@@ -17,6 +17,12 @@ import httpx
 
 from ._http import _ClientHTTPMixin
 from ..config import SeedreamConfig, get_active_config
+from ..definitions.conventions import (
+    IMAGE_TO_IMAGE_TOOL_NAME,
+    MULTI_IMAGE_FUSION_TOOL_NAME,
+    SEQUENTIAL_GENERATION_TOOL_NAME,
+    TEXT_TO_IMAGE_TOOL_NAME,
+)
 from .request_plan import _ACTIVE_REQUEST_PLAN, _build_request_data
 from ..utils.core.errors import SeedreamValidationError
 from ..utils.core.logs import get_logger
@@ -227,10 +233,10 @@ class SeedreamClient(_ClientHTTPMixin):
 
         try:
             request_data = await _build_request_data(
-                _ACTIVE_REQUEST_PLAN.get(), "text_to_image", _build_request
+                _ACTIVE_REQUEST_PLAN.get(), TEXT_TO_IMAGE_TOOL_NAME, _build_request
             )
 
-            response = await self._call_api("text_to_image", request_data)
+            response = await self._call_api(TEXT_TO_IMAGE_TOOL_NAME, request_data)
 
             self._log_task_outcome("文生图", response)
             return response
@@ -339,10 +345,10 @@ class SeedreamClient(_ClientHTTPMixin):
 
         try:
             request_data = await _build_request_data(
-                _ACTIVE_REQUEST_PLAN.get(), "image_to_image", _build_request
+                _ACTIVE_REQUEST_PLAN.get(), IMAGE_TO_IMAGE_TOOL_NAME, _build_request
             )
 
-            response = await self._call_api("image_to_image", request_data)
+            response = await self._call_api(IMAGE_TO_IMAGE_TOOL_NAME, request_data)
 
             self._log_task_outcome("图文生图", response)
             return response
@@ -434,10 +440,10 @@ class SeedreamClient(_ClientHTTPMixin):
 
         try:
             request_data = await _build_request_data(
-                _ACTIVE_REQUEST_PLAN.get(), "multi_image_fusion", _build_request
+                _ACTIVE_REQUEST_PLAN.get(), MULTI_IMAGE_FUSION_TOOL_NAME, _build_request
             )
 
-            response = await self._call_api("multi_image_fusion", request_data)
+            response = await self._call_api(MULTI_IMAGE_FUSION_TOOL_NAME, request_data)
 
             self._log_task_outcome("多图融合", response)
             return response
@@ -518,7 +524,7 @@ class SeedreamClient(_ClientHTTPMixin):
                 field_name="image",
             )
 
-        resolved_max_images = resolve_sequential_max_images(max_images, reference_images)
+        resolved_max_images = resolve_sequential_max_images(max_images, len(reference_images or []))
         resolved_max_images = validate_max_images(resolved_max_images)
 
         if reference_images is not None:
@@ -561,10 +567,10 @@ class SeedreamClient(_ClientHTTPMixin):
 
         try:
             request_data = await _build_request_data(
-                _ACTIVE_REQUEST_PLAN.get(), "sequential_generation", _build_request
+                _ACTIVE_REQUEST_PLAN.get(), SEQUENTIAL_GENERATION_TOOL_NAME, _build_request
             )
 
-            response = await self._call_api("sequential_generation", request_data)
+            response = await self._call_api(SEQUENTIAL_GENERATION_TOOL_NAME, request_data)
 
             self._log_task_outcome("组图输出", response)
             return response

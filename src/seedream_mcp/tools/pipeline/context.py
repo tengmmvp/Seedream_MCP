@@ -140,8 +140,8 @@ def build_generation_context(
         tools=tools,
         layer_decomposition=layer_decomposition,
         background=background,
-        # max_images 为 schema 推导后的生效值，回显供调用方获知实际生成上限。
-        max_images=getattr(params, "max_images", None),
+        # 组图生效上限缺省时按参考图数量推导、显式值透传，非组图工具为 None。
+        max_images=getattr(params, "effective_max_images", None),
         request_count=params.request_count,
         # 缺省推导在 schema 校验器完成，此处兜底防未经校验器的输入模型直传 None。
         parallelism=(

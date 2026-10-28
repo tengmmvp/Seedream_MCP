@@ -246,8 +246,9 @@ async def test_sequential_max_images_omitted_derives_from_reference_count(
     assert isinstance(params, SequentialGenerationInput)
     assert params.image == ["https://example.com/a.png", "https://example.com/b.png"]
     assert "max_images" not in params.model_fields_set
-    # 未显式提供时上限 = 总上限 15 - 参考图 2 张。
-    assert params.max_images == 13
+    # 未显式提供时生效上限 = 总上限 15 - 参考图 2 张。
+    assert params.max_images is None
+    assert params.effective_max_images == 13
 
 
 async def test_sequential_max_images_explicit_value_is_respected(
@@ -351,7 +352,6 @@ async def test_run_tool_pipeline_rejects_unknown_kwargs_keys() -> None:
             "text_to_image",
             TextToImageInput,
             {"prompt": "一只猫", "watermarkss": True},
-            server._generation_validation_structured,
             _spy,
             config=None,
             ctx=None,

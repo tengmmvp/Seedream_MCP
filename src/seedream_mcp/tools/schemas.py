@@ -8,10 +8,18 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Callable, ClassVar, Literal, Protocol, cast
+from typing import Annotated, Any, Callable, ClassVar, Literal, Protocol, cast
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
+from ..definitions.conventions import MAX_PARALLEL_REQUEST_COUNT, MAX_SEQUENTIAL_TOTAL_IMAGES
 from ..utils.core.errors import SeedreamValidationError
 from ..utils.images.validation import MAX_IMAGE_FILE_SIZE
 from ..utils.model.capabilities import (
@@ -19,8 +27,6 @@ from ..utils.model.capabilities import (
     layer_decomposition_presets_text,
 )
 from ..utils.core.validators import (
-    MAX_PARALLEL_REQUEST_COUNT,
-    MAX_SEQUENTIAL_TOTAL_IMAGES,
     VALID_BACKGROUND_MODES,
     VALID_GENERATION_TOOL_TYPES,
     VALID_OPTIMIZE_MODES,
@@ -292,6 +298,37 @@ def _reject_blank_or_oversized_image_items(items: list[str]) -> list[str]:
     return normalized
 
 
+def _image_count_validator(minimum: int) -> Callable[[object], object]:
+    """生成数量界外拒绝的 before-validator，上限固定为参考图张数上限，两个带图字段类型工厂共用。"""
+
+    def validate_count(value: object) -> object:
+        # 数量界外的中文文案先于字段约束的英文错误到达用户。
+        if (
+            isinstance(value, list)
+            and not minimum <= len(value) <= SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+        ):
+            raise ValueError(
+                f"参考图片数量需在 {minimum}-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 之间"
+            )
+        return value
+
+    return validate_count
+
+
+def multi_image_field_type(item_type: Any, minimum: int) -> Any:
+    """融合 image 字段类型的单一来源：计数前置校验与数量界随类型携带，
+    平铺签名与输入模型共用，防止中文计数文案单边缺失。"""
+    return Annotated[
+        list[item_type],
+        BeforeValidator(_image_count_validator(minimum)),
+        Field(min_length=minimum, max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES),
+    ]
+
+
+# 输入模型侧 image 类型：条目为纯 str，空白与超防御界由字段校验器拒绝。
+_MULTI_IMAGE_MODEL_TYPE: Any = multi_image_field_type(str, MULTI_IMAGE_MIN_ITEMS)
+
+
 class _SingleImageInput(BaseModel):
     """单图输入参数。"""
 
@@ -303,18 +340,16 @@ class _SingleImageInput(BaseModel):
     @field_validator("image")
     @classmethod
     def reject_blank_or_oversized_image(cls, value: str) -> str:
-        """strip 归一并拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
-        client 归一化层后退化为 isError 工具结果。"""
+        """strip 归一并拒绝空白与超防御界的字符串，使其在 schema 层即报错，
+        而非放行到 client 归一化层后退化为 isError 工具结果。"""
         return _reject_blank_or_oversized_image_items([value])[0]
 
 
 class _MultiImageInput(BaseModel):
     """多图输入参数。"""
 
-    image: list[str] = Field(
+    image: _MULTI_IMAGE_MODEL_TYPE = Field(
         ...,
-        min_length=MULTI_IMAGE_MIN_ITEMS,
-        max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
         description=MULTI_IMAGE_DESCRIPTION,
     )
 
@@ -326,27 +361,54 @@ class _MultiImageInput(BaseModel):
         return _reject_blank_or_oversized_image_items(value)
 
 
+def sequential_image_field_type(item_type: Any, minimum: int) -> Any:
+    """组图 image 字段类型的单一来源：union 骨架、列表分支数量界与计数前置校验随类型携带，
+    平铺签名与输入模型共用，防止中文计数文案单边缺失。"""
+    return Annotated[
+        item_type
+        | Annotated[
+            list[item_type],
+            Field(min_length=minimum, max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES),
+        ]
+        | None,
+        BeforeValidator(_image_count_validator(minimum)),
+    ]
+
+
+# 输入模型侧 image 类型：条目为纯 str，单字符串形态经字段校验器归一为单元素列表。
+_SEQUENTIAL_IMAGE_MODEL_TYPE: Any = sequential_image_field_type(str, 1)
+
+
 class _SequentialImageInput(BaseModel):
     """组图参考图输入参数。"""
 
-    # 运行时接受单字符串并经 before-validator 归一为单元素列表；列表分支声明
-    # max_length 使 inputSchema 携带 maxItems，客户端本地校验即可拒绝超量输入。
-    image: (
-        str | Annotated[list[str], Field(max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES)] | None
-    ) = Field(
+    # 列表分支声明数量上下界使 inputSchema 携带 minItems/maxItems，
+    # 客户端本地校验即可拒绝空列表与超量输入。
+    image: _SEQUENTIAL_IMAGE_MODEL_TYPE = Field(
         default=None,
         description=SEQUENTIAL_IMAGE_DESCRIPTION,
     )
 
+    @field_validator("image", mode="before")
+    @classmethod
+    def normalize_reference_images(cls, value: str | list[str] | None) -> list[str] | None:
+        """归一单字符串为单元素列表并拒绝非法形态，数量校验由外层 BeforeValidator 前置执行。"""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return [value]
+        if not isinstance(value, list):
+            raise ValueError("image 必须是字符串或字符串列表")
+        return value
+
     @field_validator("image")
     @classmethod
-    def reject_blank_or_oversized_items(cls, value: str | list[str] | None) -> list[str] | None:
-        """逐项 strip 归一为列表并拒绝空白与超防御界的字符串，使其在 schema 层即报错，
+    def reject_blank_or_oversized_items(cls, value: list[str] | None) -> list[str] | None:
+        """逐项 strip 归一并拒绝空白与超防御界的字符串，使其在 schema 层即报错，
         而非放行到 client 归一化层后退化为 isError 工具结果。"""
         if value is None:
             return None
-        items = [value] if isinstance(value, str) else value
-        return _reject_blank_or_oversized_image_items(items)
+        return _reject_blank_or_oversized_image_items(value)
 
 
 class _LayerDecompositionInput(BaseModel):
@@ -381,12 +443,11 @@ class _SizeAndWatermarkInput(BaseModel):
 class _SequentialMaxImagesInput(BaseModel):
     """组图最大生成数量参数。"""
 
-    # default 仅为声明占位，未显式传入时由 validate_total_image_limit 按参考图数量
-    # 推导为 15 减参考图数；server/_registration.py 平铺签名声明 default: null，经
-    # _filter_unset_params 剔 None 与 validator 覆盖缺省值，两处字面不一、行为
-    # 等价，互为镜像。
-    max_images: int = Field(
-        default=MAX_SEQUENTIAL_TOTAL_IMAGES,
+    # Optional 字段使显式 null 与缺省同走按参考图数量推导，
+    # 与平铺签名的 int | None = None 声明字面一致；字段仅承载显式输入，
+    # 生效值经 effective_max_images 访问器现算。
+    max_images: int | None = Field(
+        default=None,
         ge=MAX_IMAGES_MIN,
         le=MAX_SEQUENTIAL_TOTAL_IMAGES,
         description=MAX_IMAGES_DESCRIPTION,
@@ -585,40 +646,23 @@ class SequentialGenerationInput(
         description=REQUEST_COUNT_SEQUENTIAL_DESCRIPTION,
     )
 
-    @field_validator("image", mode="before")
-    @classmethod
-    def validate_reference_images(cls, value: str | list[str] | None) -> list[str] | None:
-        """归一单字符串为列表并校验数量，空白与超防御界条目由基类共享校验器统一拒绝。"""
-        if value is None:
-            return None
-        if isinstance(value, str):
-            images = [value]
-        else:
-            images = value
-
-        if not isinstance(images, list):
-            raise ValueError("image 必须是字符串或字符串列表")
-        if len(images) < 1 or len(images) > SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES:
-            raise ValueError(f"参考图片数量需在 1-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 之间")
-        return images
-
     @model_validator(mode="after")
     def validate_total_image_limit(self) -> "SequentialGenerationInput":
         """校验参考图数量与生成数量的总和限制。"""
-        # before-validator 已归一，after 阶段运行时值恒为 list[str] | None，cast 收窄
-        # 供计数。
+        # before-validator 已归一，运行时值恒为 list[str] | None，cast 收窄供传参。
         images = cast("list[str] | None", self.image)
-        # max_images 未显式传入时按参考图数量推导；object.__setattr__ 绕过
-        # validate_assignment 并从 fields_set 剔除，使派生值与显式传入可区分。
-        if "max_images" not in self.model_fields_set:
-            object.__setattr__(self, "max_images", resolve_sequential_max_images(None, images))
-            self.model_fields_set.discard("max_images")
-
+        # 推导不回写 max_images，显式与否经字段值本身区分。
         try:
-            validate_sequential_image_limit(self.max_images, images)
+            validate_sequential_image_limit(self.effective_max_images, images)
         except SeedreamValidationError as exc:
             raise ValueError(exc.message) from exc
         return self
+
+    @property
+    def effective_max_images(self) -> int:
+        """生效的生成数量上限：显式值透传，缺省按参考图张数推导，校验器与执行上下文共用。"""
+        images = cast("list[str] | None", self.image)
+        return resolve_sequential_max_images(self.max_images, len(images or []))
 
 
 def _normalize_format_filter_item(value: object) -> object:

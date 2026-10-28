@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable, cast
 import pytest
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from _lib.generation_fixtures import _patch_client_success
 from _lib.progress_fakes import RecordingProgressContext
@@ -37,11 +37,6 @@ from seedream_mcp.tools.handlers.sequential_generation import handle_sequential_
 from seedream_mcp.tools.handlers.text_to_image import handle_text_to_image
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 from seedream_mcp.utils.io import save as io_save
-
-# 参数化用例覆盖的四种生成工具输入模型，供 handler 与 params 参数共用注解。
-ParallelHandlerParams = (
-    TextToImageInput | ImageToImageInput | MultiImageFusionInput | SequentialGenerationInput
-)
 
 
 def _build_config() -> SeedreamConfig:
@@ -101,9 +96,9 @@ def _success_result(url: str) -> dict[str, Any]:
 )
 async def test_generation_handlers_support_parallel_requests(
     monkeypatch: pytest.MonkeyPatch,
-    handler: Callable[[ParallelHandlerParams, SeedreamConfig], Awaitable[CallToolResult]],
+    handler: Callable[[BaseModel, SeedreamConfig], Awaitable[CallToolResult]],
     method_name: str,
-    params: ParallelHandlerParams,
+    params: BaseModel,
 ) -> None:
     """四个生成工具的 handler 均支持并行请求，按 request_count 分发并汇总。"""
     call_count = 0

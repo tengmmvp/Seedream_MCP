@@ -33,7 +33,8 @@ async def handle_sequential_generation(
 ) -> CallToolResult:
     """处理组图输出请求，基于参考图与文本生成一组内容关联的图片。
 
-    max_images 未显式提供时由 schema 按参考图数量自动推导。
+    params.max_images 为调用方原始声明（缺省为 None），生效上限由执行上下文
+    按参考图数量推导，client 侧重校验后随请求发出。
 
     Returns:
         含文本摘要与 structuredContent 的工具结果；失败不抛异常，isError 为 True。
