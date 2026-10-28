@@ -1,0 +1,24 @@
+"""跨模块共享的可配置默认值。
+
+默认值收口为单一来源，避免字面拷贝漂移。组内序镜像 config 字段声明序，
+新增默认值按所属组落位。
+"""
+
+# 并发准入：config 字段默认与 executors 池深推导回退共用。
+DEFAULT_GENERATE_CONCURRENCY = 3
+DEFAULT_IMAGE_PREPARE_CONCURRENCY = 5
+
+# 日志：config 字段默认与 setup_logging 签名默认共用。
+DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_LOG_ROTATION_SIZE_MB = 5
+DEFAULT_LOG_RETENTION_DAYS = 7
+
+# 自动保存：config 字段默认与 download、save 的签名默认共用。
+DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 30
+DEFAULT_DOWNLOAD_MAX_RETRIES = 3
+DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
+DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5
+DEFAULT_DATE_FOLDER = True
+DEFAULT_CLEANUP_DAYS = 30
+DEFAULT_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024
+DEFAULT_FSYNC = False
