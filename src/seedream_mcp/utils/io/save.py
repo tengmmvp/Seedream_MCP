@@ -8,19 +8,27 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
 from ..core.errors import SeedreamMCPError, has_message_value
 from ..core.executors import CpuOffloadPoolClosedError, run_in_cpu_pool, should_offload_size
-from ..core.sanitizers import sanitize_data_text, sanitize_error_text
+from ..core.sanitizers import CONTROL_CHARS_PATTERN, sanitize_data_text, sanitize_error_text
+from ...definitions.defaults import (
+    DEFAULT_CLEANUP_DAYS,
+    DEFAULT_DATE_FOLDER,
+    DEFAULT_DOWNLOAD_MAX_RETRIES,
+    DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+    DEFAULT_FSYNC,
+    DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+    DEFAULT_MAX_FILE_SIZE,
+    DEFAULT_MAX_TOTAL_BYTES,
+)
+from ...definitions.conventions import MAX_IMAGE_PIXELS
 from ..core.formats import (
     BASE64_WHITESPACE_PATTERN,
     DEFAULT_IMAGE_EXTENSION,
-    DEFAULT_MAX_FILE_SIZE,
     EXTENSION_BY_MIME,
-    MAX_IMAGE_PIXELS,
     ensure_image_decoders_ready,
     estimate_base64_decoded_size,
     format_file_too_large,
@@ -102,13 +110,13 @@ _MARKDOWN_ALT_MAX_LENGTH = 200
 def _build_markdown_alt(alt_text: str | None) -> str:
     """净化 Markdown 替代文本，返回可直接嵌入 ``![...](...)`` 的文本。
 
-    控制字符压平防注入，``\\``、``[``、``]`` 反斜杠转义保持引用结构完整；超长在
-    转义前截断到上限的一半，使转义结果必然不超上限且不劈开转义对。空文本回退固定
-    文案，不用 prompt 兜底，提示词在结构化输出顶层已有专门字段。
+    控制字符与双向文本/隔离控制符压平防注入，``\\``、``[``、``]`` 反斜杠转义保持引用结构完整；
+    超长在转义前截断到上限的一半，使转义结果必然不超上限且不劈开转义对。
+    空文本回退固定文案，不用 prompt 兜底，提示词在结构化输出顶层已有专门字段。
     """
     if not alt_text:
         return "Generated Image"
-    flattened = re.sub(r"[\x00-\x1f\x7f]", " ", alt_text)
+    flattened = CONTROL_CHARS_PATTERN.sub(" ", alt_text)
     max_flat_length = _MARKDOWN_ALT_MAX_LENGTH // 2
     if len(flattened) > max_flat_length:
         flattened = flattened[:max_flat_length]
@@ -282,15 +290,15 @@ class AutoSaveManager:
         self,
         base_dir: Path | None = None,
         cleanup_base_dir: Path | None = None,
-        download_timeout: int = 30,
-        max_retries: int = 3,
+        download_timeout: int = DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_DOWNLOAD_MAX_RETRIES,
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
-        max_concurrent: int = 5,
-        date_folder: bool = True,
-        cleanup_days: int = 30,
-        max_total_bytes: int | None = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+        date_folder: bool = DEFAULT_DATE_FOLDER,
+        cleanup_days: int = DEFAULT_CLEANUP_DAYS,
+        max_total_bytes: int | None = DEFAULT_MAX_TOTAL_BYTES,
         download_manager: DownloadManager | None = None,
-        fsync: bool = False,
+        fsync: bool = DEFAULT_FSYNC,
     ):
         """初始化自动保存管理器。
 
@@ -305,7 +313,8 @@ class AutoSaveManager:
             max_concurrent: 最大并发下载数。
             date_folder: 是否按日期创建文件夹。
             cleanup_days: 自动清理天数，0 表示不按天清理。
-            max_total_bytes: 清理根目录总字节上限，超出按最旧文件驱逐；None 表示不限制。
+            max_total_bytes: 清理根目录总字节上限，超出按最旧文件驱逐；缺省取
+                DEFAULT_MAX_TOTAL_BYTES，显式 None 跳过配额驱逐。
             download_manager: 外部共享的下载管理器，提供时复用其 HTTP 会话且不由本实例关闭。
             fsync: 落盘是否在写入后、原子替换前执行 os.fsync，透传至 save_bytes 字节
                 落盘与经下载管理器落盘两条路径。

@@ -713,6 +713,16 @@ def test_build_markdown_alt_truncation_keeps_escape_pairs_intact() -> None:
     assert len(exact) == 200
 
 
+def test_build_markdown_alt_flattens_shared_control_charset() -> None:
+    """alt 压平共用 sanitizers 控制字符集：NEL、行/段分隔符与双向控制符同样压平。"""
+    alt = "a\x85b\u2028c\u2029d\u202ee"
+    result = _build_markdown_alt(alt)
+
+    for control in ("\x85", "\u2028", "\u2029", "\u202e"):
+        assert control not in result
+    assert result == "a b c d e"
+
+
 def test_build_save_metadata_sanitizes_content_type() -> None:
     """content_type 为下载响应头原文，净化后控制字符与凭据片段不随 metadata 外泄。"""
     from seedream_mcp.utils.io.save import _build_save_metadata

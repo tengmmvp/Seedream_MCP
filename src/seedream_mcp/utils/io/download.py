@@ -35,10 +35,14 @@ import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
 
 from ...version import __version__
+from ...definitions.defaults import (
+    DEFAULT_DOWNLOAD_MAX_RETRIES,
+    DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+    DEFAULT_MAX_FILE_SIZE,
+)
 from ..core.errors import SeedreamMCPError
 from ..core.executors import run_in_cpu_pool
 from ..core.formats import (
-    DEFAULT_MAX_FILE_SIZE,
     FORMAT_FAMILIES,
     MIME_BY_EXTENSION,
     SNIFF_HEAD_BYTES_FLOOR,
@@ -76,6 +80,33 @@ _MAX_REDIRECTS = 3
 # 与内容类型拒绝的响应体通常很小，64KB 足以覆盖；残留更多时放弃复用，由连接关闭兜底。
 _DRAIN_RESPONSE_BYTES = 65536
 
+# 重试线性退避基步长与抖动上界（秒）：非末次尝试失败后退避休眠再重试；
+# 最坏预算推导的步长缺省与抖动上界均取本组常量。
+DEFAULT_DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
+DOWNLOAD_RETRY_JITTER_MAX_SECONDS = 1.0
+
+
+def retry_backoff_delay(retry_delay: float, attempt: int, jitter: float) -> float:
+    """单次重试的退避秒数：基步长乘（attempt + 1）加抖动，attempt 自零起。"""
+    return retry_delay * (attempt + 1) + jitter
+
+
+def worst_case_download_budget_ms(
+    download_timeout: int,
+    max_retries: int,
+    retry_delay_seconds: float = DEFAULT_DOWNLOAD_RETRY_DELAY_SECONDS,
+) -> int:
+    """硬超时口径的单次下载最坏预算毫秒数：全部尝试超时加线性退避与抖动总和。
+
+    退避步长经 retry_delay_seconds 与构造注入的 retry_delay 对齐。
+    慢进展下载占用至 _download_total_budget 总预算的形态不覆盖，属下载器允许的残余风险。
+    """
+    backoff_seconds = sum(
+        retry_backoff_delay(retry_delay_seconds, attempt, DOWNLOAD_RETRY_JITTER_MAX_SECONDS)
+        for attempt in range(max_retries)
+    )
+    return int((download_timeout * (1 + max_retries) + backoff_seconds) * 1000)
+
 
 async def _drain_response_quietly(response: aiohttp.ClientResponse) -> None:
     """尽力排空响应体使连接回池，排空自身失败不影响调用方的错误语义。"""
@@ -106,8 +137,13 @@ def _is_gzip_head(content: bytes) -> bool:
 
 
 def _is_zlib_head(content: bytes) -> bool:
-    """判定字节头是否为 zlib 包装：首字节 0x78 且头两字节按大端为 31 的倍数。"""
-    return len(content) >= 2 and content[0] == 0x78 and int.from_bytes(content[:2], "big") % 31 == 0
+    """判定字节头是否为 zlib 包装：压缩方法 8、窗口档 ≤7 且头两字节按大端为 31 的倍数。"""
+    return (
+        len(content) >= 2
+        and (content[0] & 0x0F) == 8
+        and (content[0] >> 4) <= 7
+        and int.from_bytes(content[:2], "big") % 31 == 0
+    )
 
 
 def _is_compression_container_head(content: bytes) -> bool:
@@ -714,9 +750,9 @@ class DownloadManager:
 
     def __init__(
         self,
-        timeout: int = 30,
-        max_retries: int = 3,
-        retry_delay: float = 1.0,
+        timeout: int = DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_DOWNLOAD_MAX_RETRIES,
+        retry_delay: float = DEFAULT_DOWNLOAD_RETRY_DELAY_SECONDS,
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         dns_cache_ttl: int = 60,
         connection_limit: int | None = None,
@@ -1678,7 +1714,8 @@ class DownloadManager:
                         sanitize_url(url),
                     )
                     break
-                await asyncio.sleep(self.retry_delay * (attempt + 1) + random.uniform(0, 1))
+                jitter = random.uniform(0, DOWNLOAD_RETRY_JITTER_MAX_SECONDS)
+                await asyncio.sleep(retry_backoff_delay(self.retry_delay, attempt, jitter))
 
         logger.error("图片下载失败，已尝试 {} 次: {}", attempt + 1, sanitize_url(url))
         raise last_error or DownloadError("下载失败")

@@ -31,6 +31,7 @@ from seedream_mcp.utils.io.download import (
     _ResumeState,
     _parse_content_range,
     _resume_validator,
+    worst_case_download_budget_ms,
 )
 
 from _lib.download_fakes import (
@@ -129,6 +130,12 @@ async def test_download_linear_backoff_sequence_locked(
         await manager.download_image("https://example.com/img.png", save_path)
 
     assert sleeps == [1.0, 2.0, 3.0]
+
+
+def test_worst_case_download_budget_scales_with_injected_retry_delay() -> None:
+    """注入步长参与退避推导：步长 2 秒退避和 15 秒、缺省 1 秒为 9 秒，叠加 4 次超时各 30 秒。"""
+    assert worst_case_download_budget_ms(30, 3, retry_delay_seconds=2.0) == 135_000
+    assert worst_case_download_budget_ms(30, 3) == 129_000
 
 
 async def test_download_manager_negative_max_retries_raises_download_error(
@@ -1380,6 +1387,29 @@ async def test_download_forced_compressed_body_decoded_and_saved(
     body: bytes,
 ) -> None:
     """强返压缩体的源站：终验解压复核后保存解码图片，扩展名与 MIME 以解码字节重定。"""
+    manager = DownloadManager()
+    session = _FakeSession([_compressed_success_response(body)])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.jpeg"
+    result = await manager.download_image("https://example.com/img.jpeg", save_path)
+
+    corrected = tmp_path / "out.png"
+    assert result["success"] is True
+    assert result["attempts"] == 1
+    assert result["file_path"] == str(corrected)
+    assert result["file_size"] == len(_DECODE_BODY)
+    assert result["content_type"] == "image/png"
+    assert corrected.read_bytes() == _DECODE_BODY
+    assert not save_path.exists()
+
+
+async def test_download_forced_narrow_window_zlib_decoded_and_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """窄窗口档 zlib 头（0x5809）按 zlib 规范放行进终验解码回退，完整解码保存。"""
+    body = zlib.compress(_DECODE_BODY, 1, 13)
+    assert body[:2] == b"\x58\x09"
     manager = DownloadManager()
     session = _FakeSession([_compressed_success_response(body)])
     _patch_download_network(monkeypatch, manager, session)
