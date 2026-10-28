@@ -2,7 +2,7 @@
 
 六个用例：未知 prompt 名称与未知工具经项目侧补偿归位 -32602 的线缆级，
 另覆盖未知名的名称查找点直调、已知名渲染期真实失败不被改写、缺失 name 的
-参数面校验错误不被补偿改写；纪元路由按请求头派生。末者为 SDK 2.2.0 行为
+参数面校验错误不被补偿改写；纪元路由按请求头派生。末者为 SDK 2.3.0 行为
 特征化，规范未定义，SDK 升级行为漂移时测试变红，须复测线缆级语义。
 """
 
@@ -127,7 +127,7 @@ async def test_unknown_tool_call_returns_invalid_params(
 ) -> None:
     """未知工具在两条分发路径上线缆级均为 -32602，守护项目侧补偿。
 
-    SDK 2.2.0 把未知工具 ToolError 归约为 isError 结果通道，未补偿时不抛
+    SDK 2.3.0 把未知工具 ToolError 归约为 isError 结果通道，未补偿时不抛
     协议错误。
     """
     async with Client(server.mcp, mode=client_mode) as client:
@@ -151,7 +151,7 @@ def _tools_list_body(envelope_version: str) -> bytes:
 
 
 async def test_era_routing_follows_protocol_version_header(reset_http_app_state: None) -> None:
-    """锁定 SDK 2.2.0 行为：请求头与 body _meta 声明不同纪元时按请求头派生路由，SDK 升级行为漂移时本测试变红。
+    """锁定 SDK 2.3.0 行为：请求头与 body _meta 声明不同纪元时按请求头派生路由，SDK 升级行为漂移时本测试变红。
 
     头为 2026-07-28 而 body 信封为 2025-11-25 时由现代入口以 HEADER_MISMATCH
     拒绝；头为 2025-11-25 而 body 信封为 2026-07-28 时仍走 legacy 入口返回

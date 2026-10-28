@@ -363,7 +363,7 @@ class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
     """MCPServer 子类，协议错误码补偿：未知名与未知工具在查找点抛 -32602，
     已知名 prompt 的参数缺失、未知参数与参数值校验失败转为 -32602。
 
-    SDK 2.2.0 对未知名抛裸 ValueError、未知工具 ToolError 走 isError 结果
+    SDK 2.3.0 对未知名抛裸 ValueError、未知工具 ToolError 走 isError 结果
     通道、prompt 参数面 ValidationError 折叠为 -32603 或 code=0，三者线缆级
     均应为 -32602；渲染期其余异常与工具参数校验经 super() 维持 SDK 原语义。
     线缆级行为由 test_sdk_behavior_characterization 与 test_prompt_resources 守护。
