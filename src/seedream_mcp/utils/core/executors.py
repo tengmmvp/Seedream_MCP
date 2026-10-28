@@ -18,6 +18,10 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
+from ...definitions.defaults import (
+    DEFAULT_GENERATE_CONCURRENCY,
+    DEFAULT_IMAGE_PREPARE_CONCURRENCY,
+)
 from .sanitizers import estimate_output_length
 
 T = TypeVar("T")
@@ -29,10 +33,6 @@ _CPU_OFFLOAD_MAX_WORKERS_CAP = 32
 # 预览解码并发的单一定义点，池深加数与 thumbnail 的解码限流信号量共用；
 # 像素上限 36MP 的单张解码最坏逾百 MB，并发 3 封顶瞬态。
 CPU_OFFLOAD_DECODE_SLOTS = 3
-# 提供者缺失或配置不可构建时的并发回退值，对齐 SEEDREAM_GENERATE_CONCURRENCY
-# 与 SEEDREAM_IMAGE_PREPARE_CONCURRENCY 默认。
-_CPU_OFFLOAD_FALLBACK_GENERATE_CONCURRENCY = 3
-_CPU_OFFLOAD_FALLBACK_PREPARE_CONCURRENCY = 5
 # 池深下限兜底无准入闸的 webapp 请求体解析并发，量级取 8 核宿主上 asyncio
 # 默认执行器的池深 min(32, cpu+4)。
 _CPU_OFFLOAD_MIN_WORKERS = 12
@@ -64,10 +64,7 @@ def _derive_cpu_offload_max_workers() -> int:
     concurrency = provider() if provider is not None else None
     if concurrency is None:
         # 提供者未注册或配置不可构建时按默认并发回退，池可用性不退化。
-        concurrency = (
-            _CPU_OFFLOAD_FALLBACK_GENERATE_CONCURRENCY,
-            _CPU_OFFLOAD_FALLBACK_PREPARE_CONCURRENCY,
-        )
+        concurrency = (DEFAULT_GENERATE_CONCURRENCY, DEFAULT_IMAGE_PREPARE_CONCURRENCY)
     generate_concurrency, prepare_concurrency = concurrency
     return min(
         _CPU_OFFLOAD_MAX_WORKERS_CAP,

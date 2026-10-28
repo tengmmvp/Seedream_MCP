@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING, Any, Iterable
 from loguru import logger
 
 from .sanitizers import CONTROL_CHARS_PATTERN
-from .formats import DATA_DIR_NAME
+from ...definitions.conventions import DATA_DIR_NAME
+from ...definitions.defaults import (
+    DEFAULT_LOG_LEVEL,
+    DEFAULT_LOG_RETENTION_DAYS,
+    DEFAULT_LOG_ROTATION_SIZE_MB,
+)
 
 if TYPE_CHECKING:
     # loguru 顶层运行时仅导出 logger 实例，Logger 类只在随包存根中声明，类型检查期导入。
@@ -121,11 +126,6 @@ class InterceptHandler(logging.Handler):
 # 字符类取 sanitizers.CONTROL_CHARS_PATTERN 单一来源，与错误文本脱敏通道保持同一口径。
 _LOG_MESSAGE_CONTROL_CHARS = CONTROL_CHARS_PATTERN
 
-# 日志轮转与保留的产品默认值单一来源，config 的 _env_field 默认与本模块签名默认
-# 共同引用，防两处漂移。
-DEFAULT_LOG_ROTATION_SIZE_MB = 5
-DEFAULT_LOG_RETENTION_DAYS = 7
-
 
 def _strip_message_control_chars(record: Any) -> None:
     """剥离日志消息与异常消息的控制字符，防日志注入。
@@ -197,7 +197,7 @@ def _sink_filter(floor: str) -> Callable[[Any], bool]:
 
 
 def setup_logging(
-    log_level: str = "INFO",
+    log_level: str = DEFAULT_LOG_LEVEL,
     log_file: str | None = None,
     enable_console: bool = True,
     enable_file: bool = True,

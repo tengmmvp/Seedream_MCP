@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable, Generic, TypeVar
 
 from ..core.errors import SeedreamConfigError
-from ..core.formats import DATA_DIR_NAME
+from ...definitions.conventions import DATA_DIR_NAME
 from ..core.logs import EarlyMessageBuffer, get_logger
 from ..core.bounded_store import store_bounded_entry
 

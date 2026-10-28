@@ -1,14 +1,22 @@
 """生成类工具 handlers 共享的工具元数据常量与开始日志参数构造。
 
-四个生成 handler 传给 ``execute_generation_handler`` 的元数据高度同构，收敛为
-不可变的 ``ToolMetadata`` 常量；数据类定义于 pipeline 域，依赖方向保持 pipeline <-
-handlers。组图输出的开始日志须携带运行时 max_images，经独立回调从执行上下文读取。
+四个生成 handler 传给 ``execute_generation_handler`` 的元数据高度同构，
+收敛为不可变的 ``ToolMetadata`` 常量；
+数据类定义于 pipeline 域，依赖方向保持 pipeline <- handlers。
+工具名常量定义于 definitions/conventions，Web 装配同源引用。
+组图输出的开始日志须携带运行时 max_images，经独立回调从执行上下文读取。
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ...definitions.conventions import (
+    IMAGE_TO_IMAGE_TOOL_NAME,
+    MULTI_IMAGE_FUSION_TOOL_NAME,
+    SEQUENTIAL_GENERATION_TOOL_NAME,
+    TEXT_TO_IMAGE_TOOL_NAME,
+)
 from ..pipeline import ToolMetadata
 
 if TYPE_CHECKING:
@@ -31,7 +39,7 @@ def _default_start_log_values(
 def _sequential_start_log_values(
     context: "GenerationExecutionContext",
 ) -> tuple[Any, ...]:
-    """构造组图输出开始日志参数元组，携带 schema 推导后的生效 max_images。"""
+    """构造组图输出开始日志参数元组，携带执行上下文派生的生效 max_images。"""
     return (
         len(context.prompt or ""),
         context.max_images,
@@ -43,7 +51,7 @@ def _sequential_start_log_values(
 
 
 TEXT_TO_IMAGE = ToolMetadata(
-    tool_name="text_to_image",
+    tool_name=TEXT_TO_IMAGE_TOOL_NAME,
     completion_title="文生图任务完成",
     failure_prefix="文生图生成",
     start_log_message=(
@@ -53,7 +61,7 @@ TEXT_TO_IMAGE = ToolMetadata(
 )
 
 IMAGE_TO_IMAGE = ToolMetadata(
-    tool_name="image_to_image",
+    tool_name=IMAGE_TO_IMAGE_TOOL_NAME,
     completion_title="图文生图任务完成",
     failure_prefix="图文生图生成",
     start_log_message=(
@@ -63,7 +71,7 @@ IMAGE_TO_IMAGE = ToolMetadata(
 )
 
 MULTI_IMAGE_FUSION = ToolMetadata(
-    tool_name="multi_image_fusion",
+    tool_name=MULTI_IMAGE_FUSION_TOOL_NAME,
     completion_title="多图融合任务完成",
     failure_prefix="多图融合",
     start_log_message=(
@@ -73,7 +81,7 @@ MULTI_IMAGE_FUSION = ToolMetadata(
 )
 
 SEQUENTIAL_GENERATION = ToolMetadata(
-    tool_name="sequential_generation",
+    tool_name=SEQUENTIAL_GENERATION_TOOL_NAME,
     completion_title="组图输出任务完成",
     failure_prefix="组图输出",
     start_log_message=(

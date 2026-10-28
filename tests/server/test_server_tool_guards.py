@@ -1,7 +1,7 @@
 """工具注册面守护测试：带参工具的 roots 依赖注解与错误结果工具名对齐注册名。
 
-两处仅靠注释或平行字面量维持的注册契约在此锁定：漏写 workspace_roots 解析
-注解的工具静默回退环境根；_run_tool_pipeline 的 tool_name 字面量与注册名错位
+两处仅靠注释或平行常量维持的注册契约在此锁定：漏写 workspace_roots 解析
+注解的工具静默回退环境根；_run_tool_pipeline 传入的工具名常量与注册名错位
 使 structuredContent.tool 报旧名。
 """
 
@@ -64,7 +64,7 @@ async def test_validation_error_result_reports_registered_tool_name(
     tool_name: str,
     reset_lifespan_singletons: None,
 ) -> None:
-    """构造期校验失败的 structuredContent.tool 与注册名一致，字面量漏改即错位。"""
+    """构造期校验失败的 structuredContent.tool 与注册名一致，传错常量即错位。"""
     del reset_lifespan_singletons
     result = await server.mcp.call_tool(tool_name, _CROSS_FIELD_INVALID_ARGS[tool_name])
 

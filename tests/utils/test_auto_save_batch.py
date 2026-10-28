@@ -231,7 +231,7 @@ def test_pixel_limit_rejection_cold_path_initializes_decoders(
     import pillow_heif
     from PIL import Image as PilImage
 
-    from seedream_mcp.utils.core.formats import MAX_IMAGE_PIXELS
+    from seedream_mcp.definitions.conventions import MAX_IMAGE_PIXELS
 
     tiny = tmp_path / "tiny.png"
     buffer = io.BytesIO()

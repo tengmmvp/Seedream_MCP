@@ -29,12 +29,22 @@ from .sources import (
 )
 from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from ..utils.core.sanitizers import is_printable_ascii, is_sensitive_key
-from ..utils.core.formats import DEFAULT_MAX_FILE_SIZE
-from ..utils.core.logs import (
+from ..definitions.defaults import (
+    DEFAULT_CLEANUP_DAYS,
+    DEFAULT_DATE_FOLDER,
+    DEFAULT_DOWNLOAD_MAX_RETRIES,
+    DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+    DEFAULT_FSYNC,
+    DEFAULT_GENERATE_CONCURRENCY,
+    DEFAULT_IMAGE_PREPARE_CONCURRENCY,
+    DEFAULT_LOG_LEVEL,
     DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_LOG_ROTATION_SIZE_MB,
-    LEGAL_LOG_LEVELS,
+    DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+    DEFAULT_MAX_FILE_SIZE,
+    DEFAULT_MAX_TOTAL_BYTES,
 )
+from ..utils.core.logs import LEGAL_LOG_LEVELS
 from ..utils.core.validators import validate_size_for_model
 from ..utils.io.path import reject_unc_declaration
 from ..utils.model.capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
@@ -154,33 +164,45 @@ class SeedreamConfig:
     timeout: int = _env_field(60, "SEEDREAM_TIMEOUT")
     api_timeout: int = _env_field(600, "SEEDREAM_API_TIMEOUT")
     max_retries: int = _env_field(3, "SEEDREAM_MAX_RETRIES")
-    generate_concurrency: int = _env_field(3, "SEEDREAM_GENERATE_CONCURRENCY")
+    generate_concurrency: int = _env_field(
+        DEFAULT_GENERATE_CONCURRENCY, "SEEDREAM_GENERATE_CONCURRENCY"
+    )
 
-    log_level: str = _env_field("INFO", "SEEDREAM_LOG_LEVEL")
+    log_level: str = _env_field(DEFAULT_LOG_LEVEL, "SEEDREAM_LOG_LEVEL")
     log_rotation_size: int = _env_field(DEFAULT_LOG_ROTATION_SIZE_MB, "SEEDREAM_LOG_ROTATION_SIZE")
     log_retention_days: int = _env_field(DEFAULT_LOG_RETENTION_DAYS, "SEEDREAM_LOG_RETENTION_DAYS")
 
     auto_save_enabled: bool = _env_field(True, "SEEDREAM_AUTO_SAVE_ENABLED")
     data_root: str | None = _env_field(None, "SEEDREAM_DATA_ROOT")
-    auto_save_download_timeout: int = _env_field(30, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT")
-    auto_save_max_retries: int = _env_field(3, "SEEDREAM_AUTO_SAVE_MAX_RETRIES")
+    auto_save_download_timeout: int = _env_field(
+        DEFAULT_DOWNLOAD_TIMEOUT_SECONDS, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT"
+    )
+    auto_save_max_retries: int = _env_field(
+        DEFAULT_DOWNLOAD_MAX_RETRIES, "SEEDREAM_AUTO_SAVE_MAX_RETRIES"
+    )
     auto_save_max_file_size: int = _env_field(
         DEFAULT_MAX_FILE_SIZE, "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE"
     )
-    auto_save_max_concurrent: int = _env_field(5, "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT")
-    auto_save_date_folder: bool = _env_field(True, "SEEDREAM_AUTO_SAVE_DATE_FOLDER")
-    auto_save_cleanup_days: int = _env_field(30, "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS")
-    auto_save_max_total_bytes: int | None = _env_field(
-        10 * 1024 * 1024 * 1024, "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES"
+    auto_save_max_concurrent: int = _env_field(
+        DEFAULT_MAX_CONCURRENT_DOWNLOADS, "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT"
     )
-    auto_save_fsync: bool = _env_field(False, "SEEDREAM_AUTO_SAVE_FSYNC")
+    auto_save_date_folder: bool = _env_field(DEFAULT_DATE_FOLDER, "SEEDREAM_AUTO_SAVE_DATE_FOLDER")
+    auto_save_cleanup_days: int = _env_field(
+        DEFAULT_CLEANUP_DAYS, "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS"
+    )
+    auto_save_max_total_bytes: int | None = _env_field(
+        DEFAULT_MAX_TOTAL_BYTES, "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES"
+    )
+    auto_save_fsync: bool = _env_field(DEFAULT_FSYNC, "SEEDREAM_AUTO_SAVE_FSYNC")
 
     stream_buffer_max_size: int = _env_field(10 * 1024 * 1024, "SEEDREAM_STREAM_BUFFER_MAX_SIZE")
     sse_event_max_size: int | None = _env_field(None, "SEEDREAM_SSE_EVENT_MAX_SIZE")
 
     response_body_limit: int | None = _env_field(None, "SEEDREAM_RESPONSE_BODY_LIMIT")
 
-    image_prepare_concurrency: int = _env_field(5, "SEEDREAM_IMAGE_PREPARE_CONCURRENCY")
+    image_prepare_concurrency: int = _env_field(
+        DEFAULT_IMAGE_PREPARE_CONCURRENCY, "SEEDREAM_IMAGE_PREPARE_CONCURRENCY"
+    )
 
     prepare_cache_max: int = _env_field(32, "SEEDREAM_PREPARE_CACHE_MAX")
 

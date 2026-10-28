@@ -7,11 +7,19 @@ from __future__ import annotations
 
 import base64
 
+from ..definitions.conventions import (
+    BROWSE_IMAGES_TOOL_NAME,
+    GET_MODEL_INFO_TOOL_NAME,
+    IMAGE_TO_IMAGE_TOOL_NAME,
+    MULTI_IMAGE_FUSION_TOOL_NAME,
+    SEQUENTIAL_GENERATION_TOOL_NAME,
+    TEXT_TO_IMAGE_TOOL_NAME,
+)
 from ..utils.core.formats import encode_data_uri
 
 _TOOL_SVGS: dict[str, str] = {
     # 图标 image-plus：从无到有生成图片
-    "text_to_image": (
+    TEXT_TO_IMAGE_TOOL_NAME: (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
         'fill="none" stroke="#3790ff" stroke-width="2" stroke-linecap="round" '
         'stroke-linejoin="round"><path d="M16 5h6"/><path d="M19 2v6"/>'
@@ -19,7 +27,7 @@ _TOOL_SVGS: dict[str, str] = {
         '<path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/><circle cx="9" cy="9" r="2"/></svg>'
     ),
     # 图标 wand-sparkles：以参考图为基准重塑
-    "image_to_image": (
+    IMAGE_TO_IMAGE_TOOL_NAME: (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
         'fill="none" stroke="#3790ff" stroke-width="2" stroke-linecap="round" '
         'stroke-linejoin="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0'
@@ -29,7 +37,7 @@ _TOOL_SVGS: dict[str, str] = {
         '<path d="M21 16h-4"/><path d="M11 3H9"/></svg>'
     ),
     # 图标 images：多张图片并列成组
-    "multi_image_fusion": (
+    MULTI_IMAGE_FUSION_TOOL_NAME: (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
         'fill="none" stroke="#3790ff" stroke-width="2" stroke-linecap="round" '
         'stroke-linejoin="round"><path d="m22 11-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16"/>'
@@ -38,7 +46,7 @@ _TOOL_SVGS: dict[str, str] = {
         '<rect x="8" y="2" width="14" height="14" rx="2"/></svg>'
     ),
     # 图标 book-image：组图序列成册
-    "sequential_generation": (
+    SEQUENTIAL_GENERATION_TOOL_NAME: (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
         'fill="none" stroke="#3790ff" stroke-width="2" stroke-linecap="round" '
         'stroke-linejoin="round"><path d="m20 13.7-2.1-2.1a2 2 0 0 0-2.8 0L9.7 17"/>'
@@ -46,7 +54,7 @@ _TOOL_SVGS: dict[str, str] = {
         'H6.5a1 1 0 0 1 0-5H20"/><circle cx="10" cy="8" r="2"/></svg>'
     ),
     # 图标 folder-search：在图片目录中检索浏览
-    "browse_images": (
+    BROWSE_IMAGES_TOOL_NAME: (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
         'fill="none" stroke="#3790ff" stroke-width="2" stroke-linecap="round" '
         'stroke-linejoin="round"><path d="M10.7 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9'
@@ -54,7 +62,7 @@ _TOOL_SVGS: dict[str, str] = {
         '<path d="m21 21-1.9-1.9"/><circle cx="17" cy="17" r="3"/></svg>'
     ),
     # 图标 info：查询当前配置模型与能力
-    "get_model_info": (
+    GET_MODEL_INFO_TOOL_NAME: (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
         'fill="none" stroke="#3790ff" stroke-width="2" stroke-linecap="round" '
         'stroke-linejoin="round"><circle cx="12" cy="12" r="10"/>'
@@ -71,7 +79,7 @@ def tool_icon_src(tool_name: str) -> str:
 # 72×72 光栅版本，供仅实现 MUST 图标集（PNG/JPEG）的客户端渲染。
 TOOL_PNG_SIZE = "72x72"
 _TOOL_PNG_B64: dict[str, str] = {
-    "text_to_image": (
+    TEXT_TO_IMAGE_TOOL_NAME: (
         "iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAAEMElEQVR4nO2bQXbaMBCG/1H6XpNV6QnKDUpX0GyqniC5QckJgk/Q"
         "9AQmJ4CcoMkJ4mxSsio3aHuDdEU2ZfoGTJtS21hGsmPh/z2/gJHG5kMazcgToFGjRg5F8FQ65NaM8BFAPz41vhtQYGpHwVPNgDMA"
         "AwCt+Bh0Qx6a2vEWEAgfcp3boGcmjXshayi8A0Mz0Il/GVea7jFObgOaFuyfdG8tJ4D0cj6PGDgGoyx1fhGueyG/mQT0HRVp4xQ7"
@@ -89,7 +97,7 @@ _TOOL_PNG_B64: dict[str, str] = {
         "d22qKlEuqjXqojxVJcp2tUZdlLeqRNms1qiL8laVLNqaGO6tV2sQXqAOWv4jslFVSaNGjRo1aoTa6zdugmSBcWeTiQAAAABJRU5E"
         "rkJggg=="
     ),
-    "image_to_image": (
+    IMAGE_TO_IMAGE_TOOL_NAME: (
         "iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAADyklEQVR4nO2cQXLTMBSG/6dhT67Alg2wioZVbtJwgjonaHsCJycg"
         "3IQNjLMi3IAjtKt2xWPkpGnt2LIkS3Is/M900pFluf2i96T3nm1g0qRJAUWIqEXOs0fCDYDlsWm7y2gV6noy5wUIVwx8xOFnT8Be"
         "MDY/V7S/OEDznNcgXFcaGZvdijLf15IbvmHGbdtxItwW13TXNY5ATBGujNp6Sq75qw6Okjqu+g0+gxZVs5q1dLv3ZW4lnBcT7hQB"
@@ -105,7 +113,7 @@ _TOOL_PNG_B64: dict[str, str] = {
         "pTJhOGeAhMbLcwOk1OEoUeM+SLfUA1sw7pTZpQ5HqTEu6XOzZEpwWkMN2/sAU4WjDVZdIFFicDoTZoUFpBThGGUUiwMk7Wtkjtv4"
         "5OAokdXLioBl+bIiwge1qSxfVgSsTV9WNGnSpEmo6h/CCsFM+hA/DgAAAABJRU5ErkJggg=="
     ),
-    "multi_image_fusion": (
+    MULTI_IMAGE_FUSION_TOOL_NAME: (
         "iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAAEF0lEQVR4nO2cTVLbQBCFXyte2KsoN+AGISsrbFBOEHMCxAlinYDc"
         "QOYEmBPgnCBiQ8QqPgK5AazsDXSq9VMFtmRJoJFGsl6Vq1xisJpPPT/9ZgzQq1cvhSLUJMtjGwaOwbAZOARgohk9ELAEwcczbgKX"
         "/EYB2R6bK8IlgAn01GLEOPNdeqgd0JHHh0+EawAH0Fv3Hxgnty4tawNkR5nztwVwEt2PGF82M8lQdbdV1K3aAkd0EMesPoMsj20m"
@@ -122,7 +130,7 @@ _TOOL_PNG_B64: dict[str, str] = {
         "Xa0GhLRt42rPTGYAKukENqHYSzLrOh5sFHECv3qszT8FKOoEqupiqaXAM+FyfMHfM33cmlTGCVQ1i2U6gWAsEiewKZVxApVkUJec"
         "QGWzWFecQGWAuuIEKl0HdcEJrEq5awerpU5gr1690Ab9Bx05Co2RusrgAAAAAElFTkSuQmCC"
     ),
-    "sequential_generation": (
+    SEQUENTIAL_GENERATION_TOOL_NAME: (
         "iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAAD4UlEQVR4nO2cQVbbMBCG/xFdJLv0BM0Nmq6issE3ID1B4QTgExBO"
         "4OQECSdoeoKaDQ0r0hu0N4BV2JDpm9juA2I3cmITS/H/Xp5jWxK8D2mkGY0AatWqVaJom8qHAXeeFI6I0WGgg+hTRd0TMANhPD2j"
         "q9IBeQG35oQLAOewTASEDcaX0Kd7k/Iq7w/QAXtzwp2NcEQMeI+Eb6blVV44TPgBoA2LJZB0wCeFAvICbjFhBHdULKA50Le95zwX"
@@ -138,7 +146,7 @@ _TOOL_PNG_B64: dict[str, str] = {
         "bJcL7T4gJly43otMAYVZ7+IsCmdBGafadgMe4D8nn60T4+HWp1ZhrkYT6G+SUldVmaYZGwMKowjfzrIsStDYpFDubHYdZYqNTfMO"
         "qyji5RFQrxRvfupTGOcdDmEpnEaO5cnW/2CJ45zDZUy6IgdQUo9hRTZnLCeMdv3r1KpVC4n+AvyI2IMBoEvBAAAAAElFTkSuQmCC"
     ),
-    "browse_images": (
+    BROWSE_IMAGES_TOOL_NAME: (
         "iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAAEc0lEQVR4nO2bTW4TMRTH/29AorMinIBwAsKqAxvSEzBIILEjnIDM"
         "CQonmPQEDRtWIMIJSDc0XVFOQLlBugIWzUNvPiQI9tgTkvlI/JMitbHHnv77/PxsPwMOh8PhcLQVMlUIYu7Dw0Mw+gz0AHRW6GQK"
         "4MJjHH2O6BzbIFA/5s4PwjGAcM19TnzGi2lEc7RVoAcx964IHwB0N9Tvhc+41waRSGM5XzYoTs65zzhoukje8hfZsNq0OELvB/AK"
@@ -156,7 +164,7 @@ _TOOL_PNG_B64: dict[str, str] = {
         "vhJLAnqG/Z5/94uA9/puk7tsI+3zpg6CdCpNPsm9+TU6y+wNxSLGcsmlzAwpzlu2LGRVnhz75Om76dmW3AeZyFSe7/kYZsP52ZBu"
         "qQoac5xTBVqRGJdnEXXauNRYKxL7qIYnybUEDTtlQTmZzxnk4swiavz1dIfD4XA4UJrfYze3J3IGTX8AAAAASUVORK5CYII="
     ),
-    "get_model_info": (
+    GET_MODEL_INFO_TOOL_NAME: (
         "iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAAGBklEQVR4nO1cTVYiSRD+opwFrMYjOCdoZiVvNlN9Au0TaJ9A6gSN"
         "Jyg8QesJGk/QuJmhV6MnGOcGsNKNxLzISlooMrN+syh4fO/5VAqojKiIyPhN4IADDvAIQsPox3zCAc4IOFYvMMLkl/q/p9/2SMBM"
         "r3Cir89ogftpRM97x6A/Yu69ES4AxYwlE8riEcDkiHH3V0Ty924yqB/zCQhfGDjHUlrqx4yAMRjXviSrdgaFMR+/EmIGLtEgCLjt"

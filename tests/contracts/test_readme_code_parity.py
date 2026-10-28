@@ -29,6 +29,7 @@ from _lib.readme_helpers import (
     _read_readme,
     _row_cells,
 )
+from seedream_mcp.definitions import conventions
 from seedream_mcp.server.cli import build_arg_parser
 from seedream_mcp.server import mcp
 from seedream_mcp.tools.schemas import (
@@ -55,8 +56,9 @@ _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
 # 工具小节标题形态：<summary><b>1. <code>tool_name</code></b> — …</summary>
 _TOOL_SUMMARY_PATTERN = re.compile(r"<b>\d+\.\s*<code>([a-z_]+)</code></b>")
 
-# server/_registration.py 注册装饰器形态，工具与风格预设的注册名单都取源码装饰器为单一依据。
-_TOOL_DECORATOR_PATTERN = re.compile(r'@mcp\.tool\(\s*name="([a-z_]+)"')
+# server/_registration.py 注册装饰器形态，注册名单取源码装饰器为单一依据，
+# 常量名引用经 definitions.conventions 解析。
+_TOOL_DECORATOR_PATTERN = re.compile(r'@mcp\.tool\(\s*name=("[a-z_]+"|[A-Z][A-Z0-9_]*)')
 _PROMPT_DECORATOR_PATTERN = re.compile(r'@mcp\.prompt\(\s*name="([^"]+)"')
 
 # CLI 旗标 token：双连字符后接字母开头的字母数字连字符串。
@@ -228,7 +230,10 @@ def test_tool_param_bullets_exactly_match_input_model_fields() -> None:
 
 def test_readme_tool_sections_match_registered_tools() -> None:
     """README 工具小节集合与 server/_registration.py 的 @mcp.tool 注册名单一致。"""
-    registered = set(_TOOL_DECORATOR_PATTERN.findall(_server_source()))
+    registered = {
+        token.strip('"') if token.startswith('"') else getattr(conventions, token)
+        for token in _TOOL_DECORATOR_PATTERN.findall(_server_source())
+    }
     assert set(_tool_param_bullets(BASE_README)) == registered, (
         f"README 工具小节与 server/_registration.py 注册工具漂移:\n"
         f"  仅文档有: {sorted(set(_tool_param_bullets(BASE_README)) - registered)}\n"

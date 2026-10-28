@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING
 
 from mcp.types import ImageContent
 
+from ...definitions.conventions import MAX_IMAGE_PIXELS
 from ..core.executors import CPU_OFFLOAD_DECODE_SLOTS, run_in_cpu_pool
-from ..core.formats import MAX_IMAGE_PIXELS
 from ..core.inflight import TransientInflightError
 from ..core.logs import get_logger
 from ..core.loop_bound import LoopKeyedInflight, loop_bound_semaphore

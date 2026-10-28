@@ -108,11 +108,6 @@ async def run_sequential_generation(
     )
 
 
-async def run_get_model_info(config: SeedreamConfig) -> CallToolResult:
-    """委托 ``handle_get_model_info`` 返回当前配置模型的能力快照。"""
-    return await handle_get_model_info(config)
-
-
 async def run_browse_images(
     params: BrowseImagesInput,
     ctx: Context | None = None,
@@ -130,3 +125,8 @@ async def run_browse_images(
     """
     async with workspace_roots_scope_from_result(workspace_roots):
         return await handle_browse_images(params, ctx=ctx, bounds_scope=bounds_scope)
+
+
+async def run_get_model_info(config: SeedreamConfig) -> CallToolResult:
+    """委托 ``handle_get_model_info`` 返回当前配置模型的能力快照。"""
+    return await handle_get_model_info(config)

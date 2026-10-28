@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from ...definitions.conventions import MAX_IMAGE_PIXELS
 from ..core.errors import SeedreamValidationError
 from ..core.formats import (
     EXTENSIONS_BY_PIL_FORMAT,
-    MAX_IMAGE_PIXELS,
     MIME_BY_EXTENSION,
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
@@ -58,8 +58,8 @@ UNIDENTIFIED_IMAGE_MESSAGE = "无法识别的图像内容"
 # 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用。
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024
 
-# 参考图即输入图像：最短边上限在此，总像素上限由 formats 单一来源提供，宽高比
-# 上下限由 validators 持有共用。
+# 参考图即输入图像：最短边上限在此，总像素上限由 definitions/conventions 单一来源提供，
+# 宽高比上下限由 validators 持有共用。
 MIN_IMAGE_EDGE = 15
 
 # 本地候选定位结果：(resolve 后物理路径, stat)，缓存签名计算与读取链共用同一候选。

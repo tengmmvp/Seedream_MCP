@@ -14,12 +14,10 @@ from pathlib import Path
 import pytest
 from PIL import Image, UnidentifiedImageError
 
+from seedream_mcp.definitions.conventions import MAX_IMAGE_PIXELS
 from seedream_mcp.utils.core import formats
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.utils.core.formats import (
-    MAX_IMAGE_PIXELS,
-    SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
-)
+from seedream_mcp.utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
 from seedream_mcp.utils.images.validation import (
     MIN_IMAGE_EDGE,
     _validate_image_dimensions,

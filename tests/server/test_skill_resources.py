@@ -437,8 +437,8 @@ async def test_skill_reference_rejects_path_traversal(
 def test_troubleshooting_numeric_claims_match_code_constants() -> None:
     """troubleshooting 与 SKILL.md 的数值声明与代码常量对账，漂移即失败。"""
     from seedream_mcp.config import SeedreamConfig
-    from seedream_mcp.utils.core.formats import MAX_IMAGE_PIXELS
-    from seedream_mcp.utils.core.logs import (
+    from seedream_mcp.definitions.conventions import MAX_IMAGE_PIXELS
+    from seedream_mcp.definitions.defaults import (
         DEFAULT_LOG_RETENTION_DAYS,
         DEFAULT_LOG_ROTATION_SIZE_MB,
     )
