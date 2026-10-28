@@ -1,7 +1,7 @@
 """Web 操作台文件端点：缩略图与原图，均以图片目录为边界做越界防护。
 
-路径安全为四重校验：空/绝对/盘符相对/win32 冒号分量（NTFS 备用数据流
-形态，POSIX 冒号为合法文件名字符）/上跳段拒绝、扩展名白名单、normalize_path
+路径安全为四重校验：空/绝对/前导分隔符/上跳段拒绝、扩展名白名单、
+normalize_path（盘符相对与 win32 冒号分量等形态在此单源拒绝）
 与 is_within_resolved 的边界比较、is_file 存在性；违规 400、未命中 404。
 图片目录解析与路径校验为同步文件系统操作，整体经 asyncio.to_thread
 下沉至工作线程；缩略图经落盘缓存免除重复解码，
@@ -23,8 +23,6 @@ from ..utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS
 from ..utils.images.thumbnail import cached_thumbnail_bytes
 from ..utils.io.files import SymlinkRejectedError, open_regular_read
 from ..utils.io.path import (
-    has_windows_colon_component,
-    is_drive_relative,
     is_within_resolved,
     normalize_path,
     resolve_images_root,
@@ -44,22 +42,16 @@ def resolve_web_relative_path(rel: str, images_root: Path) -> Path:
         resolve 后落在图片目录内的常规文件路径。
 
     Raises:
-        ValueError: 路径为空、绝对或盘符相对形态、win32 下分量含冒号（NTFS
-            备用数据流形态，POSIX 冒号为合法文件名字符）、含 ``..`` 段
-            或扩展名不在白名单。
+        ValueError: 路径为空、绝对或前导分隔符形态、含 ``..`` 段或扩展名不在白名单；
+            盘符相对与 win32 冒号分量等形态由 normalize_path 单源拒绝，
+            拒绝消息归一为本契约文案。
         FileNotFoundError: 越界或目标不是存在的常规文件。
     """
     rel = (rel or "").strip()
     if not rel:
         raise ValueError("路径不能为空")
     rel_path = Path(rel)
-    if (
-        rel_path.is_absolute()
-        or rel.startswith(("\\", "/"))
-        # 盘符相对形态（C:foo）is_absolute 为 False，与绝对形态同口径早闸拒绝。
-        or is_drive_relative(rel_path)
-        or has_windows_colon_component(rel)
-    ):
+    if rel_path.is_absolute() or rel.startswith(("\\", "/")):
         raise ValueError("仅接受相对图片目录的路径")
     for segment in rel.replace("\\", "/").split("/"):
         if segment == "..":
@@ -68,7 +60,11 @@ def resolve_web_relative_path(rel: str, images_root: Path) -> Path:
     if suffix not in SUPPORTED_IMAGE_EXTENSIONS:
         raise ValueError("不支持的图片扩展名")
 
-    resolved = normalize_path(rel, str(images_root))
+    try:
+        resolved = normalize_path(rel, str(images_root))
+    except ValueError as exc:
+        # Web 契约固定消息，不透传 normalize_path 各分支的拒绝文案。
+        raise ValueError("仅接受相对图片目录的路径") from exc
     if not is_within_resolved(resolved, images_root) or not resolved.is_file():
         raise FileNotFoundError(rel)
     return resolved
@@ -76,7 +72,7 @@ def resolve_web_relative_path(rel: str, images_root: Path) -> Path:
 
 def _image_not_found() -> Response:
     """图片缺失的统一 404 响应。"""
-    return _responses.error_json("not_found", "图片不存在", 404)
+    return _responses.endpoint_error_json(_responses.IMAGE_NOT_FOUND_INFO)
 
 
 async def _resolve_request_path(request: Request) -> tuple[Path, Path] | Response:
@@ -95,9 +91,9 @@ async def _resolve_request_path(request: Request) -> tuple[Path, Path] | Respons
     try:
         return await asyncio.to_thread(_resolve)
     except SeedreamConfigError as exc:
-        return _responses.images_root_unavailable(exc)
+        return _responses.endpoint_error_json(_responses.images_root_unavailable_error(exc))
     except ValueError as exc:
-        return _responses.error_json("invalid_path", str(exc), 400)
+        return _responses.endpoint_error_json(_responses.invalid_path_error(exc))
     except FileNotFoundError:
         return _image_not_found()
 
@@ -124,11 +120,13 @@ async def web_thumbnail(request: Request) -> Response:
         data = None
     except CpuOffloadPoolClosedError:
         # 池关闭是退出清理竞态，属服务端不可用，不并入图片缺陷的 422 口径。
-        return _responses.error_json(
-            "thumbnail_unavailable", "CPU 卸载线程池已关闭，缩略图不可用", 500
+        return _responses.endpoint_error_json(
+            _responses.WebErrorInfo(
+                "thumbnail_unavailable", "CPU 卸载线程池已关闭，缩略图不可用", 500
+            )
         )
     if data is None:
-        return _responses.error_json("thumbnail_failed", "缩略图生成失败", 422)
+        return _responses.endpoint_error_json(_responses.THUMBNAIL_FAILED_INFO)
     return Response(content=data, media_type="image/jpeg", headers=_responses.PRIVATE_CACHE_HEADER)
 
 
@@ -146,7 +144,9 @@ async def web_image(request: Request) -> Response:
         return _image_not_found()
     except OSError as exc:
         # 权限与 IO 类打开失败保留 500 诊断信号，不折叠为缺失。
-        return _responses.error_json("image_open_failed", f"图片打开失败: {exc}", 500)
+        return _responses.endpoint_error_json(
+            _responses.WebErrorInfo("image_open_failed", f"图片打开失败: {exc}", 500)
+        )
     if opened is None:
         return _image_not_found()
     handle, stat_result = opened

@@ -2,15 +2,20 @@
 
 build_web_app 经 _asgi_fakes 的共享装配核心按生产装配序（register ->
 streamable_http_app -> mount -> attach）构建传输栈，保证测试栈与生产栈同源；
-web_asgi_client 与 web_get 供 webapp 与传输 e2e 测试文件发起回环 ASGI 请求；
+web_asgi_client 与 web_get 供 webapp 与传输 e2e 测试文件发起回环 ASGI 请求，
+web_post_raw 以原始请求体 POST 供请求体解析分支用例，_assert_structured_failure
+断言 browse 与 generate 端点共享的结构化失败信封；
 drive_asgi_messages 直驱响应对象收集全部 ASGI 消息，asgi_start_headers 与
 asgi_body_bytes 自消息列取值，供绕过传输栈直调响应对象的用例共享；路由状态
-隔离 fixture 见 conftest 的 clean_web_routes。
+隔离 fixture 见 conftest 的 clean_web_routes；read_js_module_source 读取前端
+JS 模块源文本、function_body 以列首 } 结构锚点取函数体源文本，供静态资源
+契约断言共用。
 """
 
 from __future__ import annotations
 
 import io
+import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +26,7 @@ import pytest
 
 from _lib.asgi_fakes import _assemble_streamable_http_app
 from seedream_mcp.config import SeedreamConfig, set_active_config
+from seedream_mcp.webapp import constants as web_constants
 from seedream_mcp.webapp.constants import (
     WEB_API_BROWSE,
     WEB_API_CONFIG_INFO,
@@ -83,6 +89,48 @@ async def web_get(app: Any, path: str) -> httpx.Response:
         return await client.get(path)
 
 
+async def web_post_raw(app: Any, path: str, content: bytes) -> httpx.Response:
+    """以 application/json 原始请求体 POST 一次，供请求体解析分支使用。"""
+    async with web_asgi_client(app) as client:
+        return await client.post(
+            path, content=content, headers={"content-type": "application/json"}
+        )
+
+
+def _assert_structured_failure(
+    response: httpx.Response,
+    tool: str,
+    error_type: str,
+    *,
+    status: int,
+    message_contains: str | None = None,
+) -> dict[str, Any]:
+    """断言失败响应为完整结构化结果并映射预期状态码，返回解析后的载荷。"""
+    payload = _assert_endpoint_error(
+        response, error_type, status=status, message_contains=message_contains
+    )
+    assert payload["tool"] == tool
+    assert payload["status"] == "failed"
+    return payload
+
+
+def _assert_endpoint_error(
+    response: httpx.Response,
+    error_type: str,
+    *,
+    status: int,
+    message_contains: str | None = None,
+) -> dict[str, Any]:
+    """断言 {success, error} 信封的失败响应并映射预期状态码。"""
+    assert response.status_code == status
+    payload: dict[str, Any] = response.json()
+    assert payload["success"] is False
+    assert payload["error"]["type"] == error_type
+    if message_contains is not None:
+        assert message_contains in payload["error"]["message"]
+    return payload
+
+
 async def drive_asgi_messages(
     response: Any,
     scope: Mapping[str, object],
@@ -142,8 +190,6 @@ def make_images_root_unresolvable(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
 def prepare_static_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """以 tmp 目录顶替静态资源目录，写入 index 页、脚本与 404 页供各用例消费。"""
-    from seedream_mcp.webapp import constants as web_constants
-
     static_dir = tmp_path / "static"
     static_dir.mkdir()
     (static_dir / "index.html").write_text("<!doctype html><title>web</title>", encoding="utf-8")
@@ -151,6 +197,18 @@ def prepare_static_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     (static_dir / "app.js").write_bytes(b"// placeholder")
     monkeypatch.setattr(web_constants, "STATIC_DIR", static_dir)
     return static_dir
+
+
+def read_js_module_source(module: str) -> str:
+    """读取前端 JS 模块源文本，调用期取 STATIC_DIR 以跟随其 monkeypatch 顶替。"""
+    return (web_constants.STATIC_DIR / "js" / module).read_text(encoding="utf-8")
+
+
+def function_body(source: str, pattern: str) -> str:
+    """按结构锚点取函数体源文本，锚点以列首 } 收束，失配即提示守护同步。"""
+    match = re.search(pattern, source, re.DOTALL | re.MULTILINE)
+    assert match is not None, f"缺函数体锚: {pattern}"
+    return match.group(0)
 
 
 def make_png_bytes(width: int = 8, height: int = 8) -> bytes:

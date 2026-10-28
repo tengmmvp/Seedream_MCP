@@ -13,6 +13,7 @@ import pytest
 
 from _lib.inflight_fakes import _reap_if_pending, cancel_shared_leader
 from _lib.web_fixtures import (
+    _assert_endpoint_error,
     asgi_body_bytes,
     asgi_start_headers,
     build_web_app,
@@ -29,6 +30,11 @@ _FILE_ENDPOINTS = ("thumbnail", "image")
 
 # 盘符形态（绝对与相对）仅在 win32 成为路径语法的越界拒绝项。
 _WIN32_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="盘符形态为 win32 专属拒绝项")
+
+# 冒号分量仅在 win32 触发 ADS 防护拒绝，与盘符形态的路径语法越界分立语义。
+_WIN32_ADS_ONLY = pytest.mark.skipif(
+    sys.platform != "win32", reason="冒号分量拒绝是 win32 的 ADS 防护"
+)
 
 
 @pytest.fixture
@@ -191,24 +197,7 @@ async def test_file_endpoints_reject_traversal(
     encoded = quote(path, safe="")
     response = await web_get(web_app_with_image, f"/web/api/{endpoint}?path={encoded}")
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_path"
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="冒号分量拒绝是 win32 的 ADS 防护")
-@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
-async def test_file_endpoints_reject_colon_ads_paths(
-    web_app_with_image: Any, endpoint: str
-) -> None:
-    """win32 下分量含冒号一律 400。"""
-    from urllib.parse import quote
-
-    for path in ("sub\\file.png:.jpg", "file.png:$DATA", "2026-08-20/a:p/b.png"):
-        encoded = quote(path, safe="")
-        response = await web_get(web_app_with_image, f"/web/api/{endpoint}?path={encoded}")
-
-        assert response.status_code == 400
-        assert response.json()["error"] == "invalid_path"
+    _assert_endpoint_error(response, "invalid_path", status=400)
 
 
 @pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
@@ -218,15 +207,12 @@ async def test_file_endpoints_reject_colon_ads_paths(
         "/etc/passwd.png",
         "\\\\server\\share\\a.png",
         pytest.param("C:/Windows/system32/a.png", marks=_WIN32_ONLY),
-        pytest.param("C:evil.png", marks=_WIN32_ONLY),
-        pytest.param("C:", marks=_WIN32_ONLY),
-        pytest.param("C:a.png", marks=_WIN32_ONLY),
     ],
 )
-async def test_file_endpoints_gate_rejects_absolute_and_drive_relative(
+async def test_file_endpoints_gate_rejects_absolute_and_leading_separator(
     web_app_with_image: Any, endpoint: str, path: str
 ) -> None:
-    """绝对与盘符相对形态在早闸以同一文案 400，不依赖深层 normalize_path 的兜底拒绝。"""
+    """绝对、UNC 与前导分隔符形态在 web 契约层 resolve 前先行拒绝，以同一文案 400。"""
     from urllib.parse import quote
 
     encoded = quote(path, safe="")
@@ -234,8 +220,67 @@ async def test_file_endpoints_gate_rejects_absolute_and_drive_relative(
 
     assert response.status_code == 400
     body = response.json()
-    assert body["error"] == "invalid_path"
-    assert body["error_description"] == "仅接受相对图片目录的路径"
+    # 信封顶层只含 success 与 error 子对象，不套 tool/status 工具结果字段。
+    assert set(body) == {"success", "error"}
+    assert body["success"] is False
+    assert body["error"] == {"type": "invalid_path", "message": "仅接受相对图片目录的路径"}
+
+
+@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
+@pytest.mark.parametrize(
+    ("path", "description"),
+    [
+        pytest.param(
+            "sub\\file.png:.jpg",
+            "仅接受相对图片目录的路径",
+            marks=_WIN32_ADS_ONLY,
+            id="colon-ads-subdir",
+        ),
+        pytest.param(
+            "file.png:$DATA",
+            "不支持的图片扩展名",
+            marks=_WIN32_ADS_ONLY,
+            id="colon-ads-data-stream",
+        ),
+        pytest.param(
+            "2026-08-20/a:p/b.png",
+            "仅接受相对图片目录的路径",
+            marks=_WIN32_ADS_ONLY,
+            id="colon-ads-mid-path",
+        ),
+        pytest.param(
+            "C:evil.png",
+            "仅接受相对图片目录的路径",
+            marks=_WIN32_ONLY,
+            id="drive-relative-evil-png",
+        ),
+        pytest.param(
+            "C:",
+            "不支持的图片扩展名",
+            marks=_WIN32_ONLY,
+            id="drive-relative-bare",
+        ),
+        pytest.param(
+            "C:a.png",
+            "仅接受相对图片目录的路径",
+            marks=_WIN32_ONLY,
+            id="drive-relative-a-png",
+        ),
+    ],
+)
+async def test_file_endpoints_reject_colon_ads_and_drive_relative_paths(
+    web_app_with_image: Any, endpoint: str, path: str, description: str
+) -> None:
+    """win32 下冒号分量与盘符相对形态一律 400，经 normalize_path 拒绝的描述为契约文案。"""
+    from urllib.parse import quote
+
+    encoded = quote(path, safe="")
+    response = await web_get(web_app_with_image, f"/web/api/{endpoint}?path={encoded}")
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"] == {"type": "invalid_path", "message": description}
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="冒号在 POSIX 是合法文件名字符")
@@ -334,8 +379,7 @@ async def test_file_endpoints_reject_non_image_extension(
         web_app_with_image, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/a.txt"
     )
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_path"
+    _assert_endpoint_error(response, "invalid_path", status=400)
 
 
 @pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
@@ -345,8 +389,7 @@ async def test_file_endpoints_empty_path_returns_400(
     """空路径参数直接拒绝。"""
     response = await web_get(web_app_with_image, f"/web/api/{endpoint}")
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_path"
+    _assert_endpoint_error(response, "invalid_path", status=400)
 
 
 async def test_thumbnail_build_failure_returns_422(
@@ -365,10 +408,8 @@ async def test_thumbnail_build_failure_returns_422(
         web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 422
-    payload = response.json()
-    assert payload["error"] == "thumbnail_failed"
-    assert payload["error_description"] == "缩略图生成失败"
+    payload = _assert_endpoint_error(response, "thumbnail_failed", status=422)
+    assert payload["error"] == {"type": "thumbnail_failed", "message": "缩略图生成失败"}
 
 
 async def test_thumbnail_source_missing_mid_request_returns_404(
@@ -387,9 +428,7 @@ async def test_thumbnail_source_missing_mid_request_returns_404(
         web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 404
-    payload = response.json()
-    assert payload["error"] == "not_found"
+    _assert_endpoint_error(response, "not_found", status=404)
 
 
 async def test_thumbnail_transient_stat_failure_returns_422(
@@ -408,9 +447,7 @@ async def test_thumbnail_transient_stat_failure_returns_422(
         web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 422
-    payload = response.json()
-    assert payload["error"] == "thumbnail_failed"
+    _assert_endpoint_error(response, "thumbnail_failed", status=422)
 
 
 async def test_thumbnail_inflight_cancelled_returns_422(
@@ -437,9 +474,7 @@ async def test_thumbnail_inflight_cancelled_returns_422(
 
         response = await request_task
 
-        assert response.status_code == 422
-        payload = response.json()
-        assert payload["error"] == "thumbnail_failed"
+        _assert_endpoint_error(response, "thumbnail_failed", status=422)
     finally:
         await _reap_if_pending(request_task)
 
@@ -460,9 +495,7 @@ async def test_thumbnail_pool_closed_returns_500(web_app_with_image: Any) -> Non
 
     await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
 
-    assert response.status_code == 500
-    payload = response.json()
-    assert payload["error"] == "thumbnail_unavailable"
+    _assert_endpoint_error(response, "thumbnail_unavailable", status=500)
 
 
 async def test_image_endpoint_source_vanished_before_send_returns_404(
@@ -485,9 +518,7 @@ async def test_image_endpoint_source_vanished_before_send_returns_404(
         web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 404
-    payload = response.json()
-    assert payload["error"] == "not_found"
+    _assert_endpoint_error(response, "not_found", status=404)
 
 
 async def test_image_endpoint_symlink_swapped_after_resolve_rejected(
@@ -550,9 +581,7 @@ async def test_image_endpoint_directory_named_like_image_returns_404(
         web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 404
-    payload = response.json()
-    assert payload["error"] == "not_found"
+    _assert_endpoint_error(response, "not_found", status=404)
 
 
 async def test_image_endpoint_non_regular_handle_returns_404(
@@ -577,9 +606,7 @@ async def test_image_endpoint_non_regular_handle_returns_404(
         web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 404
-    payload = response.json()
-    assert payload["error"] == "not_found"
+    _assert_endpoint_error(response, "not_found", status=404)
 
 
 @pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
@@ -590,14 +617,20 @@ async def test_file_endpoints_images_root_unavailable_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """图片目录不可解析时缩略图与原图端点均回 400 images_root_unavailable。"""
+    """图片目录不可解析时缩略图与原图端点均回 400 images_root_unavailable 结构化信封。"""
+    from seedream_mcp.utils.io.path import READ_SCOPE_AUTH_ENV_HINT
+
     make_images_root_unresolvable(monkeypatch, tmp_path)
     app = build_web_app()
 
     response = await web_get(app, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/a.png")
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "images_root_unavailable"
+    _assert_endpoint_error(
+        response,
+        "images_root_unavailable",
+        status=400,
+        message_contains=READ_SCOPE_AUTH_ENV_HINT,
+    )
 
 
 async def test_image_etag_matches_fileresponse_algorithm(
@@ -973,9 +1006,7 @@ async def test_image_open_denied_returns_500(
         web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 500
-    payload = response.json()
-    assert payload["error"] == "image_open_failed"
+    _assert_endpoint_error(response, "image_open_failed", status=500)
 
 
 async def test_image_open_symlink_rejection_returns_404(
@@ -996,8 +1027,7 @@ async def test_image_open_symlink_rejection_returns_404(
         web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 404
-    assert response.json()["error"] == "not_found"
+    _assert_endpoint_error(response, "not_found", status=404)
 
 
 async def test_image_fstat_failure_closes_fd_and_returns_500(
@@ -1030,8 +1060,7 @@ async def test_image_fstat_failure_closes_fd_and_returns_500(
         web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 500
-    assert response.json()["error"] == "image_open_failed"
+    _assert_endpoint_error(response, "image_open_failed", status=500)
     assert opened
     assert set(opened) <= set(closed)
 

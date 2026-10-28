@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from pydantic import ValidationError
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 
+from ..definitions.conventions import BROWSE_IMAGES_TOOL_NAME
 from ..tools.outputs.channels import output_channels_scope
 from ..tools.schemas import BrowseImagesInput
 from ..tools.runners import run_browse_images
@@ -61,28 +61,25 @@ async def _directory_outside_images_root(directory: str, images_root: Path) -> b
     return await asyncio.to_thread(_outside)
 
 
+async def _structured_error(error: _responses.WebErrorInfo) -> Response:
+    """图库端点错误分支的结构化响应，错误载荷经输出族映射绑定浏览族模型。"""
+    return await error.as_response(BROWSE_IMAGES_TOOL_NAME)
+
+
 async def web_browse(request: Request) -> Response:
     """图库浏览端点，请求体经 BrowseImagesInput 校验后透传 browse 工具。
 
-    请求体解析与参数校验是同步 CPU 工作，与生成端点同口径下沉工作线程，
-    避免超大 JSON 阻塞事件循环。
+    端点各失败分支均回浏览族结构化错误，与 runner 失败结果形态一致；
+    请求体解析、参数校验与图片目录解析经 _responses.entry_preamble 与生成端点共享，
+    下沉口径与早期失败形态单点维护。
     """
-    body, parse_error = await _responses.parse_json_object_body(request)
-    if parse_error is not None:
-        return parse_error
-    try:
-        params = await asyncio.to_thread(BrowseImagesInput.model_validate, body)
-    except ValidationError as exc:
-        return _responses.validation_error_json(exc)
-
-    images_root = await _responses.resolve_web_images_root()
-    if isinstance(images_root, JSONResponse):
-        return images_root
+    preamble = await _responses.entry_preamble(request, BROWSE_IMAGES_TOOL_NAME, BrowseImagesInput)
+    if isinstance(preamble, Response):
+        return preamble
+    params, images_root = preamble
     directory = params.effective_directory
     if await _directory_outside_images_root(directory, images_root):
-        return _responses.error_json(
-            "invalid_directory", "目录不在图片目录内，Web 图库仅浏览图片目录", 400
-        )
+        return await _structured_error(_responses.INVALID_DIRECTORY_INFO)
     # browse 契约保证不抛，异常已归约为 is_error 结果，兜底仅防处理器全捕回归；
     # 条目过滤以图片目录为界在扫描源头剔除，与 Web 文件端点服务范围一致。
     try:
@@ -91,10 +88,8 @@ async def web_browse(request: Request) -> Response:
             result = await run_browse_images(params, ctx=None, bounds_scope=[images_root])
     except Exception:
         logger.exception("Web 图库浏览请求执行异常")
-        return _responses.error_json("internal_error", "服务器内部错误，详情见日志", 500)
-    structured = result.structured_content if result.structured_content is not None else {}
-    if not isinstance(structured, dict):
-        structured = {}
-    _converge_for_web(structured, images_root)
-    status = 200 if not result.is_error else _responses.browse_status(structured)
-    return await _responses.respond_structured_json(structured, status)
+        return await _structured_error(_responses.INTERNAL_ERROR_INFO)
+    payload = await _responses.runner_result_payload(BROWSE_IMAGES_TOOL_NAME, result)
+    _converge_for_web(payload, images_root)
+    status = 200 if not result.is_error else _responses.structured_status(payload)
+    return await _responses.respond_structured_json(payload, status)

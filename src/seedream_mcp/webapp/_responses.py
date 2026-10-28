@@ -1,8 +1,9 @@
 """Web 操作台各域 handler 共享的响应辅助与错误码映射。
 
-本模块只放跨域复用的纯辅助：统一错误 JSON 形态、图片目录解析契约、生成错误
-类型到 HTTP 状态码的映射、文件端点的缓存头与 no-follow 文件响应形态。域内
-专有逻辑不落此处，避免演化为杂物箱。
+本模块只放跨域复用的纯辅助：统一错误 JSON 形态与结构化错误响应原语、
+生成与图库入口的序言脚手架、图片目录解析契约、
+错误类型到 HTTP 状态码的单源映射、文件端点的缓存头与 no-follow 文件响应形态。
+域内专有逻辑不落此处，避免演化为杂物箱。
 """
 
 from __future__ import annotations
@@ -11,16 +12,26 @@ import asyncio
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, NamedTuple, TypeVar
 
-from pydantic import ValidationError
+from mcp.types import CallToolResult
+from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, MalformedRangeHeader, Response
 from starlette.types import Message, Receive, Scope, Send
 
 # as 同名形态为显式再导出，供 webapp 测试经本模块替换序列化原语。
-from ..tools.outputs import dump_strict_json_bytes as dump_strict_json_bytes
-from ..utils.core.errors import SeedreamConfigError, validation_error_user_message
+from ..definitions.conventions import BROWSE_FAILED_ERROR_TYPE, MODEL_INFO_FAILED_ERROR_TYPE
+from ..tools.outputs import (
+    build_error_dict,
+    build_error_structured,
+    dump_strict_json_bytes as dump_strict_json_bytes,
+)
+from ..utils.core.errors import (
+    SeedreamConfigError,
+    iter_error_profiles,
+    validation_error_user_message,
+)
 from ..utils.core.executors import (
     CpuOffloadPoolClosedError,
     load_json_bytes,
@@ -38,18 +49,6 @@ from ..utils.io.path import (
 
 logger = get_logger()
 
-GENERATION_ERROR_STATUS: dict[str, int] = {
-    "validation_error": 400,
-    "payload_too_large": 400,
-    "rate_limited": 429,
-    "payment_required": 402,
-    "auth_error": 503,
-    "config_error": 503,
-    "network_error": 502,
-    "api_error": 502,
-    "timeout_error": 504,
-}
-
 # 缩略图与原图响应允许浏览器私有缓存：已保存图片内容不再变化；nosniff 阻断
 # 旧浏览器把图片字节嗅探为其他类型。
 PRIVATE_CACHE_HEADER = {
@@ -63,64 +62,174 @@ PRIVATE_CACHE_HEADER = {
 WEB_JSON_HEADERS = {"cache-control": "no-store", "x-content-type-options": "nosniff"}
 
 
-def error_json(error: str, description: str, status: int) -> JSONResponse:
-    """构造与传输层中间件同形态的错误 JSON 响应。"""
+class WebErrorInfo(NamedTuple):
+    """端点自有错误的载体，HTTP 状态码随错误定义携带。"""
+
+    type: str
+    message: str
+    http_status: int
+
+    async def as_response(self, tool_name: str) -> Response:
+        """构造绑定 tool_name 的完整结构化错误响应。"""
+        return await respond_structured_error(tool_name, self.type, self.message)
+
+
+# 端点自有错误码单表：需登记状态表的错误码定义收口于此，调用点只消费常量；动态文案码
+# 以表项为骨架展开——invalid_json 与 images_root_unavailable 在表项文案后追加详情，
+# invalid_path 整体替换表项文案。不入表的诊断码在调用点内联构造，状态随定义携带。
+INVALID_JSON_INFO = WebErrorInfo("invalid_json", "请求体不是合法 JSON", 400)
+INVALID_REQUEST_INFO = WebErrorInfo("invalid_request", "请求体须为 JSON 对象", 400)
+INVALID_PATH_INFO = WebErrorInfo("invalid_path", "无效的图片路径", 400)
+IMAGE_NOT_FOUND_INFO = WebErrorInfo("not_found", "图片不存在", 404)
+# not_found 一码两文案：API 兜底变体自文件端点表项派生，类型与状态共享单一定义。
+API_NOT_FOUND_INFO = IMAGE_NOT_FOUND_INFO._replace(message="接口不存在")
+THUMBNAIL_FAILED_INFO = WebErrorInfo("thumbnail_failed", "缩略图生成失败", 422)
+IMAGES_ROOT_UNAVAILABLE_INFO = WebErrorInfo("images_root_unavailable", "无法确定图片目录", 400)
+INVALID_DIRECTORY_INFO = WebErrorInfo(
+    "invalid_directory", "目录不在图片目录内，Web 图库仅浏览图片目录", 400
+)
+# CPU 卸载池关闭属退出清理与服务并发的窗口期，是服务端不可用而非请求或结果缺陷。
+SERVICE_UNAVAILABLE_INFO = WebErrorInfo(
+    "service_unavailable", "CPU 卸载线程池已关闭，服务不可用", 500
+)
+
+# 端点全捕兜底的固定 WebErrorInfo，生成与图库端点共用，防文案各处漂移。
+INTERNAL_ERROR_INFO = WebErrorInfo("internal_error", "服务器内部错误，详情见日志", 500)
+
+# 端点自有码清单：状态表与守护测试共用的单一名单，加码只改此处。末两项为 runner
+# 失败码——browse 与 model_info 处理器经 definitions 常量构造失败，无端点构造点，
+# 仅登记状态表。
+_ENDPOINT_OWN_ERRORS: tuple[WebErrorInfo, ...] = (
+    INTERNAL_ERROR_INFO,
+    INVALID_JSON_INFO,
+    INVALID_REQUEST_INFO,
+    INVALID_PATH_INFO,
+    IMAGE_NOT_FOUND_INFO,
+    THUMBNAIL_FAILED_INFO,
+    IMAGES_ROOT_UNAVAILABLE_INFO,
+    INVALID_DIRECTORY_INFO,
+    SERVICE_UNAVAILABLE_INFO,
+    WebErrorInfo(BROWSE_FAILED_ERROR_TYPE, "图片浏览失败", 500),
+    WebErrorInfo(MODEL_INFO_FAILED_ERROR_TYPE, "模型信息查询失败", 500),
+)
+
+
+def _merge_error_type_status(
+    profile_status: Mapping[str, int], endpoint_status: Mapping[str, int]
+) -> dict[str, int]:
+    """合并档案与端点自有两段状态表，撞键即抛 ValueError，防按合并顺序静默覆盖。"""
+    conflicts = sorted(set(profile_status) & set(endpoint_status))
+    if conflicts:
+        raise ValueError(f"错误档案与端点自有错误码撞键，须单侧改名: {conflicts}")
+    return {**profile_status, **endpoint_status}
+
+
+def _profile_error_status() -> dict[str, int]:
+    """错误档案段状态表，同 error_code 不同 http_status 即抛 AssertionError。"""
+    profiles = tuple(iter_error_profiles())
+    status = {profile.error_code: profile.http_status for profile in profiles}
+    # 字典推导对重码按迭代序 last-wins 静默取后值，断言显式拦下
+    assert len(status) == len({(profile.error_code, profile.http_status) for profile in profiles})
+    return status
+
+
+# 错误类型到 HTTP 状态码的单源映射：档案码（含 runner 失败码档案）自错误档案迭代派生，
+# 端点自有码取 _ENDPOINT_OWN_ERRORS 定义，撞键在导入期 fail-fast；表外类型经
+# _error_status 回 502。
+ERROR_TYPE_STATUS: dict[str, int] = _merge_error_type_status(
+    _profile_error_status(),
+    {error.type: error.http_status for error in _ENDPOINT_OWN_ERRORS},
+)
+
+
+def flat_error_json(error: WebErrorInfo) -> JSONResponse:
+    """扁平错误信封响应，形态与传输层中间件一致，状态码随错误定义携带。"""
     return JSONResponse(
-        {"error": error, "error_description": description},
-        status_code=status,
+        {"error": error.type, "error_description": error.message},
+        status_code=error.http_status,
         headers=WEB_JSON_HEADERS,
     )
 
 
-def cpu_pool_closed_json() -> JSONResponse:
-    """CPU 卸载池关闭窗口的服务不可用响应，请求体解析与结构化序列化共用。
-
-    池关闭属退出清理与服务并发的窗口，是服务端不可用而非请求或结果缺陷。
-    """
-    return error_json("service_unavailable", "CPU 卸载线程池已关闭，服务不可用", 500)
+def _error_status(error_type: str | None) -> int:
+    """错误类型经状态映射表取 HTTP 状态码，缺失或未知类型缺省 502。"""
+    return ERROR_TYPE_STATUS.get(error_type or "", 502)
 
 
-async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSONResponse | None]:
-    """解析请求体为 JSON 对象，解析失败或形态不符时返回 400 错误响应。
+def endpoint_error_json(error: WebErrorInfo) -> JSONResponse:
+    """端点自有错误的结构化子对象信封，error 子对象与结构化负载同形，状态码随错误定义携带。"""
+    return JSONResponse(
+        {"success": False, "error": build_error_dict(error.type, error.message)},
+        status_code=error.http_status,
+        headers=WEB_JSON_HEADERS,
+    )
+
+
+async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], WebErrorInfo | None]:
+    """解析请求体为 JSON 对象，失败时返回 WebErrorInfo 由调用方包装为各自端点的结构化错误响应。
 
     解析成本随参考图体积线性增长，达到下沉尺寸阈值的卸载长时 CPU 专用池，低于
-    阈值同步执行；池关闭取消排队解析时返回 500 服务不可用响应，生成与图库端点
+    阈值同步执行；池关闭取消排队解析归 service_unavailable 500，生成与图库端点
     共用同一口径。
     """
     raw_body = await request.body()
     try:
         body = await load_json_bytes(raw_body)
     except CpuOffloadPoolClosedError:
-        return {}, cpu_pool_closed_json()
+        return {}, SERVICE_UNAVAILABLE_INFO
     # 深嵌套触发 RecursionError，超长整数字面量抛非 JSONDecodeError 的 ValueError，同归 400。
     except (ValueError, RecursionError) as exc:
-        return {}, error_json("invalid_json", f"请求体不是合法 JSON: {exc}", 400)
+        return {}, INVALID_JSON_INFO._replace(message=f"{INVALID_JSON_INFO.message}: {exc}")
     if not isinstance(body, dict):
-        return {}, error_json("invalid_request", "请求体须为 JSON 对象", 400)
+        return {}, INVALID_REQUEST_INFO
     return body, None
 
 
-def validation_error_json(exc: ValidationError) -> JSONResponse:
-    """把 pydantic 校验失败格式化为统一的首个错误描述响应。"""
-    return error_json("invalid_request", validation_error_user_message(exc), 400)
+def invalid_path_error(exc: ValueError) -> WebErrorInfo:
+    """路径校验拒绝的 WebErrorInfo，拒绝原因透传校验异常的文案。"""
+    return INVALID_PATH_INFO._replace(message=str(exc))
 
 
-def images_root_unavailable(exc: Exception) -> JSONResponse:
-    """把图片目录解析失败包装为携带配置指引的 400 响应。"""
+def images_root_unavailable_error(exc: Exception) -> WebErrorInfo:
+    """图片目录解析失败的 WebErrorInfo，携带配置指引，生成、图库与文件端点共用。"""
     message = getattr(exc, "message", None) or str(exc)
-    return error_json(
-        "images_root_unavailable",
-        f"无法确定图片目录: {message}；可配置 {READ_SCOPE_AUTH_ENV_HINT}",
-        400,
+    return IMAGES_ROOT_UNAVAILABLE_INFO._replace(
+        message=f"{IMAGES_ROOT_UNAVAILABLE_INFO.message}: {message}；可配置 {READ_SCOPE_AUTH_ENV_HINT}"
     )
 
 
-async def resolve_web_images_root() -> Path | JSONResponse:
-    """解析图片目录，含文件系统的解析下沉工作线程；不可解析时返回 400 响应。"""
+async def resolve_web_images_root() -> Path | WebErrorInfo:
+    """解析图片目录，含文件系统的解析下沉工作线程；不可解析时返回 WebErrorInfo。"""
     try:
         return await asyncio.to_thread(resolve_images_root)
     except SeedreamConfigError as exc:
-        return images_root_unavailable(exc)
+        return images_root_unavailable_error(exc)
+
+
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+async def entry_preamble(
+    request: Request, tool_name: str, model_cls: type[_ModelT]
+) -> tuple[_ModelT, Path] | Response:
+    """生成与图库入口的序言脚手架：请求体解析、输入模型校验与图片目录解析。
+
+    早期失败统一回绑定 tool_name 的结构化错误响应，两端错误形态单点维护；
+    校验对含大体积参考图的请求体是线性 CPU 工作，与解析同批下沉工作线程。
+    """
+    body, parse_failure = await parse_json_object_body(request)
+    if parse_failure is not None:
+        return await parse_failure.as_response(tool_name)
+    try:
+        params = await asyncio.to_thread(model_cls.model_validate, body)
+    except ValidationError as exc:
+        return await respond_structured_error(
+            tool_name, "validation_error", validation_error_user_message(exc)
+        )
+    images_root = await resolve_web_images_root()
+    if isinstance(images_root, WebErrorInfo):
+        return await images_root.as_response(tool_name)
+    return params, images_root
 
 
 def structured_error_type(structured: dict[str, object]) -> str | None:
@@ -133,17 +242,43 @@ def structured_error_type(structured: dict[str, object]) -> str | None:
     return None
 
 
-def generation_status(structured: dict[str, object]) -> int:
-    """按结构化结果的错误类型映射 HTTP 状态码。"""
-    error_type = structured_error_type(structured)
-    if error_type is None:
-        return 502
-    return GENERATION_ERROR_STATUS.get(error_type, 502)
+def structured_status(structured: dict[str, object]) -> int:
+    """按结构化结果的错误类型经单源映射取 HTTP 状态码，生成与图库端点共用。"""
+    return _error_status(structured_error_type(structured))
 
 
-def browse_status(structured: dict[str, object]) -> int:
-    """图库结构化结果的错误类型映射，validation_error 归 400 其余归 500。"""
-    return 400 if structured_error_type(structured) == "validation_error" else 500
+async def runner_result_payload(tool_name: str, result: CallToolResult) -> dict[str, object]:
+    """归位 runner 结果的结构化负载，is_error 而错误类型不可判时合成 internal_error。
+
+    进入合成即记 warning，internal_error 文案的「详情见日志」须有真实落点。dict
+    负载保留原顶层字段：error 为 dict 时仅补 type，保住上游 message/code 等诊断键；
+    error 缺失或非 dict 时插入或替换 internal_error 错误对象。非 dict 负载整体合成。
+    """
+    structured = result.structured_content
+    if result.is_error and not (
+        isinstance(structured, dict) and structured_error_type(structured) is not None
+    ):
+        logger.warning(
+            "Web 端点 {} 的 runner 失败结果错误类型不可判，合成 internal_error，原负载: {!r}",
+            tool_name,
+            structured,
+        )
+        if not isinstance(structured, dict):
+            return build_error_structured(
+                tool_name, INTERNAL_ERROR_INFO.type, INTERNAL_ERROR_INFO.message
+            )
+        synthesized = dict(structured)
+        error = synthesized.get("error")
+        if isinstance(error, dict):
+            synthesized["error"] = {**error, "type": INTERNAL_ERROR_INFO.type}
+        else:
+            synthesized["error"] = build_error_dict(
+                INTERNAL_ERROR_INFO.type, INTERNAL_ERROR_INFO.message
+            )
+        return synthesized
+    if not isinstance(structured, dict):
+        structured = {}
+    return structured
 
 
 async def respond_structured_json(structured: dict[str, object], status: int) -> Response:
@@ -154,13 +289,20 @@ async def respond_structured_json(structured: dict[str, object], status: int) ->
         else:
             payload = dump_strict_json_bytes(structured)
     except CpuOffloadPoolClosedError:
-        return cpu_pool_closed_json()
+        # 池关闭兜底无工具名可构完整结构化结果，回与传输层中间件同形的扁平错误。
+        return flat_error_json(SERVICE_UNAVAILABLE_INFO)
     return Response(
         content=payload,
         media_type="application/json",
         status_code=status,
         headers=WEB_JSON_HEADERS,
     )
+
+
+async def respond_structured_error(tool_name: str, error_type: str, message: str) -> Response:
+    """经输出族映射构造失败结构化结果并回 JSON 响应，状态码按状态表查得。"""
+    structured = build_error_structured(tool_name, error_type, message)
+    return await respond_structured_json(structured, _error_status(error_type))
 
 
 def converge_path_entry(

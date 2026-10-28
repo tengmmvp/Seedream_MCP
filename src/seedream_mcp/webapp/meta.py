@@ -18,13 +18,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from ..config import get_active_config
+from ..definitions.conventions import MAX_PARALLEL_REQUEST_COUNT, MAX_SEQUENTIAL_TOTAL_IMAGES
 from ..utils.core.sanitizers import CONTROL_CHARS_PATTERN
 from ..utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
 from ..utils.core.logs import get_logger
-from ..utils.core.validators import (
-    MAX_PARALLEL_REQUEST_COUNT,
-    MAX_SEQUENTIAL_TOTAL_IMAGES,
-)
 from ..utils.io.files import SymlinkRejectedError, open_packaged_read
 from ..utils.model.capabilities import (
     MODEL_FAMILY_UNKNOWN,
@@ -152,7 +149,9 @@ async def _serve_static_page(
         opened = await asyncio.to_thread(_open_static_page, page)
     except PermissionError as exc:
         # 与 files 图片打开失败同口径：不可读归 500 诊断响应，不并入降级文案。
-        return _responses.error_json("page_open_failed", f"页面打开失败: {exc}", 500)
+        return _responses.flat_error_json(
+            _responses.WebErrorInfo("page_open_failed", f"页面打开失败: {exc}", 500)
+        )
     if isinstance(opened, _StaticPageOpenFailure):
         _warn_static_page_degraded(page, opened)
         if opened.missing or unavailable_text is None:
@@ -214,7 +213,7 @@ async def web_not_found(request: Request) -> Response:
             )
             return RedirectResponse(location, status_code=307)
     if path == WEB_API_PREFIX or path.startswith(WEB_API_PREFIX + "/"):
-        return _responses.error_json("not_found", "接口不存在", 404)
+        return _responses.flat_error_json(_responses.API_NOT_FOUND_INFO)
     # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
     page = constants.STATIC_DIR / "404.html"
     # 兜底文案只陈述 404 结果，不携带页面状态断言，两类降级原因共用不分档。
@@ -229,15 +228,15 @@ async def web_root_redirect(_request: Request) -> Response:
 async def web_config_info(_request: Request) -> Response:
     """返回前端所需的模型能力、默认值与图片目录可用性。
 
-    图片目录解析经 _responses.resolve_web_images_root 与 gallery、generate 域同契约；
-    仅回传可用性布尔，不向浏览器泄露服务器绝对路径；不可用时前端在图库区
-    给出配置指引。unknown_max_reference_images 与 upload_budget_chars 使前端的
-    未知模型参考图上限和上传预算预检与后端配置单一来源。响应附
-    cache-control: no-store，兼作鉴权探测端点的状态不落代理缓存。
+    图片目录解析经 _responses.resolve_web_images_root 与图库、生成端点同契约；
+    仅回传可用性布尔，不向浏览器泄露服务器绝对路径；
+    不可用时前端在图库区给出配置指引。
+    unknown_max_reference_images 与 upload_budget_chars 使前端的未知模型参考图上限和上传预算预检与后端配置单一来源；
+    响应附 cache-control: no-store，兼作鉴权探测端点的状态不落代理缓存。
     """
     config = get_active_config()
     resolved = await _responses.resolve_web_images_root()
-    images_root_available = not isinstance(resolved, JSONResponse)
+    images_root_available = not isinstance(resolved, _responses.WebErrorInfo)
     return JSONResponse(
         {
             "model_id": config.model_id,
