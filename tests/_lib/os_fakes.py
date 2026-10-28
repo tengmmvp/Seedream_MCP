@@ -121,13 +121,24 @@ def _install_gated_path_replace(
     return replace_running, replace_release
 
 
-def _install_failing_resolve_for(monkeypatch: pytest.MonkeyPatch, *names: str) -> dict[str, int]:
-    """monkeypatch Path.resolve 为指定文件名抛瞬时 OSError 的替身，返回按名失败计数。"""
+class _GatedFailureCounts(dict[str, int]):
+    """按名失败计数，附 active 门：置 False 后指定名恢复透传真实 resolve。"""
+
+    active: bool = True
+
+
+def _install_failing_resolve_for(
+    monkeypatch: pytest.MonkeyPatch, *names: str
+) -> _GatedFailureCounts:
+    """monkeypatch Path.resolve 为指定文件名抛瞬时 OSError 的替身，返回按名失败计数。
+
+    计数对象的 active 门置 False 后同名不再抛错，供停滞谱系用例运行中翻转。
+    """
     real_resolve = Path.resolve
-    failure_counts: dict[str, int] = {}
+    failure_counts = _GatedFailureCounts()
 
     def _failing_resolve(self: Path, strict: bool = False) -> Path:
-        if self.name in names:
+        if failure_counts.active and self.name in names:
             failure_counts[self.name] = failure_counts.get(self.name, 0) + 1
             raise OSError("temporarily locked")
         return real_resolve(self, strict=strict)

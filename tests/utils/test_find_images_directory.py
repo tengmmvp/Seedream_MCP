@@ -20,7 +20,11 @@ import pytest
 
 import seedream_mcp.utils.io.scan as scan_module
 from _lib.log_fakes import capture_loguru_messages
-from _lib.os_fakes import _install_counting_normcase_parts, _install_failing_resolve_for
+from _lib.os_fakes import (
+    _GatedFailureCounts,
+    _install_counting_normcase_parts,
+    _install_failing_resolve_for,
+)
 from _lib.scan_fakes import _scan_entry
 from seedream_mcp.utils.io.files import has_reparse_attribute
 from seedream_mcp.utils.io.path import ResolveResultCache, normcase_parts
@@ -87,6 +91,13 @@ def _advance_past_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
     ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
     base = time.monotonic()
     monkeypatch.setattr(time, "monotonic", lambda: base + ttl + 1)
+
+
+def _install_steppable_monotonic(monkeypatch: pytest.MonkeyPatch) -> dict[str, float]:
+    """可步进的单调时钟：永久停滞重探按条目捕获时间判定，须以亚 TTL 粒度推进。"""
+    clock = {"now": time.monotonic()}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    return clock
 
 
 def test_limit_returns_sorted_prefix_not_creation_order(tmp_path: Path) -> None:
@@ -1114,6 +1125,258 @@ def test_cached_find_stall_detected_on_first_extension_round(
         scan_module.reset_directory_scan_cache()
 
 
+def test_scan_result_as_permanent_preserves_fields_and_lifts_streak() -> None:
+    """as_permanent 为确定性停滞提供保字段的单点永久态升级，替代消费方伪造 streak。"""
+    base = scan_module.ScanResult(
+        images=[_scan_entry(Path("dir/a.png"))],
+        complete=False,
+        incomplete_cause=scan_module.ScanIncompleteCause.STALLED,
+        skipped_count=2,
+        excluded_count=3,
+        stall_streak=1,
+    )
+
+    upgraded = base.as_permanent()
+
+    assert upgraded is not base
+    assert upgraded.stall_permanent is True
+    assert upgraded.stall_streak == scan_module.STALL_PERMANENT_STREAK_THRESHOLD
+    assert upgraded.images == base.images
+    assert upgraded.incomplete_cause is base.incomplete_cause
+    assert upgraded.complete is base.complete
+    assert upgraded.skipped_count == 2
+    assert upgraded.excluded_count == 3
+
+    # 谱系已超阈值时升级不回退计数。
+    beyond = scan_module.ScanResult(
+        images=[],
+        complete=False,
+        incomplete_cause=scan_module.ScanIncompleteCause.STALLED,
+        stall_streak=scan_module.STALL_PERMANENT_STREAK_THRESHOLD + 1,
+    ).as_permanent()
+    assert beyond.stall_streak == scan_module.STALL_PERMANENT_STREAK_THRESHOLD + 1
+
+
+def test_scan_result_rescan_futile_requires_truncation_without_skips() -> None:
+    """rescan_futile 由截断且零跳过派生：扩窗与负缓存到期均无从恢复，续扫必复现同一前沿。"""
+
+    def _result(
+        cause: scan_module.ScanIncompleteCause | None, skipped_count: int = 0
+    ) -> scan_module.ScanResult:
+        return scan_module.ScanResult(
+            images=[],
+            complete=cause is None,
+            incomplete_cause=cause,
+            skipped_count=skipped_count,
+        )
+
+    assert _result(scan_module.ScanIncompleteCause.TRUNCATED).rescan_futile is True
+
+    truncated_with_skips = _result(scan_module.ScanIncompleteCause.TRUNCATED, skipped_count=2)
+    assert truncated_with_skips.rescan_futile is False
+    assert _result(scan_module.ScanIncompleteCause.STALLED).rescan_futile is False
+    assert _result(scan_module.ScanIncompleteCause.SKIPPED, skipped_count=1).rescan_futile is False
+    assert _result(None).rescan_futile is False
+
+
+def _seed_permanent_stall_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, recursive: bool = False
+) -> tuple[list[int], _GatedFailureCounts, dict[str, float], Callable[..., Any]]:
+    """构造并推进到永久停滞阈值的扫描谱系，返回 (限额记录, resolve 故障开关, 可步进时钟, 扫描器)。
+
+    虚拟坏路径经确定性扫描器供给、resolve 按开关抛错；三次调用经 3→12、24→48、
+    96→192 的扩窗全程各判停一次把谱系推至阈值，坏路径量须超过末轮窗口与后续
+    重探扩窗全程才不中途扫尽。recursive 控制 freshness 基准：True 走 TTL 失效，
+    供跨 TTL 谱系延续用例取用。
+    """
+    bad_names = [f"z_bad{index:03d}.png" for index in range(800)]
+    all_paths = [tmp_path / "a.png", *(tmp_path / name for name in bad_names)]
+    failures = _install_failing_resolve_for(monkeypatch, *bad_names)
+    limits: list[int] = []
+
+    def _deterministic_scan(**kwargs: Any) -> list[Path]:
+        limit = kwargs["limit"]
+        limits.append(limit)
+        return all_paths[:limit]
+
+    clock = _install_steppable_monotonic(monkeypatch)
+    scan_module.reset_directory_scan_cache()
+    for _ in range(scan_module.STALL_PERMANENT_STREAK_THRESHOLD):
+        _scan_state(
+            tmp_path, recursive=recursive, max_depth=1, scan_limit=3, scanner=_deterministic_scan
+        )
+    return limits, failures, clock, _deterministic_scan
+
+
+def test_cached_find_permanent_stall_replays_frozen_window_without_rescan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """谱系达阈值后重探窗口内的后续调用零 scanner 调用，回放冻结窗且成因与谱系保持。"""
+    limits, _, clock, deterministic_scan = _seed_permanent_stall_lineage(tmp_path, monkeypatch)
+    try:
+        # 三次判停调用经 3→12、24→48、96→192 扩窗全程把谱系推至阈值。
+        assert limits == [3, 6, 12, 24, 48, 96, 192]
+
+        # 回放间步进时钟累计条目年龄：回放不得刷新捕获时间，否则重探永不触发。
+        for _ in range(3):
+            clock["now"] += 3.0
+            replay = _scan_state(
+                tmp_path, recursive=False, max_depth=1, scan_limit=3, scanner=deterministic_scan
+            )
+            assert [entry.resolved_path.name for entry in replay.images] == ["a.png"]
+            assert replay.complete is False
+            assert replay.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
+            assert replay.stall_streak == scan_module.STALL_PERMANENT_STREAK_THRESHOLD
+            assert replay.stall_permanent is True
+            assert replay.skipped_count == 191
+        assert limits == [3, 6, 12, 24, 48, 96, 192], "重探窗口内的命中不得触发扩窗重扫"
+
+        # 累计年龄 9s 再 +10s 越过重探间隔，下一调用必须真实重探并接续谱系。
+        clock["now"] += 10.0
+        reprobed = _scan_state(
+            tmp_path, recursive=False, max_depth=1, scan_limit=3, scanner=deterministic_scan
+        )
+        assert limits[-2:] == [384, 768], "累计年龄越过重探间隔仍未真实重探（回放误刷新条目年龄）"
+        assert reprobed.stall_streak == scan_module.STALL_PERMANENT_STREAK_THRESHOLD + 1
+        assert reprobed.stall_permanent is True
+    finally:
+        scan_module.reset_directory_scan_cache()
+
+
+def test_cached_find_permanent_stall_reprobes_after_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """时钟推过重探间隔即付一次真实扩窗重扫：仍停滞同量则谱系递增、条目刷新后再回放。"""
+    limits, _, clock, deterministic_scan = _seed_permanent_stall_lineage(tmp_path, monkeypatch)
+    try:
+        clock["now"] += scan_module._STALL_REPROBE_INTERVAL_SECONDS + 1.0
+        baseline = len(limits)
+
+        reprobed = _scan_state(
+            tmp_path, recursive=False, max_depth=1, scan_limit=3, scanner=deterministic_scan
+        )
+        # 重探自冻结窗推导基数 192 倍增至 384，仍两轮零新增判停，谱系接续递增。
+        assert limits[baseline:] == [384, 768]
+        assert reprobed.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
+        assert reprobed.stall_streak == scan_module.STALL_PERMANENT_STREAK_THRESHOLD + 1
+
+        # 条目重写刷新捕获时间，重探窗口随之重置：其后调用回到零扫描回放。
+        replay = _scan_state(
+            tmp_path, recursive=False, max_depth=1, scan_limit=3, scanner=deterministic_scan
+        )
+        assert replay.stall_streak == scan_module.STALL_PERMANENT_STREAK_THRESHOLD + 1
+        assert limits[baseline:] == [384, 768]
+    finally:
+        scan_module.reset_directory_scan_cache()
+
+
+def test_cached_find_permanent_stall_survives_ttl_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """永久停滞标记跨 TTL 不翻转回瞬时：过期未逐出的条目谱系照常接续。"""
+    limits, _, clock, deterministic_scan = _seed_permanent_stall_lineage(
+        tmp_path, monkeypatch, recursive=True
+    )
+    try:
+        # 递归条目仅按 TTL 失效，空闲越过 TTL 后条目过期、必落真实重扫。
+        clock["now"] += scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS + 1.0
+        baseline = len(limits)
+
+        expired = _scan_state(
+            tmp_path, recursive=True, max_depth=1, scan_limit=3, scanner=deterministic_scan
+        )
+
+        # 过期重扫自请求量从零扩窗判停，谱系自过期条目接续递增而非从 1 重计。
+        assert limits[baseline:] == [3, 6, 12]
+        assert expired.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
+        assert expired.stall_streak == scan_module.STALL_PERMANENT_STREAK_THRESHOLD + 1
+        assert expired.stall_permanent is True
+    finally:
+        scan_module.reset_directory_scan_cache()
+
+
+def test_cached_find_permanent_stall_recovers_when_bad_segment_resolves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重探时坏段恢复（resolve 不再抛错）则首窗取足配额：窗口增长、谱系归零、无停滞标记。"""
+    limits, failures, clock, deterministic_scan = _seed_permanent_stall_lineage(
+        tmp_path, monkeypatch
+    )
+    try:
+        failures.active = False
+        clock["now"] += scan_module._STALL_REPROBE_INTERVAL_SECONDS + 1.0
+        baseline = len(limits)
+
+        recovered = _scan_state(
+            tmp_path, recursive=False, max_depth=1, scan_limit=3, scanner=deterministic_scan
+        )
+        # 重探扩窗自 384 起，坏段恢复后首窗 384 条全部可解析，远超配额即非停滞出口。
+        assert limits[baseline:] == [384]
+        assert len(recovered.images) == 384
+        assert recovered.incomplete_cause is None
+        assert recovered.stall_streak == 0
+        assert recovered.stall_permanent is False
+    finally:
+        scan_module.reset_directory_scan_cache()
+
+
+def test_cached_find_permanent_stall_replay_released_for_larger_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """更大 scan_limit 的请求不被冻结回放拦截：扩窗跨过坏段取到其后好图并归零谱系。
+
+    冻结回放若无请求范围判定，范围更大的请求被短窗截住，坏段之后的条目在重探间隔内不可达；
+    放行判定按推导原始扫描量与请求量比较，范围更大即落回扩窗。
+    """
+    good_first = tmp_path / "0_good.png"
+    bad_names = [f"1_bad{index:03d}.png" for index in range(800)]
+    good_last = tmp_path / "2_good.png"
+    all_paths = [good_first, *(tmp_path / name for name in bad_names), good_last]
+    _install_failing_resolve_for(monkeypatch, *bad_names)
+    limits: list[int] = []
+
+    def _deterministic_scan(**kwargs: Any) -> list[Path]:
+        limit = kwargs["limit"]
+        limits.append(limit)
+        return all_paths[:limit]
+
+    scan_module.reset_directory_scan_cache()
+    try:
+        # 三次调用经 3→12、24→48、96→192 扩窗全程各判停一次，谱系推至永久阈值。
+        for _ in range(scan_module.STALL_PERMANENT_STREAK_THRESHOLD):
+            _scan_state(
+                tmp_path, recursive=False, max_depth=1, scan_limit=3, scanner=_deterministic_scan
+            )
+        assert limits == [3, 6, 12, 24, 48, 96, 192]
+
+        # 范围内的重复请求照常冻结回放，不触发扩窗重扫。
+        replay = _scan_state(
+            tmp_path, recursive=False, max_depth=1, scan_limit=3, scanner=_deterministic_scan
+        )
+        assert replay.stall_permanent is True
+        assert limits == [3, 6, 12, 24, 48, 96, 192]
+
+        # scan_limit=1000 超出冻结窗推导原始扫描量 192：跳过回放，扩窗跨过坏段取到末位好图并扫到目录末尾，谱系随非停滞出口归零。
+        released = _scan_state(
+            tmp_path, recursive=False, max_depth=1, scan_limit=1000, scanner=_deterministic_scan
+        )
+        assert [entry.resolved_path.name for entry in released.images] == [
+            "0_good.png",
+            "2_good.png",
+        ]
+        assert released.complete is True
+        assert released.stall_streak == 0
+        assert released.stall_permanent is False
+        assert limits[-1] == 1000
+    finally:
+        scan_module.reset_directory_scan_cache()
+
+
 def test_cached_find_scan_exhausted_false_on_truncation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1572,10 +1835,12 @@ def test_cached_find_include_predicate_stall_zero_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """谓词剔除一切且扩窗零新增时按与 resolve 剔除同一判停口径报 STALLED。
+    """谓词剔除一切且扩窗零新增时按与 resolve 剔除同一判停口径报 STALLED，
+    且确定性停滞首答即升永久、第 2 次调用直接冻结窗回放不付扩窗重扫。
 
     配额按满足谓词的条目计，停滞检测同样以谓词满足量为进展度量，两层增长
-    与判停语义合一后调用方不再需要自判停滞。
+    与判停语义合一后调用方不再需要自判停滞；全窗剔除的停滞无 resolve 失败，
+    读范围不随重试变化，原地重扫必复现同一空窗，升级随缓存条目持久化。
     """
     for index in range(12):
         (tmp_path / f"img_{index:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -1588,7 +1853,7 @@ def test_cached_find_include_predicate_stall_zero_progress(
         return original_scan(**kwargs)
 
     try:
-        result = scan_module.cached_find_images_in_directory(
+        first = scan_module.cached_find_images_in_directory(
             resolved_dir=tmp_path,
             recursive=False,
             max_depth=1,
@@ -1598,10 +1863,26 @@ def test_cached_find_include_predicate_stall_zero_progress(
             include=lambda entry: False,
             scope_signature="scope-a",
         )
-        assert result.images == []
-        assert result.complete is False
-        assert result.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
+        assert first.images == []
+        assert first.complete is False
+        assert first.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
+        assert first.stall_streak == scan_module.STALL_PERMANENT_STREAK_THRESHOLD
+        assert first.stall_permanent is True
         assert limits == [3, 6, 12]
+
+        second = scan_module.cached_find_images_in_directory(
+            resolved_dir=tmp_path,
+            recursive=False,
+            max_depth=1,
+            format_filter=None,
+            scan_limit=3,
+            scanner=_limit_recording_scan,
+            include=lambda entry: False,
+            scope_signature="scope-a",
+        )
+        assert second.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
+        assert second.stall_permanent is True
+        assert limits == [3, 6, 12], "首答永久后第 2 次调用不得再付扩窗重扫"
     finally:
         scan_module.reset_directory_scan_cache()
 

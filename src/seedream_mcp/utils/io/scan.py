@@ -10,7 +10,11 @@ resolve 失败剔除不折损早停事实，不完整成因（截断/停滞/剔�
 由本层单点归一并随缓存条目回放，resolve 剔除数经 skipped_count
 随结果外传；resolve 剔除缩短的窗口由本层倍增扩窗跨过坏段，
 扩窗有进展时未扫尽且未截断即返回条目不少于请求量，
-连续两轮翻倍零新增可解析条目才判停，有限坏段由次轮扩窗跨过；
+连续两轮翻倍零新增可解析条目才判停，有限坏段由次轮扩窗跨过，
+停滞谱系随缓存条目跨调用累计零进展次数（条目过期未逐出照常接续），非停滞出口归零、
+停滞条目量变化从 1 重计，谱系达阈值按永久处理并以 stall_permanent 外传；全窗条目均
+被谓词剔除且无 resolve 失败的停滞为确定性重试复现，首答即升永久并随缓存条目持久化；
+重探间隔内扫描范围不超冻结窗覆盖量的命中直接回放冻结窗，免注定原地复现的扩窗重扫；
 前缀扩展的基数同样取原始扫描量，持续 resolve 失败缩短的缓存列表不使扩展停摆。
 调用方 include 谓词的条目剔除与 resolve 剔除同口径进入配额与扩窗判定，
 配额按满足谓词的可解析条目计、增长与停滞语义由本层单点拥有；
@@ -77,6 +81,9 @@ _SCAN_PREFIX_GROWTH_FACTOR = 2
 # 扩窗判停的连续零进展轮数：连续两轮翻倍无新增可解析条目才判停，
 # 恰占满扩展窗的有限坏段由次轮扩窗跨过，真停滞目录多付一轮翻倍扫描。
 _SCAN_STALL_ZERO_PROGRESS_ROUNDS = 2
+# 停滞谱系达阈值按永久处理：命中回放冻结窗，仅按重探间隔付一次扩窗重扫；
+# 谱系计数容忍线程竞态欠计，仅影响永久态收敛时序。
+STALL_PERMANENT_STREAK_THRESHOLD = 3
 
 # raw→ScanEntry 的进程级复用缓存，TTL 过期重扫免逐文件重复 resolve 与分量
 # 重建，扩窗重扫的已缓存条目零重算；缓存值同时供回显与读权限判定消费，
@@ -96,6 +103,8 @@ _RESOLVE_FAILURE_TTL_SECONDS = 15.0
 _SCAN_RESOLVE_FAILURE_CACHE = ResolveResultCache[bool](
     _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN, ttl_seconds=_RESOLVE_FAILURE_TTL_SECONDS
 )
+# 永久停滞重探间隔绑定负缓存 TTL：到期前重探仍被负缓存略过，注定原地复现冻结窗。
+_STALL_REPROBE_INTERVAL_SECONDS = _RESOLVE_FAILURE_TTL_SECONDS
 
 
 class ScanIncompleteCause(enum.Enum):
@@ -132,6 +141,16 @@ class ScanResult:
             或负缓存剔除的条目数，供调用方推导可见条目与目录实际条目的差额。
         excluded_count: 同一窗口内被 include 谓词剔除的条目数；扩窗各轮窗口为
             前轮超集，最终轮计数即全程去重总量，命中回放按考查前缀计。
+        stall_streak: 同一缓存谱系内连续零进展停滞的累计次数：
+            相邻两次停滞的配额口径条目量相同即递增，条目量变化则从 1 重计，非停滞出口
+            归零，确定性停滞经 as_permanent 升至永久阈值；随缓存条目回放，供本层判定
+            冻结窗回放。
+        stall_permanent: 谱系达 STALL_PERMANENT_STREAK_THRESHOLD 的永久态标记，
+            由 stall_streak 派生的只读属性，消费方直接读取、不重推阈值；确定性
+            停滞经 as_permanent 升级路径置位。
+        rescan_futile: 截断且零跳过的徒劳重扫标记，由 incomplete_cause 与
+            skipped_count 派生的只读属性；该组合下扩窗与负缓存到期两条恢复
+            路径均不存在，续扫注定复现同一前沿。
     """
 
     images: list[ScanEntry]
@@ -139,6 +158,28 @@ class ScanResult:
     incomplete_cause: ScanIncompleteCause | None
     skipped_count: int = 0
     excluded_count: int = 0
+    stall_streak: int = 0
+
+    @property
+    def stall_permanent(self) -> bool:
+        """谱系达永久阈值的停滞标记，读取时由 stall_streak 派生。"""
+        return self.stall_streak >= STALL_PERMANENT_STREAK_THRESHOLD
+
+    @property
+    def rescan_futile(self) -> bool:
+        """截断且零跳过的徒劳重扫标记，读取时派生：扩窗与负缓存到期均无从恢复，续扫必复现同一前沿。"""
+        return self.incomplete_cause is ScanIncompleteCause.TRUNCATED and self.skipped_count == 0
+
+    def as_permanent(self) -> ScanResult:
+        """返回按永久停滞计的副本，其余字段原样保留，谱系计数不因升级回退。
+
+        供确定性停滞（读范围不随重试变化的重试复现）单点升级永久态，
+        阈值知识不外泄给消费方。
+
+        Returns:
+            stall_streak 升至永久阈值的副本。
+        """
+        return replace(self, stall_streak=max(self.stall_streak, STALL_PERMANENT_STREAK_THRESHOLD))
 
 
 def _derive_incomplete_cause(
@@ -162,7 +203,7 @@ class _DirectoryScanCacheEntry:
         mtime_ns: 非递归扫描捕获的目录 mtime 指纹，递归扫描为 None 改用 TTL 失效。
         settled: 非递归扫描捕获时目录 mtime 已静止超 FAT 时间戳粒度窗口的标记，
             mtime 未变即永久新鲜；递归条目恒 False，仅按 TTL 失效。
-        captured_at: 缓存写入时的单调时钟时间戳，供 TTL 失效判定。
+        captured_at: 缓存写入时的单调时钟时间戳，供 TTL 失效与永久停滞重探窗口判定。
         result: 最近一次扫描的冻结结果，images 为未过滤的 resolved 窗口，resolve
             在扫描完成时执行一次并随条目缓存，可能为目录末尾前的前缀；complete
             恒按原始扫描量取值，条目预算截断的扫描不标记 complete，确保后续更大
@@ -171,6 +212,8 @@ class _DirectoryScanCacheEntry:
             len(result.images) + result.skipped_count 推导的原始扫描量。
         unreadable_dirs: 本次扫描中因权限或系统错误无法读取的目录列表，随条目缓存，
             缓存命中时同样透传给调用方。
+        stalled_included_count: 最近一次停滞结果的配额口径条目量，非停滞出口为
+            None；跨调用零进展判定以它为对照基线，接续 result.stall_streak。
     """
 
     mtime_ns: int | None
@@ -178,6 +221,7 @@ class _DirectoryScanCacheEntry:
     captured_at: float
     result: ScanResult
     unreadable_dirs: list[Path]
+    stalled_included_count: int | None = None
 
 
 def reset_directory_scan_cache() -> None:
@@ -273,6 +317,7 @@ def _store_scan_entry(
     settled: bool,
     unreadable_dirs: list[Path],
     result: ScanResult,
+    stalled_included_count: int | None,
 ) -> None:
     """写入扫描缓存，覆写已存在键时刷新 LRU 位，条目数超限时驱逐最近最少使用条目。"""
     if len(result.images) > _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN:
@@ -302,6 +347,7 @@ def _store_scan_entry(
         captured_at=time.monotonic(),
         result=result,
         unreadable_dirs=unreadable_dirs,
+        stalled_included_count=stalled_included_count,
     )
 
 
@@ -360,6 +406,10 @@ def cached_find_images_in_directory(
     skipped_count 之和），持续 resolve 失败缩短的缓存前缀不使扩展停摆；
     resolve 剔除使可解析条目短于请求量时同倍率扩窗重扫跨过坏段，扩窗有进展时
     未扫尽且未截断返回条目不少于请求量，连续两轮翻倍零新增可解析条目才判停；
+    全窗条目均被谓词剔除且无 resolve 失败的确定性停滞不等谱系 latch、首答即升
+    永久并随缓存条目持久化；停滞谱系达永久阈值且距捕获不足重探间隔、扫描范围
+    不超冻结窗覆盖量的命中回放冻结窗，
+    不付注定原地复现的扩窗重扫，间隔届满或请求范围更大时落回扩窗重扫并照常接续谱系；
     扫描到目录末尾即标记 complete，后续任意 scan_limit 均不再扫描。
     条目预算截断的扫描未到目录末尾，不按 complete 缓存，后续更大扫描可重新尝试。
     scanner 可注入，默认本模块的 find_images_in_directory。两个出口均返回独立副本，
@@ -396,7 +446,11 @@ def cached_find_images_in_directory(
         缓存命中回放条目的 complete 与 incomplete_cause，供调用方翻页判定；
         skipped_count 随结果与缓存条目透传窗口内 resolve 剔除数，不含谓词剔除；
         excluded_count 为窗口内谓词剔除数，扩窗各轮窗口为前轮超集，
-        计最终轮即全程去重总量，命中回放凑满即停、按考查前缀计。
+        计最终轮即全程去重总量，命中回放凑满即停、按考查前缀计；
+        stall_streak 为同谱系连续零进展停滞的累计次数，随缓存条目回放，
+        非停滞出口归零、停滞条目量变化从 1 重计，条目过期未逐出时谱系照常接续；
+        stall_permanent 由 stall_streak 达永久阈值派生（确定性停滞首答即升永久），
+        消费方直接读取、不重推阈值；rescan_futile 由截断且零跳过派生，同样直接读取。
 
     Raises:
         ValueError: include 非 None 而 scope_signature 为缺省空串，谓词派生
@@ -422,6 +476,8 @@ def cached_find_images_in_directory(
     # 停滞基线：未命中无前值可对照，-1 使首轮不可相等。
     previous_included = -1
     cached = _DIRECTORY_SCAN_CACHE.get(cache_key)
+    # 命中条目兼作停滞谱系对照：过期未逐出的条目照常接续谱系，永久标记不因 TTL
+    # 到期翻转回瞬时；条目被 LRU 逐出或重扫成功改写后即失去原谱系。
     if cached is not None and _is_scan_entry_fresh(cached, resolved_dir, recursive):
         # 命中刷新条目热度。本函数在工作线程执行，get 与 move_to_end 之间可被另一
         # 线程的驱逐 pop 移除该键，KeyError 静默放弃刷新，与 _store_scan_entry 的
@@ -434,16 +490,27 @@ def cached_find_images_in_directory(
         # 凑满 scan_limit 条即停，成本随配额而非缓存窗口规模放大，无谓词时
         # 全量浅拷贝维持翻页共享契约。
         hit_window, hit_excluded = _filter_included(cached.result.images, include, scan_limit)
-        if cached.result.complete or len(hit_window) >= scan_limit:
+        # 基数取推导的原始扫描量：images 与 skipped_count 之和还原 resolve 剔除前的扫描量，
+        # 按缩短后的 images 扩展过不了坏段。
+        raw_count = len(cached.result.images) + cached.result.skipped_count
+        # 完备或足量命中直接回放；永久停滞的扩窗重扫注定原地复现，重探间隔内请求范围
+        # 不超冻结窗覆盖量的命中同样回放冻结窗，不重写条目、不刷新 captured_at，
+        # 间隔届满或请求范围更大时落回下方扩窗重扫并照常接续谱系。
+        if (
+            cached.result.complete
+            or len(hit_window) >= scan_limit
+            or (
+                cached.result.stall_permanent
+                and scan_limit <= raw_count
+                and time.monotonic() - cached.captured_at < _STALL_REPROBE_INTERVAL_SECONDS
+            )
+        ):
+            # 回放仅替换为独立 images 与当次剔除数，终点与不完整信号随冻结结果原样透传。
             if unreadable_dirs is not None:
                 _extend_unique(unreadable_dirs, cached.unreadable_dirs)
-            # 回放仅替换为独立 images 与当次剔除数，终点与不完整信号随冻结结果原样透传。
             return replace(cached.result, images=hit_window, excluded_count=hit_excluded)
-        # 扩展量不受单条目列表上限约束：该上限只决定 _store_scan_entry 是否写入
-        # 缓存，若同时截断实际扫描量，超过上限的大目录深翻页会得到短页并被误判为
-        # 扫完全量。基数取推导的原始扫描量：images 与 skipped_count 之和
-        # 还原 resolve 剔除前的扫描量，按缩短后的 images 扩展过不了坏段。
-        raw_count = len(cached.result.images) + cached.result.skipped_count
+        # 扩展量不受单条目列表上限约束：该上限只决定 _store_scan_entry 是否写入缓存，
+        # 若同时截断实际扫描量，超过上限的大目录深翻页会得到短页并被误判为扫完全量。
         scan_limit = max(scan_limit, raw_count * _SCAN_PREFIX_GROWTH_FACTOR)
         # 停滞基线取缓存窗口的谓词满足量：扩窗首轮对照即计入零进展，免多烧一趟
         # 注定无果的加倍列举。
@@ -496,11 +563,31 @@ def cached_find_images_in_directory(
         # 足量契约由本层兑现。
         scan_limit *= _SCAN_PREFIX_GROWTH_FACTOR
     skipped_count = len(scanned_images) - len(resolved_entries)
+    stall_streak = 0
+    stalled_included_count: int | None = None
+    if stalled:
+        # 谱系接续：上次停滞的窗口同为该条目量即零进展递增，否则从 1 重计。
+        stalled_included_count = len(included_entries)
+        stall_streak = 1
+        if cached is not None and cached.stalled_included_count == stalled_included_count:
+            stall_streak = cached.result.stall_streak + 1
     incomplete_cause = _derive_incomplete_cause(
         truncated=scan_truncated,
         stalled=stalled,
         skipped_count=skipped_count,
     )
+    scan_result = ScanResult(
+        images=resolved_entries,
+        complete=complete,
+        incomplete_cause=incomplete_cause,
+        skipped_count=skipped_count,
+        stall_streak=stall_streak,
+    )
+    if stalled and not skipped_count and not included_entries:
+        # 全窗条目均被谓词剔除的停滞是确定性的：读范围不随重试变化，原地重扫必
+        # 复现同一空窗，立即升永久并随缓存条目持久化，重探窗口内免注定复现的
+        # 扩窗重扫，不等谱系三次 latch。
+        scan_result = scan_result.as_permanent()
     # 递归扫描靠 TTL 失效故总是缓存，mtime 字段留空且不沉淀；非递归仅在 stat 成功
     # 时缓存；条目恒存未过滤的 resolved 窗口，同读范围签名内共享。
     if recursive or base_mtime is not None:
@@ -509,22 +596,12 @@ def cached_find_images_in_directory(
             mtime_ns=base_mtime,
             settled=settled,
             unreadable_dirs=list(scan_unreadable),
-            result=ScanResult(
-                images=resolved_entries,
-                complete=complete,
-                incomplete_cause=incomplete_cause,
-                skipped_count=skipped_count,
-            ),
+            result=scan_result,
+            stalled_included_count=stalled_included_count,
         )
     if unreadable_dirs is not None:
         _extend_unique(unreadable_dirs, scan_unreadable)
-    return ScanResult(
-        images=included_entries,
-        complete=complete,
-        incomplete_cause=incomplete_cause,
-        skipped_count=skipped_count,
-        excluded_count=excluded_count,
-    )
+    return replace(scan_result, images=included_entries, excluded_count=excluded_count)
 
 
 def find_images_in_directory(
