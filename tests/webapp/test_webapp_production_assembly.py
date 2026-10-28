@@ -20,6 +20,7 @@ import pytest
 from _lib.cpu_offload_spy import CpuOffloadSpy
 from _lib.subprocess_helpers import _run_in_subprocess
 from _lib.web_fixtures import web_asgi_client, write_workspace_config
+from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.server.transport import _build_streamable_app
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.sanitizers import _CONTAINER_REPR_DEPTH_LIMIT
@@ -60,7 +61,8 @@ async def test_production_app_serves_web_console(
     info = api_response.json()
     assert info["images_root_available"] is True
     # 前端派生所需的字段齐备：未知模型档位与参考图上限与后端 unknown 家族同源，
-    # 数值上限与后端常量同源，上传预算与请求体上限同源，水印默认值与配置同源。
+    # 数值上限与后端常量同源，上传预算与请求体上限同源，水印默认值与配置同源；
+    # 生成等待预算由生成端点 preflight 按同一输入推导，原料不在本端点下发。
     assert info["fallback_presets"] == ["1K", "1.5K", "2K", "3K", "4K"]
     assert info["unknown_max_reference_images"] == 14
     assert info["upload_budget_chars"] == 61 * 1024 * 1024
@@ -70,6 +72,38 @@ async def test_production_app_serves_web_console(
     assert static_response.status_code == 200
     assert html_direct_response.status_code == 404
     assert missing_response.status_code == 404
+
+
+async def test_config_info_drops_generate_timeout_materials(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """config-info 不下发生成等待预算原料：预算由生成端点 preflight 按输入单源推导，防前端并存第二套推导。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    config = SeedreamConfig(
+        api_key="test_key",
+        workspace_root=str(tmp_path),
+    )
+    set_active_config(config)
+    app = _build_streamable_app("127.0.0.1", False, "", True)
+
+    async with web_asgi_client(app) as client:
+        response = await client.get("/web/api/config-info")
+
+    info = response.json()
+    assert info["auto_save_enabled"] is True
+    for removed in (
+        "generate_timeout_ms",
+        "api_retry_budget_ms",
+        "generate_wave_max_calls",
+        "generate_overhead_ms",
+        "generate_scheduling_budget_ms",
+        "auto_save_download_budget_ms",
+        "auto_save_max_concurrent",
+        "layer_decomposition_max_images",
+        "generate_max_images_per_request",
+    ):
+        assert removed not in info
 
 
 async def test_production_app_without_web_returns_404(

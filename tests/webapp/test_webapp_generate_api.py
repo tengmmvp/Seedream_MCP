@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
@@ -21,26 +22,44 @@ from starlette.requests import Request
 
 import seedream_mcp.server.runtime as runtime_module
 import seedream_mcp.server.transport as transport_module
-import seedream_mcp.utils.core.errors as errors_module
 from _lib.cpu_offload_spy import CpuOffloadSpy
 from _lib.generation_fixtures import _patch_client_method_spy
 from _lib.web_fixtures import (
+    _assert_endpoint_error,
+    _assert_structured_failure,
     build_web_app,
     make_images_root_unresolvable,
     web_asgi_client,
+    web_post_raw,
     write_workspace_config,
 )
 from seedream_mcp.config import (
     LIFESPAN_KEY_CLIENT,
     LIFESPAN_KEY_DOWNLOAD_MANAGER,
     SeedreamConfig,
+    get_active_config,
     set_active_config,
+)
+from seedream_mcp.definitions.conventions import (
+    MAX_LAYER_DECOMPOSITION_IMAGES,
+    TEXT_TO_IMAGE_TOOL_NAME,
 )
 import seedream_mcp.tools.outputs as outputs_module
 from seedream_mcp.tools.outputs.channels import output_channel_enabled
-from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
+from seedream_mcp.tools.pipeline import build_generation_context
+from seedream_mcp.tools.schemas import TextToImageInput
+from seedream_mcp.utils.core.errors import (
+    SeedreamConfigError,
+    SeedreamValidationError,
+)
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.loop_bound import loop_bound_semaphore
+from seedream_mcp.utils.core.retry_budget import api_retry_budget_seconds
+from seedream_mcp.utils.core.validators import (
+    resolve_sequential_max_images,
+    resolve_wave_divisor,
+)
+from seedream_mcp.utils.io.download import worst_case_download_budget_ms
 from seedream_mcp.webapp import _responses
 from seedream_mcp.webapp import generate as generate_module
 from seedream_mcp.webapp.context import build_web_request_context
@@ -97,14 +116,6 @@ async def _post_json(app: Any, path: str, body: dict[str, Any]) -> httpx.Respons
         return await client.post(path, json=body)
 
 
-async def _post_raw(app: Any, path: str, content: bytes) -> httpx.Response:
-    """以 application/json 原始请求体 POST 一次，供畸形 JSON 解析分支使用。"""
-    async with web_asgi_client(app) as client:
-        return await client.post(
-            path, content=content, headers={"content-type": "application/json"}
-        )
-
-
 def _install_second_entry_gated_parse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[list[int], asyncio.Event]:
@@ -152,6 +163,263 @@ async def test_generate_returns_structured_payload_with_web_path(
     entry = response.json()["data"][0]
     assert entry["web_path"] == "2026-08-20/text_to_image/a.png"
     assert entry["local_path"] == "2026-08-20/text_to_image/a.png"
+
+
+def _download_slots(config: SeedreamConfig) -> int:
+    """满载均分假设下单个生成请求分得的保存下载槽位数。"""
+    return math.ceil(config.auto_save_max_concurrent / config.generate_concurrency)
+
+
+async def test_generate_preflight_derives_timeout_without_running_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """preflight 按 query 投影推导等待预算并跳过生成执行，下载尾巴按并发折算。"""
+    write_workspace_config(tmp_path)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(generate_module, "run_text_to_image", _make_fake_runner(captured=calls))
+    app = build_web_app()
+    config = get_active_config()
+
+    response = await web_post_raw(
+        app, "/web/api/generate/text-to-image?preflight=1&request_count=2", b""
+    )
+
+    assert response.status_code == 200
+    budget_ms = generate_module._generate_scheduling_budget_ms(config, 2)
+    tail_ms = math.ceil(2 / _download_slots(config)) * worst_case_download_budget_ms(
+        config.auto_save_download_timeout, config.auto_save_max_retries
+    )
+    assert response.json() == {"success": True, "timeout_ms": budget_ms + tail_ms}
+    assert calls == []
+
+
+async def test_generate_preflight_explicit_parallelism_widens_waves(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """显式 parallelism 并入波次除数：串行档按逐请求一波推导，与缺省档区分。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+    config = get_active_config()
+    wave_budget_ms = int(api_retry_budget_seconds(config.api_timeout) * 1000)
+    default_waves = math.ceil(10 / resolve_wave_divisor(10, config.generate_concurrency))
+
+    default_response = await web_post_raw(
+        app, "/web/api/generate/text-to-image?preflight=1&download_tail=0&request_count=10", b""
+    )
+    serial_response = await web_post_raw(
+        app,
+        "/web/api/generate/text-to-image"
+        "?preflight=1&download_tail=0&request_count=10&parallelism=1",
+        b"",
+    )
+
+    assert default_response.json() == {
+        "success": True,
+        "timeout_ms": default_waves * wave_budget_ms + generate_module.GENERATE_OVERHEAD_MS,
+    }
+    assert serial_response.json() == {
+        "success": True,
+        "timeout_ms": 10 * wave_budget_ms + generate_module.GENERATE_OVERHEAD_MS,
+    }
+
+
+async def test_generate_preflight_folds_layer_and_sequential_image_counts(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """图层拆分按满额图片数、组图按参考图张数推导的生效值折算总下载数。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+    config = get_active_config()
+    per_download_ms = worst_case_download_budget_ms(
+        config.auto_save_download_timeout, config.auto_save_max_retries
+    )
+    budget_ms = generate_module._generate_scheduling_budget_ms(config, 1)
+
+    layer_response = await web_post_raw(
+        app, "/web/api/generate/image-to-image?preflight=1&layer_decomposition=1", b""
+    )
+    sequential_response = await web_post_raw(
+        app, "/web/api/generate/sequential-generation?preflight=1&image_count=3", b""
+    )
+
+    expected = {
+        "layer": budget_ms
+        + math.ceil(MAX_LAYER_DECOMPOSITION_IMAGES / _download_slots(config)) * per_download_ms,
+        "sequential": budget_ms
+        + math.ceil(resolve_sequential_max_images(None, 3) / _download_slots(config))
+        * per_download_ms,
+    }
+    assert layer_response.json()["timeout_ms"] == expected["layer"]
+    assert sequential_response.json()["timeout_ms"] == expected["sequential"]
+
+
+async def test_generate_preflight_clamps_malformed_projections(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """畸形投影取值经上下界钳位：image_count 封顶使预算恒正，layer_decomposition 仅 "1" 启用，0、空串与垃圾真值一律不启用。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+    config = get_active_config()
+    per_download_ms = worst_case_download_budget_ms(
+        config.auto_save_download_timeout, config.auto_save_max_retries
+    )
+    single_image_tail_ms = math.ceil(1 / _download_slots(config)) * per_download_ms
+    budget_ms = generate_module._generate_scheduling_budget_ms(config, 1)
+
+    sequential_response = await web_post_raw(
+        app, "/web/api/generate/sequential-generation?preflight=1&image_count=999", b""
+    )
+    layer_zero_response = await web_post_raw(
+        app, "/web/api/generate/image-to-image?preflight=1&layer_decomposition=0", b""
+    )
+    layer_empty_response = await web_post_raw(
+        app, "/web/api/generate/image-to-image?preflight=1&layer_decomposition=", b""
+    )
+    layer_garbage_response = await web_post_raw(
+        app, "/web/api/generate/image-to-image?preflight=1&layer_decomposition=true", b""
+    )
+    unparsable_response = await web_post_raw(
+        app, "/web/api/generate/text-to-image?preflight=1&request_count=abc", b""
+    )
+
+    # image_count=999 钳位到参考图上限 14，组图产图 15-14=1，负产图数不再推导负预算。
+    assert sequential_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
+    # layer_decomposition 仅 "1" 启用，0、空串与垃圾真值不触发 17 图满额下载尾巴。
+    assert layer_zero_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
+    assert layer_empty_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
+    assert layer_garbage_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
+    # request_count 不可解析回缺省 1，按单请求一波推导。
+    assert unparsable_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
+
+
+def test_parse_clamped_query_int_default_covers_missing_and_unparsable() -> None:
+    """解析器缺省参数对缺失与不可解析统一生效，调用侧不再二次缺省。"""
+    assert generate_module._parse_clamped_query_int(None, 1, 10, default=3) == 3
+    assert generate_module._parse_clamped_query_int("abc", 1, 10, default=3) == 3
+    assert generate_module._parse_clamped_query_int("99", 1, 10, default=3) == 10
+    assert generate_module._parse_clamped_query_int("2", 1, 10) == 2
+    assert generate_module._parse_clamped_query_int(None, 1, 10) is None
+
+
+async def test_generate_preflight_download_tail_tri_state_projection(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """download_tail 三态：0 与全局关闭（未显式 1）不含下载尾，显式 1 覆盖全局关闭计入。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+    config = get_active_config()
+    budget_ms = generate_module._generate_scheduling_budget_ms(config, 1)
+    tail_ms = math.ceil(1 / _download_slots(config)) * worst_case_download_budget_ms(
+        config.auto_save_download_timeout, config.auto_save_max_retries
+    )
+
+    skipped_response = await web_post_raw(
+        app, "/web/api/generate/text-to-image?preflight=1&download_tail=0", b""
+    )
+
+    set_active_config(
+        SeedreamConfig(api_key="test_key", workspace_root=str(tmp_path), auto_save_enabled=False)
+    )
+    disabled_response = await web_post_raw(app, "/web/api/generate/text-to-image?preflight=1", b"")
+    explicit_on_response = await web_post_raw(
+        app, "/web/api/generate/text-to-image?preflight=1&download_tail=1", b""
+    )
+
+    assert skipped_response.json() == {"success": True, "timeout_ms": budget_ms}
+    assert disabled_response.json() == {"success": True, "timeout_ms": budget_ms}
+    # 请求体显式 auto_save=true 投影为 download_tail=1：执行层仍会等下载，预算须计入尾巴。
+    assert explicit_on_response.json() == {"success": True, "timeout_ms": budget_ms + tail_ms}
+
+
+@pytest.mark.parametrize(
+    "explicit_auto_save", [None, True, False], ids=["default", "true", "false"]
+)
+@pytest.mark.parametrize("global_enabled", [True, False], ids=["global-on", "global-off"])
+def test_generate_preflight_download_tail_parity_with_pipeline_auto_save(
+    global_enabled: bool, explicit_auto_save: bool | None
+) -> None:
+    """预检 download_tail 三态投影与 pipeline auto_save 生效值合成 parity：同输入矩阵下两端判定一致。"""
+    config = SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-4-0-250828",
+        default_size="2K",
+        auto_save_enabled=global_enabled,
+    )
+    # 预检侧的合成结果经「是否计入下载尾巴」观测；query 投影按请求体显式值的三态构造，
+    # ASGI query_string 不含前导 "?"。
+    if explicit_auto_save is None:
+        query_string = b""
+    else:
+        query_string = b"download_tail=1" if explicit_auto_save else b"download_tail=0"
+    request = Request(
+        {"type": "http", "method": "POST", "headers": [], "query_string": query_string}
+    )
+
+    preflight_tail_included = generate_module._preflight_timeout_ms(
+        request, config, TEXT_TO_IMAGE_TOOL_NAME
+    ) > generate_module._generate_scheduling_budget_ms(config, 1)
+    context = build_generation_context(
+        TextToImageInput(prompt="parity", auto_save=explicit_auto_save), config
+    )
+
+    assert preflight_tail_included is context.enable_auto_save
+
+
+async def test_generate_preflight_ignores_request_body(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """预检不读请求体：非法 JSON 请求体不触发解析失败，仍按 query 投影回预算。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+    config = get_active_config()
+    budget_ms = generate_module._generate_scheduling_budget_ms(config, 1)
+
+    response = await web_post_raw(
+        app, "/web/api/generate/text-to-image?preflight=1&download_tail=0", b"not-json"
+    )
+
+    assert response.json() == {"success": True, "timeout_ms": budget_ms}
+
+
+@pytest.mark.parametrize("structured", [None, "bad", {"success": False}])
+async def test_generate_runner_error_without_structured_content_maps_internal_error(
+    structured: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """runner 回归返回 is_error 而结构化负载不可判型时显式归 internal_error，不落网关 502。"""
+    write_workspace_config(tmp_path)
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            result=CallToolResult(content=[], structured_content=structured, is_error=True)
+        ),
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    if isinstance(structured, dict):
+        # dict 负载保形合成：保留原顶层键仅补 error，无完整信封的 tool/status。
+        _assert_endpoint_error(response, "internal_error", status=500)
+    else:
+        _assert_structured_failure(response, "text_to_image", "internal_error", status=500)
 
 
 async def test_generate_skips_web_path_outside_images_root(
@@ -314,14 +582,13 @@ async def test_generate_multi_image_fusion_missing_images_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """融合请求缺 image 列表经 MultiImageFusionInput 校验拒绝，映射 400。"""
+    """融合请求缺 image 列表经 MultiImageFusionInput 校验拒绝，映射 400 结构化结果。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/multi-image-fusion", {"prompt": "融合穿搭"})
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_request"
+    _assert_structured_failure(response, "multi_image_fusion", "validation_error", status=400)
 
 
 async def test_generate_sequential_generation_returns_structured_payload(
@@ -358,14 +625,35 @@ async def test_generate_sequential_generation_empty_prompt_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """组图空提示词经 SequentialGenerationInput 校验拒绝，映射 400。"""
+    """组图空提示词经 SequentialGenerationInput 校验拒绝，映射 400 结构化结果。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/sequential-generation", {"prompt": ""})
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_request"
+    _assert_structured_failure(response, "sequential_generation", "validation_error", status=400)
+
+
+async def test_generate_sequential_generation_empty_image_list_message(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """组图空参考图列表的用户可见文案为中文数量口径而非 union 分支的英文错误。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(
+        app, "/web/api/generate/sequential-generation", {"prompt": "四格漫画", "image": []}
+    )
+
+    _assert_structured_failure(
+        response,
+        "sequential_generation",
+        "validation_error",
+        status=400,
+        message_contains="参考图片数量需在 1-14 之间",
+    )
 
 
 async def test_generate_invalid_params_returns_400(
@@ -373,14 +661,13 @@ async def test_generate_invalid_params_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """空提示词经 pydantic 校验拒绝，映射 400。"""
+    """空提示词经 pydantic 校验拒绝，映射 400 结构化结果。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": ""})
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_request"
+    _assert_structured_failure(response, "text_to_image", "validation_error", status=400)
 
 
 async def test_generate_invalid_json_returns_400(
@@ -388,14 +675,13 @@ async def test_generate_invalid_json_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """非法 JSON 请求体映射 400。"""
+    """非法 JSON 请求体映射 400 结构化结果。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    response = await _post_raw(app, "/web/api/generate/text-to-image", b"not-json")
+    response = await web_post_raw(app, "/web/api/generate/text-to-image", b"not-json")
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_json"
+    _assert_structured_failure(response, "text_to_image", "invalid_json", status=400)
 
 
 async def test_generate_deeply_nested_json_returns_400(
@@ -403,14 +689,13 @@ async def test_generate_deeply_nested_json_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """深嵌套 JSON 触发的 RecursionError 与解析失败同归 400 invalid_json。"""
+    """深嵌套 JSON 触发的 RecursionError 与解析失败同归 400 invalid_json 结构化结果。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    response = await _post_raw(app, "/web/api/generate/text-to-image", b"[" * 5000)
+    response = await web_post_raw(app, "/web/api/generate/text-to-image", b"[" * 5000)
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_json"
+    _assert_structured_failure(response, "text_to_image", "invalid_json", status=400)
 
 
 async def test_generate_oversized_integer_json_returns_400(
@@ -418,15 +703,14 @@ async def test_generate_oversized_integer_json_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """超长整数字面量抛非 JSONDecodeError 的裸 ValueError，同样归 400 invalid_json。"""
+    """超长整数字面量抛非 JSONDecodeError 的裸 ValueError，同样归 400 invalid_json 结构化结果。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     body = ('{"a": ' + "1" * 5000 + "}").encode("utf-8")
-    response = await _post_raw(app, "/web/api/generate/text-to-image", body)
+    response = await web_post_raw(app, "/web/api/generate/text-to-image", body)
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_json"
+    _assert_structured_failure(response, "text_to_image", "invalid_json", status=400)
 
 
 async def test_generate_non_object_json_body_returns_400(
@@ -434,16 +718,14 @@ async def test_generate_non_object_json_body_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """JSON 数组等非对象请求体映射 400 invalid_request。"""
+    """JSON 数组等非对象请求体映射 400 invalid_request 结构化结果。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    response = await _post_raw(app, "/web/api/generate/text-to-image", b"[1, 2]")
+    response = await web_post_raw(app, "/web/api/generate/text-to-image", b"[1, 2]")
 
-    assert response.status_code == 400
-    payload = response.json()
-    assert payload["error"] == "invalid_request"
-    assert payload["error_description"] == "请求体须为 JSON 对象"
+    payload = _assert_structured_failure(response, "text_to_image", "invalid_request", status=400)
+    assert payload["error"]["message"] == "请求体须为 JSON 对象"
 
 
 async def test_parse_json_object_body_runs_in_cpu_pool(
@@ -489,7 +771,7 @@ async def test_parse_json_object_body_small_runs_outside_cpu_pool(
 
 
 async def test_parse_json_object_body_pool_closed_returns_service_unavailable() -> None:
-    """CPU 卸载池关闭取消大请求体的排队解析时回 500，不误诊为 invalid_json。"""
+    """CPU 卸载池关闭取消大请求体的排队解析时归 service_unavailable 错误信息。"""
     from _lib.cpu_offload_spy import saturate_cpu_offload_pool
     from seedream_mcp.utils.core.executors import shutdown_cpu_offload_executor
 
@@ -511,9 +793,32 @@ async def test_parse_json_object_body_pool_closed_returns_service_unavailable() 
     await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
 
     assert body == {}
-    assert error is not None
-    assert error.status_code == 500
-    assert json.loads(bytes(error.body))["error"] == "service_unavailable"
+    assert error == _responses.WebErrorInfo(
+        "service_unavailable", "CPU 卸载线程池已关闭，服务不可用", 500
+    )
+
+
+async def test_generate_parse_pool_closed_returns_structured_service_unavailable(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """CPU 卸载池关闭取消排队解析时端点回 500 结构化 service_unavailable 结果。"""
+    from _lib.cpu_offload_spy import saturate_cpu_offload_pool
+    from seedream_mcp.utils.core.executors import shutdown_cpu_offload_executor
+
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+    body = {"prompt": "一只猫", "pad": "x" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1)}
+
+    async with web_asgi_client(app) as client:
+        async with saturate_cpu_offload_pool() as saturated:
+            post = asyncio.ensure_future(client.post("/web/api/generate/text-to-image", json=body))
+            await saturated.wait_queued()
+            shutdown_cpu_offload_executor()
+            response = await post
+
+    _assert_structured_failure(response, "text_to_image", "service_unavailable", status=500)
 
 
 @pytest.mark.parametrize(
@@ -528,7 +833,7 @@ async def test_parse_json_object_body_pool_closed_returns_service_unavailable() 
         ("network_error", 502),
         ("api_error", 502),
         ("timeout_error", 504),
-        ("generation_failed", 502),
+        ("generation_failed", 500),
     ],
 )
 async def test_generate_maps_error_type_to_status(
@@ -547,6 +852,7 @@ async def test_generate_maps_error_type_to_status(
         {
             "tool": "text_to_image",
             "success": False,
+            "status": "failed",
             "data": [],
             "error": {"type": error_type, "message": "x"},
         },
@@ -556,28 +862,7 @@ async def test_generate_maps_error_type_to_status(
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
-    assert response.status_code == expected_status
-    assert response.json()["error"]["type"] == error_type
-
-
-def test_generation_error_status_covers_profile_error_codes() -> None:
-    """状态码映射表覆盖除显式走默认外的全部档案错误码。
-
-    新增档案错误码未登记映射时在此失败，防其静默回落 502；generation_failed
-    有意走默认回退，为唯一豁免。
-    """
-    profiles = list(errors_module._HTTP_STATUS_PROFILES.values())
-    profiles += [profile for _, profile in errors_module._EXCEPTION_PROFILES]
-    profiles += [
-        errors_module._HTTP_5XX_PROFILE,
-        errors_module._HTTP_DEFAULT_PROFILE,
-        errors_module._GENERIC_MCP_PROFILE,
-        errors_module._UNKNOWN_PROFILE,
-    ]
-
-    assert set(_responses.GENERATION_ERROR_STATUS) == {
-        profile.error_code for profile in profiles
-    } - {"generation_failed"}
+    _assert_structured_failure(response, "text_to_image", error_type, status=expected_status)
 
 
 async def test_respond_structured_json_body_is_utf8_bytes_direct() -> None:
@@ -814,8 +1099,7 @@ async def test_generate_large_body_goes_through_transport_admission(
 
     response = await _post_json(app, "/web/api/generate/text-to-image", body)
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_request"
+    _assert_structured_failure(response, "text_to_image", "validation_error", status=400)
     assert admissions == [("large_body_admission", 1)]
 
 
@@ -825,7 +1109,7 @@ async def test_generate_runner_validation_error_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """runner 抛 SeedreamValidationError 映射 400 validation_error，携带原因。"""
+    """runner 抛 SeedreamValidationError 的兜底分支与主路径同构：完整结构化结果映射 400。"""
 
     monkeypatch.setattr(
         generate_module,
@@ -837,10 +1121,14 @@ async def test_generate_runner_validation_error_returns_400(
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
-    assert response.status_code == 400
-    payload = response.json()
-    assert payload["error"] == "validation_error"
-    assert "参考图数量超出上限" in payload["error_description"]
+    payload = _assert_structured_failure(
+        response,
+        "text_to_image",
+        "validation_error",
+        status=400,
+        message_contains="参考图数量超出上限",
+    )
+    assert payload["data"] is None
 
 
 async def test_generate_runner_validation_error_echoes_message(
@@ -863,9 +1151,13 @@ async def test_generate_runner_validation_error_echoes_message(
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
-    assert response.status_code == 400
-    description = response.json()["error_description"]
-    assert str(images_root) in description
+    _assert_structured_failure(
+        response,
+        "text_to_image",
+        "validation_error",
+        status=400,
+        message_contains=str(images_root),
+    )
 
 
 async def test_generate_runner_config_error_returns_503(
@@ -874,7 +1166,7 @@ async def test_generate_runner_config_error_returns_503(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """runner 抛 SeedreamConfigError 映射 503 config_error，携带原因。"""
+    """runner 抛 SeedreamConfigError 的兜底分支与主路径同构：完整结构化结果映射 503。"""
     monkeypatch.setattr(
         generate_module,
         "run_text_to_image",
@@ -885,10 +1177,13 @@ async def test_generate_runner_config_error_returns_503(
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
-    assert response.status_code == 503
-    payload = response.json()
-    assert payload["error"] == "config_error"
-    assert "数据根目录无法解析" in payload["error_description"]
+    _assert_structured_failure(
+        response,
+        "text_to_image",
+        "config_error",
+        status=503,
+        message_contains="数据根目录无法解析",
+    )
 
 
 async def test_generate_runner_unexpected_error_returns_500(
@@ -897,7 +1192,7 @@ async def test_generate_runner_unexpected_error_returns_500(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """runner 抛未归类异常兜底 500 internal_error，不向响应泄露异常细节。"""
+    """runner 抛未归类异常兜底 500 结构化 internal_error，不向响应泄露异常细节。"""
 
     monkeypatch.setattr(
         generate_module, "run_text_to_image", _make_fake_runner(error=RuntimeError("boom"))
@@ -907,10 +1202,8 @@ async def test_generate_runner_unexpected_error_returns_500(
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
-    assert response.status_code == 500
-    payload = response.json()
-    assert payload["error"] == "internal_error"
-    assert "boom" not in payload["error_description"]
+    payload = _assert_structured_failure(response, "text_to_image", "internal_error", status=500)
+    assert "boom" not in payload["error"]["message"]
 
 
 async def test_generate_non_dict_structured_content_returns_empty_payload(
@@ -1007,16 +1300,19 @@ async def test_generate_rejects_when_images_root_unresolvable(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """图片目录不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
+    """图片目录不可解析时回 400 结构化 images_root_unavailable 携带配置指引，不以宽边界降级执行。"""
     make_images_root_unresolvable(monkeypatch, tmp_path)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
-    assert response.status_code == 400
-    body = response.json()
-    assert body["error"] == "images_root_unavailable"
-    assert "SEEDREAM_DATA_ROOT" in body["error_description"]
+    _assert_structured_failure(
+        response,
+        "text_to_image",
+        "images_root_unavailable",
+        status=400,
+        message_contains="SEEDREAM_DATA_ROOT",
+    )
 
 
 async def test_generate_error_channels_carry_messages_verbatim(
@@ -1047,7 +1343,7 @@ async def test_generate_error_channels_carry_messages_verbatim(
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
-    assert response.status_code == 502
+    assert response.status_code == 500
     payload = response.json()
     assert payload["error"]["message"] == f"保存到 {images_root} 失败"
     assert payload["data"][0]["error"]["message"] == f"下载失败于 {images_root}\\a.png"
@@ -1149,14 +1445,14 @@ def test_augment_generation_payload_skips_non_string_local_path(tmp_path: Path) 
     assert structured["data"] == [{"local_path": 123, "keep": "v"}, {"local_path": None, "keep": 2}]
 
 
-def test_generation_status_falls_back_to_502_without_str_error_type() -> None:
+def test_structured_status_falls_back_to_502_without_str_error_type() -> None:
     """error.type 缺失或非字符串时状态码回落 502，命中形态时按映射表取值。"""
     assert _responses.structured_error_type({"success": False}) is None
     assert _responses.structured_error_type({"error": {"type": 42}}) is None
     assert _responses.structured_error_type({"error": {"type": "timeout_error"}}) == "timeout_error"
 
-    assert _responses.generation_status({"success": False}) == 502
-    assert _responses.generation_status({"error": {"type": "timeout_error"}}) == 504
+    assert _responses.structured_status({"success": False}) == 502
+    assert _responses.structured_status({"error": {"type": "timeout_error"}}) == 504
 
 
 def test_converge_path_entry_deletes_key_when_resolve_fails(tmp_path: Path) -> None:
