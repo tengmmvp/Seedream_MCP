@@ -8,22 +8,26 @@ import {
   $,
   clearStoredToken,
   hideTokenGate,
+  isUnauthorizedError,
   setActiveTool,
   state,
-  UNAUTHORIZED_MESSAGE,
   writeStoredToken,
 } from "./api.js";
 import {
   applyToolUI,
   loadConfigInfo,
+  prefetchConfigInfo,
   submitGenerate,
   syncCustomSizeField,
   syncLayerDecompositionSize,
 } from "./generate.js";
 import {
+  advanceGalleryOffset,
+  canAdvanceGallery,
   closeLightbox,
-  GALLERY_PAGE_SIZE,
   refreshGallery,
+  resetGalleryPaging,
+  retreatGalleryOffset,
   useLightboxAsReference,
 } from "./gallery.js";
 import { addReference, handleFiles } from "./refs.js";
@@ -100,26 +104,27 @@ function bindEvents() {
     "change",
     syncLayerDecompositionSize,
   );
-  $("generate-form").addEventListener("submit", submitGenerate);
+  // 兜底 catch：处理器内部兜底后仍外溢的异常（如 DOM 结构漂移）不落未处理拒绝。
+  $("generate-form").addEventListener("submit", (event) => {
+    submitGenerate(event).catch((error) => console.error("生成提交异常:", error));
+  });
 
   $("gallery-refresh").addEventListener("click", () => {
-    state.gallery.offset = 0;
+    resetGalleryPaging();
     refreshGallery();
   });
   $("format-filter").addEventListener("change", () => {
-    state.gallery.offset = 0;
+    resetGalleryPaging();
     refreshGallery();
   });
   $("gallery-prev").addEventListener("click", () => {
-    state.gallery.offset = Math.max(
-      0,
-      state.gallery.offset - GALLERY_PAGE_SIZE,
-    );
+    retreatGalleryOffset();
     refreshGallery();
   });
   $("gallery-next").addEventListener("click", () => {
-    if (state.gallery.hasMore) {
-      state.gallery.offset += GALLERY_PAGE_SIZE;
+    // 推进资格与按钮禁用共用 canAdvanceGallery，复查兜底状态更新与渲染的间隙。
+    if (canAdvanceGallery()) {
+      advanceGalleryOffset();
       refreshGallery();
     }
   });
@@ -161,7 +166,7 @@ function bindEvents() {
       $("token-error").classList.add("hidden");
     } catch (error) {
       $("token-error").classList.remove("hidden");
-      if (error.message === UNAUTHORIZED_MESSAGE) {
+      if (isUnauthorizedError(error)) {
         $("token-error").textContent = "令牌无效，请重试。";
         state.token = "";
         clearStoredToken();
@@ -185,8 +190,12 @@ async function main() {
   try {
     await bootstrapAfterAuth();
   } catch (error) {
-    if (error.message !== UNAUTHORIZED_MESSAGE) {
+    if (!isUnauthorizedError(error)) {
       $("server-meta").textContent = "配置加载失败，请刷新页面重试";
+      // 瞬时失败即时后台完整重载，落定后图库视图在位则补刷。
+      prefetchConfigInfo().then(() => {
+        if (currentView() === "gallery") refreshGallery();
+      });
     }
   }
 }

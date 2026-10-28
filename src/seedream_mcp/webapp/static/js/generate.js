@@ -7,40 +7,60 @@
 
 import {
   $,
-  apiFetch,
   currentModel,
   fetchBlobUrl,
   fetchExternalBlobUrl,
+  getJsonRaw,
   isAbortError,
-  normalizePayloadError,
-  parseJsonRequired,
-  PayloadError,
-  readErrorPayload,
+  isUnauthorizedError,
+  postJson,
+  postJsonRaw,
+  rethrowIfAbort,
   revokeObjectUrls,
+  runBoundedPool,
   setActiveTool,
   showInlineError,
   state,
-  timeoutSignal,
   TOOL_IMAGE_TO_IMAGE,
   TOOL_SEQUENTIAL_GENERATION,
   TOOL_TEXT_TO_IMAGE,
-  UNAUTHORIZED_MESSAGE,
+  withTimeoutSignal,
 } from "./api.js";
 import { renderReferences, toolConfig, withinUploadBudget } from "./refs.js";
-import { openLightbox } from "./gallery.js";
+import { openLightbox, resetGalleryPaging } from "./gallery.js";
 
 /**
- * config-info 是启动面：填充尺寸档位与能力开关；模型跟随服务器配置无下拉。
+ * config-info 是启动面：拉取数据并渲染尺寸档位与能力开关；模型跟随服务器配置
+ * 无下拉。
  *
- * @throws {Error} 请求失败时上抛；响应体非 JSON、非对象或为字面 null 抛
- *   PayloadError，中止与体读取异常原样上抛，均由调用方走令牌门或错误文案。
+ * @throws {Error} 失败语义同 fetchConfigInfo，由调用方走令牌门或错误文案。
  */
 export async function loadConfigInfo() {
-  const response = await apiFetch("/web/api/config-info");
-  if (!response.ok) throw new Error("config-info 请求失败");
-  const info = await parseJsonRequired(response);
-  state.configInfo = info;
+  await fetchConfigInfo();
+  renderConfigInfo();
+}
 
+/**
+ * 拉取 config-info 落 state.configInfo：纯数据不触碰 DOM，
+ * 启动装载与后台重载复用同一拉取，渲染由各链显式执行。
+ *
+ * @param {AbortSignal} [signal] - 请求中止信号，是否限时由调用方决定。
+ * @throws {Error} 请求失败时上抛；响应体非 JSON、非对象或为字面 null
+ *   抛 PayloadError，中止与体读取异常原样上抛。
+ */
+async function fetchConfigInfo(signal) {
+  state.configInfo = await getJsonRaw(
+    "/web/api/config-info",
+    signal,
+    "config-info 请求失败",
+  );
+  // 等待预算随配置推导，配置落新即整体失效 preflight 缓存。
+  preflightCache.clear();
+}
+
+/** 将 state.configInfo 渲染进界面：尺寸档位、格式过滤、派生上限与能力开关。 */
+function renderConfigInfo() {
+  const info = state.configInfo;
   const current = currentModel();
   $("server-meta").textContent = current
     ? `${current.display_name} · ${info.default_size} 默认`
@@ -49,7 +69,8 @@ export async function loadConfigInfo() {
   renderSizeOptions();
 
   // 格式过滤器选项从 config-info 派生，与后端支持清单单一来源；先前选择在新列表
-  // 中仍存在则恢复，恢复失败回「全部」并同步重置图库偏移，页码与过滤语义不错位。
+  // 中仍存在则恢复，恢复失败回「全部」并复位图库分页（清回退栈），
+  // 页码与过滤语义不错位。
   const formatSelect = $("format-filter");
   if (formatSelect && Array.isArray(info.supported_extensions)) {
     const previousFormat = formatSelect.value;
@@ -67,7 +88,7 @@ export async function loadConfigInfo() {
     if (previousFormat && info.supported_extensions.includes(previousFormat)) {
       formatSelect.value = previousFormat;
     } else if (previousFormat) {
-      state.gallery.offset = 0;
+      resetGalleryPaging();
     }
   }
 
@@ -281,7 +302,8 @@ export function buildRequestBody() {
     body.size = sizeValue;
   }
 
-  const requestCount = Number($("request-count").value);
+  // 调用数取 generateApiCalls 单一来源，值为 1 即后端缺省，省略键。
+  const requestCount = generateApiCalls();
   if (requestCount > 1) body.request_count = requestCount;
   body.watermark = $("watermark").checked;
 
@@ -375,13 +397,129 @@ function buildRenderDots() {
   }
 }
 
+// preflight 失败时的生成等待预算静态保守上限：
+// 按服务端默认配置的满档推导×1.5 取整到百万圆整档，兜底覆盖调幅有限的部署；
+// 超时消息已提示服务端可能仍在执行。
+const GENERATE_FALLBACK_TIMEOUT_MS = 25000000;
+
+// preflight 请求自身的等待上限：本机回环仅推导预算，毫秒级完成；到点截断的
+// 是故障态等待，回退保守上限。
+const PREFLIGHT_TIMEOUT_MS = 2000;
+
+// preflight 缓存条目时效（5 分钟）：超龄视为无缓存重新预检，防服务端配置
+// 变更并重启后旧标签页无限期沿用旧预算。
+const PREFLIGHT_CACHE_TTL_MS = 300000;
+
+// 启动重载后台总上限：停滞重载到点中止请求并清空在途 Promise。
+const CONFIG_REFETCH_TIMEOUT_MS = 10000;
+
+// 启动重载在途 Promise：重载已在途时不叠加第二次，随重载自身落定清空。
+let bootstrapReloadInFlight = null;
+
+/** 本次请求触发的生成 API 调用数：request_count 对四工具一律生效。 */
+function generateApiCalls() {
+  // 留空与非法输入按后端缺省 1 对齐。
+  const count = Number($("request-count").value);
+  return Math.max(1, Number.isFinite(count) ? count : 1);
+}
+
+/**
+ * 启动失败后的后台完整重载：拉取成功即补渲染配置衍生的 UI（server-meta、
+ * 尺寸档位与工具形态），瞬时失败不再使界面永久空白；
+ * 失败保持既有失败文案，不在此重试。
+ * 拉取与渲染分步：拉取失败不得半渲染用户已见的表单。
+ */
+export function prefetchConfigInfo() {
+  if (bootstrapReloadInFlight) return bootstrapReloadInFlight;
+  bootstrapReloadInFlight = withTimeoutSignal(
+    CONFIG_REFETCH_TIMEOUT_MS,
+    async (signal) => {
+      await fetchConfigInfo(signal);
+      renderConfigInfo();
+      applyToolUI();
+    },
+  )
+    .catch(() => {})
+    .finally(() => {
+      bootstrapReloadInFlight = null;
+    });
+  return bootstrapReloadInFlight;
+}
+
+// preflight 结果缓存：键为工具加完整投影查询串，条目为预算与写入时刻，读取
+// 时校验时效；键空间为表单参数组合，量级有限不设逐出，配置拉取落新整体失效。
+const preflightCache = new Map();
+
+/**
+ * 经生成端点 preflight 取等待预算：把提交快照的请求体投影成预算相关的五个
+ * 查询参数（计数键仅投影正整数，download_tail 三态投影 true→"1"、false→"0"、
+ * 缺省省略），不发请求体；省略键由服务端按同缺省推导，两侧键集由后端契约测试
+ * 对账。同投影命中未超龄缓存免往返；请求失败回静态保守上限，不阻断提交。
+ *
+ * @param {string} tool - 提交时刻快照的工具标识。
+ * @param {Object} body - 提交时刻快照的请求体。
+ * @returns {Promise<number>} 等待预算毫秒数。
+ */
+async function preflightTimeoutMs(tool, body) {
+  const params = new URLSearchParams({ preflight: "1" });
+  if (Number.isFinite(body.request_count) && body.request_count > 0) {
+    params.set("request_count", String(body.request_count));
+  }
+  if (body.layer_decomposition === true) params.set("layer_decomposition", "1");
+  const imageCount = Array.isArray(body.image) ? body.image.length : null;
+  if (Number.isFinite(imageCount) && imageCount > 0) {
+    params.set("image_count", String(imageCount));
+  }
+  if (Number.isFinite(body.max_images) && body.max_images > 0) {
+    params.set("max_images", String(body.max_images));
+  }
+  if (body.auto_save === true) params.set("download_tail", "1");
+  else if (body.auto_save === false) params.set("download_tail", "0");
+  // 查询串即完整投影，与服务端推导的输入一一对应，连同工具作缓存键。
+  const cacheKey = `${tool}?${params}`;
+  const cached = preflightCache.get(cacheKey);
+  if (cached !== undefined && Date.now() - cached.at < PREFLIGHT_CACHE_TTL_MS) {
+    return cached.timeoutMs;
+  }
+  try {
+    const payload = await postJsonRaw(
+      `/web/api/generate/${tool}?${params}`,
+      PREFLIGHT_TIMEOUT_MS,
+    );
+    if (payload.success === true && Number.isFinite(payload.timeout_ms)) {
+      // 仅成功推导入缓存：回退上限不入，瞬时失败下次提交重试预检。
+      preflightCache.set(cacheKey, {
+        timeoutMs: payload.timeout_ms,
+        at: Date.now(),
+      });
+      return payload.timeout_ms;
+    }
+  } catch {
+    /* 网络、非 2xx 与载荷异常一律回退保守上限 */
+  }
+  return GENERATE_FALLBACK_TIMEOUT_MS;
+}
+
+// 在途提交的取消控制器：非 null 即提交全程占用，主按钮呈现「取消」，占用期内
+// 的再次提交一律解释为取消；渲染期请求已落定，abort 无监听为空操作。
+let activeSubmitAbort = null;
+
 /**
  * 生成表单提交处理器：前端校验后请求生成端点并渲染结果或错误。
+ *
+ * 提交全程（状态复位、快照、预检、发送、渲染）罩在同一 try/finally：装配期
+ * 意外异常也收场失败态并恢复按钮，不把按钮锁死在等待态；2xx 后渲染期异常按
+ * 已成功收场，不伪装请求失败诱导重复提交。等待期主按钮转「取消」，再次提交
+ * 即中止在途请求——取消的只是客户端等待，服务端是否继续执行不受影响。
  *
  * @param {Event} event - submit 事件。
  */
 export async function submitGenerate(event) {
   event.preventDefault();
+  if (activeSubmitAbort) {
+    activeSubmitAbort.abort();
+    return;
+  }
   const config = toolConfig(state.tool);
   const prompt = $("prompt").value.trim();
   // 空提示词仅图生图勾选图层拆分时被后端接受，判定与提示文案口径一致。
@@ -404,80 +542,84 @@ export async function submitGenerate(event) {
   }
 
   const button = $("generate-btn");
-  button.disabled = true;
-  button.textContent = "生成中…";
-  setStatus("running", "生成中，请稍候");
-  $("result-error").classList.add("hidden");
-  $("result-meta").classList.add("hidden");
-  revokeObjectUrls("generate");
-  $("result-grid").innerHTML = "";
-
+  const cancelController = new AbortController();
+  activeSubmitAbort = cancelController;
+  button.textContent = "取消";
   try {
-    // 上限 20 分钟覆盖真实生成的最坏量级；服务端总预算含重试与排队，到点中止时
-    // 服务端可能仍在执行，超时分支如实提示去图库核对而非直接重试。
-    const response = await apiFetch(`/web/api/generate/${state.tool}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildRequestBody()),
-      signal: timeoutSignal(1200000),
-    });
-    // 非 ok 失败体尽力读取——服务端已拒绝、重试安全，读取异常（含中止）吞为
-    // 无载荷，不逃逸外层超时档误导勿重试；ok 载荷经严格解析，非 JSON、非对象
-    // 与空响应抛 PayloadError 就地展示，体读取失败与中止类上抛走网络/超时档——
-    // 2xx 意味着服务端已生成，断连误劝重试会重复生成。
-    if (!response.ok) {
-      const failure = normalizePayloadError(
-        await readErrorPayload(response),
-        response,
-      );
-      setStatus("failed", "生成失败。");
-      showResultError(failure);
-      return;
-    }
-    let payload;
+    setStatus("running", "生成中，请稍候");
+    $("result-error").classList.add("hidden");
+    $("result-meta").classList.add("hidden");
+    revokeObjectUrls("generate");
+    $("result-grid").innerHTML = "";
+
+    // 请求体与工具在提交时刻一次性快照：preflight 往返窗口内表单仍可编辑，
+    // 预算推导与真实请求共用同一快照，不随窗口内的编辑漂移。
+    const tool = state.tool;
+    const body = buildRequestBody();
+    const timeoutMs = await preflightTimeoutMs(tool, body);
     try {
-      payload = await parseJsonRequired(response);
-    } catch (error) {
-      // PayloadError 属载荷档就地展示；体读取失败与中止类上抛走网络/超时档。
-      if (error instanceof PayloadError) {
-        setStatus("failed", "生成失败。");
-        showResultError(error);
-        return;
-      }
-      throw error;
-    }
-    const { failedCount, total } = await renderResults(payload);
-    if (failedCount === total && total > 0) {
-      setStatus("failed", "生成失败，全部请求未成功，原因见卡片。");
-    } else if (failedCount) {
-      setStatus(
-        "failed",
-        `部分完成：${total - failedCount}/${total} 成功，失败原因见卡片。`,
+      // 非 ok 与载荷缺陷经共享骨架就地展示，体读取失败上抛走网络档
+      // ——2xx 意味着服务端已生成，断连误劝重试会重复生成。
+      const payload = await postJson(
+        `/web/api/generate/${tool}`,
+        body,
+        timeoutMs,
+        {
+          onUnauthorized: () => setStatus("failed", "需要重新输入令牌。"),
+          onNetworkError: showNetworkFailure,
+          onEndpointError: (failure) => {
+            setStatus("failed", "生成失败。");
+            showResultError(failure);
+          },
+          onPayloadError: (error) => {
+            setStatus("failed", "生成失败。");
+            showResultError(error);
+          },
+        },
+        cancelController.signal,
       );
-    } else {
-      setStatus("done", "完成。");
+      // null 哨兵表示失败已就地展示，直接收场。
+      if (!payload) return;
+      // 2xx 后生成已成定局（已计费、自动保存），渲染期异常单列收场。
+      try {
+        const { failedCount, total } = await renderResults(payload);
+        if (failedCount === total && total > 0) {
+          setStatus("failed", "生成失败，全部请求未成功，原因见卡片。");
+        } else if (failedCount) {
+          setStatus(
+            "failed",
+            `部分完成：${total - failedCount}/${total} 成功，失败原因见卡片。`,
+          );
+        } else {
+          setStatus("done", "完成。");
+        }
+      } catch (error) {
+        // 中止类交回外层超时档，其余按已成功收场。
+        rethrowIfAbort(error);
+        console.error("结果渲染失败:", error);
+        setStatus("failed", "生成已成功，结果已保存到图库；展示部分失败。");
+      }
+    } catch (error) {
+      if (isAbortError(error) && cancelController.signal.aborted) {
+        setStatus("failed", "已取消。");
+      } else if (isAbortError(error)) {
+        // 超时兜底与浏览器层中止统一按超时引导：误劝勿重试的代价小于丢失
+        // 引导诱发重复生成。
+        setStatus("failed", "生成耗时异常。");
+        showResultError({
+          type: "timeout",
+          message: `本次生成已超过 ${Math.ceil(timeoutMs / 60000)} 分钟，请求已中止。服务端可能仍在后台执行，请稍后到图库查看结果，勿立即重试以免重复生成。`,
+        });
+      } else {
+        showNetworkFailure(error);
+      }
     }
   } catch (error) {
-    if (error.message === UNAUTHORIZED_MESSAGE) {
-      setStatus("failed", "需要重新输入令牌。");
-    } else if (isAbortError(error)) {
-      // AbortError 在无手动中止的代码里仅来自超时兜底与浏览器层中止，统一按
-      // 超时引导：误劝勿重试的代价小于丢失引导诱发重复生成。
-      setStatus("failed", "生成耗时异常。");
-      showResultError({
-        type: "timeout",
-        message:
-          "本次生成已超过 20 分钟，请求已中止。服务端可能仍在后台执行，请稍后到图库查看结果，勿立即重试以免重复生成。",
-      });
-    } else {
-      setStatus("failed", "请求失败。");
-      showResultError({
-        type: "network",
-        message: String(error.message || error),
-      });
-    }
+    // 装配与预检期的意外异常（如 DOM 结构漂移使取值抛错）：预检自身吞一切
+    // 失败，此分支只兜真正的意外，不区分中止档。
+    showNetworkFailure(error);
   } finally {
-    button.disabled = false;
+    activeSubmitAbort = null;
     button.textContent = "生成图片";
   }
 }
@@ -489,13 +631,25 @@ function showResultError(error) {
   );
 }
 
+// 网络失败收场的成对渲染：onNetworkError 回调与请求期、装配期两处 catch 消费。
+function showNetworkFailure(error) {
+  setStatus("failed", "请求失败。");
+  showResultError({
+    type: "network",
+    message: String(error.message || error),
+  });
+}
+
 // 结果图装载并发上限：固定 4 个取图任务持续消费队列，无批次屏障。
 const RESULT_IMAGE_CONCURRENCY = 4;
+
+// 401 命中卡片的过期文案：令牌门已由请求层弹出，卡片只标注补输后的重试方式。
+const TOKEN_EXPIRED_CARD_MESSAGE = "令牌已过期，重新输入后请再次生成";
 
 // 结果渲染：web_path 优先走本服务鉴权图片端点，blob 装载使令牌只进请求头
 // 不进 URL；外链 url 走裸 fetch 防令牌外送，失败回退 img.src 直连，跨域
 // img 标签不受 CORS 限制。卡片先全部落地再分批装载，单张失败只降级该卡片
-// 显示占位错误，不中断整批渲染。
+// 显示占位错误；唯 401 停止装载，未装载卡片统一落中断终态。
 async function renderResults(payload) {
   const grid = $("result-grid");
   const items = Array.isArray(payload.data) ? payload.data : [];
@@ -531,28 +685,35 @@ async function renderResults(payload) {
   if (!items.length)
     grid.appendChild(document.createTextNode("本次没有返回图片。"));
 
-  let cursor = 0;
-  const workers = Array.from(
-    { length: Math.min(RESULT_IMAGE_CONCURRENCY, pending.length) },
-    async () => {
-      while (cursor < pending.length) {
-        const entry = pending[cursor++];
-        try {
-          await loadResultImage(entry.img, entry.item);
-        } catch (error) {
-          entry.img.classList.remove("developing");
-          if (error.message === UNAUTHORIZED_MESSAGE) {
-            // 401 已弹令牌门；卡片标注重试方式，不误报为加载失败。
-            appendCardError(entry.card, "令牌已过期，重新输入后请再次生成");
-          } else {
-            console.error("结果图片加载失败:", error);
-            appendCardError(entry.card, "图片加载失败");
-          }
+  const unconsumed = await runBoundedPool(
+    pending,
+    RESULT_IMAGE_CONCURRENCY,
+    async (entry) => {
+      try {
+        await loadResultImage(entry.img, entry.item);
+      } catch (error) {
+        entry.img.classList.remove("developing");
+        if (isUnauthorizedError(error)) {
+          // 401 已弹令牌门；卡片标注重试方式，停止消费免逐卡重复弹门。
+          appendCardError(entry.card, TOKEN_EXPIRED_CARD_MESSAGE);
+          return false;
         }
+        console.error("结果图片加载失败:", error);
+        appendCardError(entry.card, "图片加载失败");
       }
     },
   );
-  await Promise.all(workers);
+  // 401 停止消费后的未装载条目退出显影态并落中性收场文案（未消费不断言令牌
+  // 过期，图库可用时附找回指引），每张卡都有终态。
+  const galleryAvailable =
+    state.configInfo && state.configInfo.images_root_available;
+  for (const entry of unconsumed) {
+    entry.img.classList.remove("developing");
+    appendCardError(
+      entry.card,
+      galleryAvailable ? "结果图加载中断，可从图库找回" : "结果图加载中断",
+    );
+  }
 
   const meta = $("result-meta");
   const metaLines = [];
@@ -589,6 +750,7 @@ async function renderResults(payload) {
 // 仅 web_path 条目可进灯箱并带 zoomable 光标，url-only 条目不可回填也不响应点击。
 async function loadResultImage(img, item) {
   if (item.web_path) {
+    // 超时由 fetchBlobUrl 的内建超时档承担。
     const blobUrl = await fetchBlobUrl(
       `/web/api/thumbnail?path=${encodeURIComponent(item.web_path)}`,
       "generate",
