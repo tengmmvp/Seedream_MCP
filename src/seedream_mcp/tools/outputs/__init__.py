@@ -2,6 +2,7 @@
 
 作为 outputSchema 的单一来源：MCPServer 依据本模块模型生成各工具的 structuredContent
 schema，运行时输出也须经模型构造后 model_dump，使声明与实际输出绑定、不漂移。
+TOOL_OUTPUT_MODELS 以工具名键控输出族，错误构造经它绑定各工具声明的 schema；
 build_error_dict 与 build_error_structured 收敛各错误分支的错误结构；
 build_structured_json_text 将 structuredContent 序列化为紧凑 JSON 的 TextContent，
 字符串值继承摘要通道净化、二进制载荷替换为长度占位；
@@ -14,7 +15,7 @@ build_structured_tool_result 把镜像块回传进 content 数组，是「摘要
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from mcp.types import CallToolResult, ContentBlock, TextContent
@@ -22,6 +23,14 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from .channels import MIRROR_CHANNEL, output_channel_enabled
 from .sanitize import _unique_flat_key
+from ...definitions.conventions import (
+    BROWSE_IMAGES_TOOL_NAME,
+    GET_MODEL_INFO_TOOL_NAME,
+    IMAGE_TO_IMAGE_TOOL_NAME,
+    MULTI_IMAGE_FUSION_TOOL_NAME,
+    SEQUENTIAL_GENERATION_TOOL_NAME,
+    TEXT_TO_IMAGE_TOOL_NAME,
+)
 from ...utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
 from ...utils.core.logs import get_logger
 from ...utils.core.sanitizers import (
@@ -145,7 +154,14 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
             count 分页语义不同。
         offset: 当前页起始偏移。
         has_more: 是否仍有未返回的匹配图片。
-        next_offset: 下一页起始偏移，无更多图片时为 None。
+        next_offset: 下一页或截断/停滞续扫的起始偏移，仅确知末页（has_more=false）、
+            永久停滞与截断徒劳页（rescan_futile=true）等终态为 None；
+            has_more 为 null 的未知态可携带续扫偏移。
+        stall_permanent: 停滞谱系收敛为永久态的标记，置位且 has_more 未知时
+            不再回传续扫偏移；冻结窗满页回放可与其余已知条目并存推进。
+        rescan_futile: 截断徒劳标记：截断预算与偏移无关，无跳过条目且本页耗尽
+            窗口时置位（空页或末批条目页均可），续扫必复现同一前沿，消费方据此
+            门控无效续扫；与 stall_permanent 相互独立。
         skipped_count: 扫描窗口内因暂时无法访问被跳过的条目数，无跳过时为 None。
         images: 当前页图片条目，含 index 与 path，可选 size_mb 与 modified。
         recursive: 是否递归查找子目录。
@@ -163,6 +179,8 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
     offset: int | None = None
     has_more: bool | None = None
     next_offset: int | None = None
+    stall_permanent: bool = False
+    rescan_futile: bool = False
     skipped_count: int | None = None
     images: list[dict[str, Any]] | None = None
     recursive: bool | None = None
@@ -193,6 +211,17 @@ class GetModelInfoStructuredOutput(_BaseStructuredOutput):
     capabilities: dict[str, Any] | None = None
 
 
+# 工具名键控的输出族映射：错误构造据此绑定声明 schema 的输出模型，新增工具在此单点登记。
+TOOL_OUTPUT_MODELS: Mapping[str, type[_BaseStructuredOutput]] = {
+    TEXT_TO_IMAGE_TOOL_NAME: GenerationStructuredOutput,
+    IMAGE_TO_IMAGE_TOOL_NAME: GenerationStructuredOutput,
+    MULTI_IMAGE_FUSION_TOOL_NAME: GenerationStructuredOutput,
+    SEQUENTIAL_GENERATION_TOOL_NAME: GenerationStructuredOutput,
+    BROWSE_IMAGES_TOOL_NAME: BrowseImagesStructuredOutput,
+    GET_MODEL_INFO_TOOL_NAME: GetModelInfoStructuredOutput,
+}
+
+
 def build_error_dict(error_type: str, message: str) -> dict[str, Any]:
     """构建结构化错误载荷，各工具错误分支共用同一字段集。
 
@@ -218,7 +247,7 @@ def build_error_structured(
     流水线失败两类错误分支的字段集相同，消费方无需按错误来源区分断言。
 
     Args:
-        tool_name: 工具标识。
+        tool_name: 工具标识，经 TOOL_OUTPUT_MODELS 取绑定声明 schema 的输出模型。
         error_type: 归约档案错误码，作为 error.type 取值。
         message: 面向用户的错误消息。
         status: 结构化输出的 status 取值，默认 failed。
@@ -226,7 +255,7 @@ def build_error_structured(
     Returns:
         失败路径的 structuredContent 字典，全字段输出。
     """
-    return GenerationStructuredOutput(
+    return TOOL_OUTPUT_MODELS[tool_name](
         tool=tool_name,
         success=False,
         status=status,
@@ -436,6 +465,7 @@ __all__ = [
     "BrowseImagesStructuredOutput",
     "GenerationStructuredOutput",
     "GetModelInfoStructuredOutput",
+    "TOOL_OUTPUT_MODELS",
     "binary_placeholder_value_leaf_length",
     "build_error_dict",
     "build_error_structured",

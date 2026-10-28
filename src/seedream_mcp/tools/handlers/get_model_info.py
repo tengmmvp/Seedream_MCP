@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ...config import SeedreamConfig
+from ...definitions.conventions import GET_MODEL_INFO_TOOL_NAME, MODEL_INFO_FAILED_ERROR_TYPE
 from ...utils.core.errors import format_error_for_user
 from ...utils.core.logs import get_logger
 from ...utils.model.capabilities import (
@@ -21,7 +22,7 @@ from ...utils.model.capabilities import (
 )
 from ..outputs import (
     GetModelInfoStructuredOutput,
-    build_error_dict,
+    build_error_structured,
     build_structured_tool_result,
 )
 from ..pipeline import log_tiered_failure
@@ -122,7 +123,7 @@ async def handle_get_model_info(config: SeedreamConfig) -> CallToolResult:
     try:
         payload = build_model_info_payload(config)
         structured = GetModelInfoStructuredOutput(
-            tool="get_model_info", success=True, status="completed", **payload
+            tool=GET_MODEL_INFO_TOOL_NAME, success=True, status="completed", **payload
         ).model_dump(exclude={"error"})
         return await build_structured_tool_result(
             build_model_info_text(payload), structured, is_error=False
@@ -130,10 +131,7 @@ async def handle_get_model_info(config: SeedreamConfig) -> CallToolResult:
     except Exception as exc:
         log_tiered_failure(logger, exc, "模型信息查询失败")
         message = format_error_for_user(exc)
-        structured = GetModelInfoStructuredOutput(
-            tool="get_model_info",
-            success=False,
-            status="failed",
-            error=build_error_dict("model_info_failed", message),
-        ).model_dump()
+        structured = build_error_structured(
+            GET_MODEL_INFO_TOOL_NAME, MODEL_INFO_FAILED_ERROR_TYPE, message
+        )
         return await build_structured_tool_result(message, structured, is_error=True)

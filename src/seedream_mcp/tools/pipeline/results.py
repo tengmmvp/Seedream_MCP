@@ -9,7 +9,11 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from ...utils.core.errors import has_message_value, response_reports_failure
+from ...utils.core.errors import (
+    has_message_value,
+    normalized_upstream_error_code,
+    response_reports_failure,
+)
 from ...utils.core.logs import get_logger
 from ...utils.core.sanitizers import (
     normalize_message_text,
@@ -217,9 +221,9 @@ def aggregate_parallel_generation_results(
                 raw_error = result.get("error")
                 if not isinstance(raw_error, dict):
                     continue
-                raw_code = raw_error.get("code")
-                if isinstance(raw_code, str) and raw_code.strip():
-                    error_payload["code"] = raw_code.strip()
+                raw_code = normalized_upstream_error_code(raw_error.get("code"))
+                if raw_code is not None:
+                    error_payload["code"] = raw_code
                     break
             aggregated_result["error"] = error_payload
     return aggregated_result

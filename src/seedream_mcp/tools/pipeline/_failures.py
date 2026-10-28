@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from ...utils.core.errors import (
     SeedreamMCPError,
     format_error_for_user,
+    normalized_upstream_error_code,
     resolve_error_profile,
 )
 from ...utils.core.sanitizers import sanitize_error_text
@@ -34,9 +35,9 @@ def _normalize_error_message(raw_error: Any) -> str | None:
         if isinstance(value, str) and value.strip():
             return sanitize_error_text(value.strip())
 
-    code = raw_error.get("code")
-    if isinstance(code, str) and code.strip():
-        return sanitize_error_text(code.strip())
+    code = normalized_upstream_error_code(raw_error.get("code"))
+    if code:
+        return sanitize_error_text(code)
     return None
 
 
@@ -45,10 +46,7 @@ def _classify_generation_error_type(exc: Exception) -> str:
     return resolve_error_profile(exc).error_code
 
 
-# 带 user_hint 的档案由 execute_generation_handler 错误分支直接采用 hint，查表仅覆盖无 hint 的档案；
-# 兜底码 generation_failed 与成因多样的 api_error 无定向指引，均走默认建议。
-_FAILURE_GUIDANCE_DEFAULT_CODES = frozenset({"generation_failed", "api_error"})
-
+# 带 user_hint 的档案由 execute_generation_handler 错误分支直接采用 hint，查表仅覆盖无 hint 的档案。
 _FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
     "config_error": "请检查服务端配置后重试。",
 }

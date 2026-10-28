@@ -12,11 +12,13 @@ from typing import Any
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools.pipeline import extract_images
 from seedream_mcp.tools.pipeline.context import GenerationExecutionContext, build_generation_context
 from seedream_mcp.tools.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
+    TOOL_OUTPUT_MODELS,
 )
 from seedream_mcp.tools.handlers.browse_images import (
     _BrowseRequestState,
@@ -168,6 +170,13 @@ def test_browse_empty_path_matches_schema() -> None:
     }
     obj = BrowseImagesStructuredOutput(**structured)
     assert obj.status == "empty"
+
+
+async def test_tool_output_models_keys_equal_registered_tool_names() -> None:
+    """TOOL_OUTPUT_MODELS 键集与 @mcp.tool 实际注册的工具名集合精确相等，漏登或多余登记均失败。"""
+    tools = await mcp.list_tools()
+    assert tools, "未注册任何工具"
+    assert set(TOOL_OUTPUT_MODELS) == {tool.name for tool in tools}
 
 
 def test_extract_images_normalizes_dict_data_to_list() -> None:
@@ -329,3 +338,5 @@ def test_real_browse_builder_output_instantiates_schema(tmp_path: Path) -> None:
     assert obj.success is True
     assert obj.count == 1
     assert obj.format_filter == [".png", ".jpg"]
+    assert obj.stall_permanent is False
+    assert obj.rescan_futile is False
