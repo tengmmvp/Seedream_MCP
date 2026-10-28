@@ -165,10 +165,11 @@ class InflightEntry(Generic[_InflightResultT]):
                 if on_cancel is not None:
                     on_cancel()
                 raise
-            except Exception:
-                # 共享 task 的异常（含取消态终结降级的 InflightTaskCancelledError）
-                # 经专属 future 送达本消费者，置位已消费标记，不再登记兜底日志。
-                self.observed = True
+            except BaseException as exc:
+                # 捕获的异常即 waiter 持有的转发异常本体方为送达，置位已消费标记；
+                # 注入异常身份不符（含转发写入后、消费者恢复前的窗口），不置位以保留孤儿日志安全网。
+                if waiter.done() and not waiter.cancelled() and exc is waiter.exception():
+                    self.observed = True
                 raise
             self.observed = True
             return result

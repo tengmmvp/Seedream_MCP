@@ -4,7 +4,11 @@ consume 经消费者专属 future 等待共享 task（测试内命名为 leader�
 转发：共享 task 以取消态终结而消费者未被取消时收 InflightTaskCancelledError，
 不以取消态终结；消费者自身的取消原样传播并触发 on_cancel；两类取消同时到达
 以消费者自身取消为准；leader 异常以独立副本投递各消费者，副本携带原始
-traceback 且重抛只前置自身帧，复制不支持的类型回退共享对象。
+traceback 且重抛只前置自身帧，复制不支持的类型回退共享对象；失败送达即置位
+observed，Exception 与 BaseException 族均不误发孤儿日志；
+外部注入的 BaseException 与转发异常身份不符
+（含转发写入后、消费者恢复前的窗口期），
+不置 observed，孤儿日志保留。
 """
 
 import asyncio
@@ -14,6 +18,7 @@ from typing import NoReturn
 
 import pytest
 
+from seedream_mcp.utils.core import inflight
 from seedream_mcp.utils.core.inflight import InflightEntry, InflightTaskCancelledError
 from seedream_mcp.utils.core.settle import await_settled_op
 
@@ -199,6 +204,96 @@ async def test_leader_failure_relayed_as_independent_clones() -> None:
     # 任一消费者都不收到共享对象本身，且各收到的副本互不相同
     assert all(outcome is not original for outcome in outcomes)
     assert len({id(outcome) for outcome in outcomes}) == len(outcomes)
+
+
+class _BaseDerivedFailure(BaseException):
+    """非 Exception 族失败替身，锁定 BaseException 族投递的 observed 契约。"""
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [RuntimeError, _BaseDerivedFailure],
+    ids=["exception-family", "base-exception-family"],
+)
+async def test_relayed_failure_marks_observed_across_exception_families(
+    monkeypatch: pytest.MonkeyPatch, error_type: type[BaseException]
+) -> None:
+    """共享 task 失败送达消费者即置位 observed：Exception 与 BaseException 族均不误发孤儿日志。"""
+    orphan_log_tasks: list["asyncio.Task[str]"] = []
+    monkeypatch.setattr(inflight, "log_unretrieved_task_exception", orphan_log_tasks.append)
+
+    async def _failing_leader() -> str:
+        raise error_type("leader 失败")
+
+    leader = asyncio.get_running_loop().create_task(_failing_leader())
+    entry = InflightEntry(leader)
+    with pytest.raises(error_type) as excinfo:
+        await entry.consume()
+    assert str(excinfo.value) == "leader 失败"
+    assert entry.observed
+    # observed 置位即不登记兜底回调，孤儿日志必然为空；让出一拍仅作调度兜底。
+    await asyncio.sleep(0)
+    assert orphan_log_tasks == []
+
+
+async def test_injected_base_exception_preserves_orphan_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外部注入的 BaseException 不置位 observed：共享 task 随后失败仍入孤儿日志。"""
+    orphan_log_leaders: list["asyncio.Task[str]"] = []
+    monkeypatch.setattr(inflight, "log_unretrieved_task_exception", orphan_log_leaders.append)
+
+    gate = asyncio.Event()
+
+    async def _failing_leader() -> str:
+        await gate.wait()
+        raise RuntimeError("leader 失败")
+
+    leader = asyncio.get_running_loop().create_task(_failing_leader())
+    entry = InflightEntry(leader)
+
+    # 手动驱动 consume 挂起于专属 future 后向协程注入异常，模拟非 future 送达路径。
+    consumer = entry.consume()
+    consumer.send(None)
+    with pytest.raises(KeyboardInterrupt):
+        consumer.throw(KeyboardInterrupt)
+    assert not entry.observed
+    assert entry.consumers == 0
+
+    gate.set()
+    await asyncio.wait({leader})
+    # 孤儿复查回调登记先于 wait 的完成回调，wait 返回即已入日志；让出一拍仅作调度兜底。
+    await asyncio.sleep(0)
+    assert orphan_log_leaders == [leader]
+
+
+async def test_injected_base_exception_in_relay_window_preserves_orphan_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """转发异常已写入专属 future 后的窗口注入身份不符：不置 observed，仍入孤儿日志。"""
+    orphan_log_leaders: list["asyncio.Task[str]"] = []
+    monkeypatch.setattr(inflight, "log_unretrieved_task_exception", orphan_log_leaders.append)
+
+    async def _failing_leader() -> str:
+        raise RuntimeError("leader 失败")
+
+    leader = asyncio.get_running_loop().create_task(_failing_leader())
+    entry = InflightEntry(leader)
+
+    # 手动驱动 consume 挂起于专属 future，待转发写入异常后、消费者恢复前注入。
+    consumer = entry.consume()
+    consumer.send(None)
+    # 转发回调登记先于 wait 的完成回调，wait 返回即转发已写入专属 future。
+    await asyncio.wait({leader})
+    with pytest.raises(KeyboardInterrupt):
+        consumer.throw(KeyboardInterrupt)
+    # 注入异常不是转发写入的那个对象，专属 future 已完成也不置位。
+    assert not entry.observed
+    assert entry.consumers == 0
+
+    # 让出一拍跑完 throw 后登记的孤儿复查回调，未送达的共享失败仍应入孤儿日志。
+    await asyncio.sleep(0)
+    assert orphan_log_leaders == [leader]
 
 
 def _origin_failure_frame() -> NoReturn:
