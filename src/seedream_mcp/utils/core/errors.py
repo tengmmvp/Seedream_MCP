@@ -5,7 +5,7 @@
 处理与重试决策。
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
@@ -149,9 +149,10 @@ def response_reports_failure(result: dict[str, Any]) -> bool:
     return not bool(result.get("success")) or result.get("status") == "failed"
 
 
-# HTTP 错误响应与异常类型的统一归约档案：状态码或异常类到展示标题、用户建议、
-# 结构化错误码的单点映射，handle_api_error、format_error_for_user 与
-# _classify_generation_error_type 共用，新增状态码或调整文案只需改这一处。
+# HTTP 错误响应与异常类型的统一归约档案：状态码与异常类到展示标题、用户建议、
+# 结构化错误码与应答状态的单点映射，handle_api_error、format_error_for_user
+# 与 _classify_generation_error_type 共用，webapp 状态表自 http_status 派生，
+# 新增状态码或调整文案只需改这一处。
 @dataclass(frozen=True)
 class _ErrorProfile:
     """单条错误归约档案。
@@ -160,6 +161,7 @@ class _ErrorProfile:
         display_title: 面向用户的展示标题。
         user_hint: 面向用户的可操作建议，可为空字符串。
         error_code: 结构化错误码。
+        http_status: 错误码对外应答的 HTTP 状态码，webapp 状态表由此派生。
         base_message: handle_api_error 拼装 SeedreamAPIError.message 的初始文案，
             仅 HTTP 状态档案使用，异常类型档案留空。
     """
@@ -167,6 +169,7 @@ class _ErrorProfile:
     display_title: str
     user_hint: str
     error_code: str
+    http_status: int
     base_message: str = ""
 
 
@@ -176,48 +179,56 @@ _HTTP_STATUS_PROFILES: dict[int, _ErrorProfile] = {
         "API调用失败",
         "请核对请求参数。",
         "api_error",
+        http_status=502,
         base_message="请求参数错误",
     ),
     401: _ErrorProfile(
         "认证失败",
         "请检查您的API密钥是否正确设置。",
         "auth_error",
+        http_status=503,
         base_message="API密钥无效或已过期",
     ),
     402: _ErrorProfile(
         "余额不足",
         "请检查账户余额与配额。",
         "payment_required",
+        http_status=402,
         base_message="账户余额不足或配额已耗尽",
     ),
     403: _ErrorProfile(
         "API调用失败",
         "请确认 API Key 已开通目标模型的调用权限。",
         "api_error",
+        http_status=502,
         base_message="访问被拒绝，请检查API权限",
     ),
     404: _ErrorProfile(
         "API调用失败",
         "请确认 API 端点配置。",
         "api_error",
+        http_status=502,
         base_message="API端点不存在",
     ),
     413: _ErrorProfile(
         "请求体过大",
         "请减小参考图尺寸或改用 URL 传入。",
         "payload_too_large",
+        http_status=400,
         base_message="请求体过大",
     ),
     422: _ErrorProfile(
         "请求参数语义错误",
         "请检查请求参数语义。",
         "validation_error",
+        http_status=400,
         base_message="请求参数语义错误",
     ),
     429: _ErrorProfile(
         "请求频率超限",
         "请稍后重试。",
         "rate_limited",
+        http_status=429,
         base_message="上游返回限流",
     ),
 }
@@ -227,9 +238,16 @@ _HTTP_5XX_PROFILE = _ErrorProfile(
     "API调用失败",
     "服务端暂时不可用，请稍后重试。",
     "api_error",
+    http_status=502,
     base_message="服务器内部错误",
 )
-_HTTP_DEFAULT_PROFILE = _ErrorProfile("API调用失败", "", "api_error", base_message="API调用失败")
+_HTTP_DEFAULT_PROFILE = _ErrorProfile(
+    "API调用失败",
+    "",
+    "api_error",
+    http_status=502,
+    base_message="API调用失败",
+)
 
 
 def _lookup_http_error_profile(status_code: int) -> _ErrorProfile:
@@ -247,6 +265,21 @@ def has_message_value(value: Any) -> bool:
     if isinstance(value, str):
         return len(value) > 0 and not value.isspace()
     return value is not None
+
+
+def normalized_upstream_error_code(raw_code: Any) -> str | None:
+    """仅接受非空字符串错误码并 strip 归一：上游数字码不臆测转字符串，纯空白码按缺失丢弃。"""
+    if isinstance(raw_code, str):
+        stripped = raw_code.strip()
+        return stripped or None
+    return None
+
+
+def upstream_message_fragment(raw_message: Any) -> str | None:
+    """上游 message 缺失时返回 None，非缺失形态经截断归一化为文本片段。"""
+    if has_message_value(raw_message):
+        return truncate_upstream_message_fragment(raw_message)
+    return None
 
 
 def handle_api_error(
@@ -274,30 +307,19 @@ def handle_api_error(
     if isinstance(response_data, dict):
         # error 键可用形态未拼出 message 时回退查顶层 message，畸形 error 值
         # （非 dict 非 str）不使顶层描述被跳过。
-        detail_message_extracted = False
-        if "error" in response_data:
-            error_detail = response_data["error"]
-            if isinstance(error_detail, dict):
-                raw_code = error_detail.get("code")
-                # 仅接受非空字符串错误码，上游数字码不臆测转换，其余类型置 None 丢弃。
-                error_code = raw_code if isinstance(raw_code, str) and raw_code else None
-                detail_message = error_detail.get("message")
-                if has_message_value(detail_message):
-                    error_message = (
-                        f"{error_message}: {truncate_upstream_message_fragment(detail_message)}"
-                    )
-                    detail_message_extracted = True
-            elif isinstance(error_detail, str) and has_message_value(error_detail):
-                error_message = (
-                    f"{error_message}: {truncate_upstream_message_fragment(error_detail)}"
-                )
-                detail_message_extracted = True
-        if not detail_message_extracted:
-            top_message = response_data.get("message")
-            if has_message_value(top_message):
-                error_message = (
-                    f"{error_message}: {truncate_upstream_message_fragment(top_message)}"
-                )
+        detail_fragment: str | None = None
+        error_detail = response_data.get("error")
+        if isinstance(error_detail, dict):
+            error_code = normalized_upstream_error_code(error_detail.get("code"))
+            detail_fragment = upstream_message_fragment(error_detail.get("message"))
+        elif isinstance(error_detail, str):
+            detail_fragment = upstream_message_fragment(error_detail)
+        if detail_fragment is not None:
+            error_message = f"{error_message}: {detail_fragment}"
+        else:
+            top_fragment = upstream_message_fragment(response_data.get("message"))
+            if top_fragment is not None:
+                error_message = f"{error_message}: {top_fragment}"
 
     return SeedreamAPIError(
         message=error_message,
@@ -311,24 +333,26 @@ def handle_api_error(
 # 自定义异常类型到归约档案的映射，按 isinstance 顺序匹配。APIError 按 status 子查表，
 # 不在此列表；SeedreamMCPError 基类与未识别异常各自有兜底档案。
 _EXCEPTION_PROFILES: tuple[tuple[type, _ErrorProfile], ...] = (
-    (SeedreamConfigError, _ErrorProfile("配置错误", "", "config_error")),
+    (SeedreamConfigError, _ErrorProfile("配置错误", "", "config_error", http_status=503)),
     (
         SeedreamValidationError,
-        _ErrorProfile("参数验证失败", "请检查对应参数的取值范围。", "validation_error"),
+        _ErrorProfile(
+            "参数验证失败", "请检查对应参数的取值范围。", "validation_error", http_status=400
+        ),
     ),
     (
         SeedreamTimeoutError,
-        _ErrorProfile("请求超时", "请检查网络连接或稍后重试。", "timeout_error"),
+        _ErrorProfile("请求超时", "请检查网络连接或稍后重试。", "timeout_error", http_status=504),
     ),
     (
         SeedreamNetworkError,
-        _ErrorProfile("网络连接错误", "请检查网络连接。", "network_error"),
+        _ErrorProfile("网络连接错误", "请检查网络连接。", "network_error", http_status=502),
     ),
 )
 
 # SeedreamMCPError 基类兜底与未识别异常兜底。
-_GENERIC_MCP_PROFILE = _ErrorProfile("操作失败", "", "generation_failed")
-_UNKNOWN_PROFILE = _ErrorProfile("未知错误", "", "generation_failed")
+_GENERIC_MCP_PROFILE = _ErrorProfile("操作失败", "", "generation_failed", http_status=500)
+_UNKNOWN_PROFILE = _ErrorProfile("未知错误", "", "generation_failed", http_status=500)
 
 
 def resolve_error_profile(error: Exception) -> _ErrorProfile:
@@ -345,6 +369,22 @@ def resolve_error_profile(error: Exception) -> _ErrorProfile:
     if isinstance(error, SeedreamMCPError):
         return _GENERIC_MCP_PROFILE
     return _UNKNOWN_PROFILE
+
+
+def iter_error_profiles() -> Iterator[_ErrorProfile]:
+    """按注册表序只读遍历全量归约档案（状态码、异常类型与兜底档案）。
+
+    webapp 状态表与守护测试共用本迭代消费同一注册表，档案增删只在注册表
+    单点发生，不暴露可变注册表结构。
+    """
+    yield from _HTTP_STATUS_PROFILES.values()
+    yield from (profile for _, profile in _EXCEPTION_PROFILES)
+    yield from (
+        _HTTP_5XX_PROFILE,
+        _HTTP_DEFAULT_PROFILE,
+        _GENERIC_MCP_PROFILE,
+        _UNKNOWN_PROFILE,
+    )
 
 
 def format_error_for_user(error: Exception) -> str:

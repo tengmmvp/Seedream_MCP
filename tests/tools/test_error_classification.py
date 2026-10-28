@@ -15,7 +15,6 @@ from mcp.types import TextContent
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.pipeline._failures import (
     _FAILURE_GUIDANCE_BY_ERROR_CODE,
-    _FAILURE_GUIDANCE_DEFAULT_CODES,
     _classify_generation_error_type,
     _failure_guidance_for_code,
 )
@@ -34,6 +33,7 @@ from seedream_mcp.utils.core.errors import (
     SeedreamValidationError,
     format_error_for_user,
     handle_api_error,
+    iter_error_profiles,
 )
 
 # ==================== has_message_value：缺失判定 ====================
@@ -137,7 +137,7 @@ def test_handle_api_error_extracts_upstream_error_dict() -> None:
 
 
 def test_handle_api_error_drops_non_string_error_code() -> None:
-    """上游 error.code 为数字或空串时 error_code 置 None，不臆测转字符串。"""
+    """上游 error.code 为数字、空串或纯空白串时 error_code 置 None，不臆测转字符串。"""
     numeric = handle_api_error(400, {"error": {"code": 40012, "message": "invalid image"}})
     assert numeric.error_code is None
     assert "invalid image" in numeric.message
@@ -145,6 +145,10 @@ def test_handle_api_error_drops_non_string_error_code() -> None:
     empty = handle_api_error(400, {"error": {"code": "", "message": "bad payload"}})
     assert empty.error_code is None
     assert "bad payload" in empty.message
+
+    whitespace = handle_api_error(400, {"error": {"code": " ", "message": "bad payload"}})
+    assert whitespace.error_code is None
+    assert "bad payload" in whitespace.message
 
 
 def test_handle_api_error_extracts_upstream_error_string() -> None:
@@ -426,24 +430,18 @@ def test_failure_guidance_api_error_without_status_falls_back_to_generic() -> No
 
 
 def test_failure_guidance_table_covers_hintless_profile_error_codes() -> None:
-    """无 user_hint 的档案错误码均登记在查表或显式默认集，带 hint 的不走表。
+    """无 user_hint 的档案错误码须划入查表键或默认集之一，带 hint 的不进表。
 
     带 hint 档案由 _execute 层直接采用 hint，表中登记即双源漂移；新增无 hint
-    档案未登记或登记集残留均在此失败。
+    档案码未更新划分快照即在此失败，须显式决定走查表还是默认建议。
     """
-    profiles = list(errors_module._HTTP_STATUS_PROFILES.values())
-    profiles += [profile for _, profile in errors_module._EXCEPTION_PROFILES]
-    profiles += [
-        errors_module._HTTP_5XX_PROFILE,
-        errors_module._HTTP_DEFAULT_PROFILE,
-        errors_module._GENERIC_MCP_PROFILE,
-        errors_module._UNKNOWN_PROFILE,
-    ]
-    hinted = {profile.error_code for profile in profiles if profile.user_hint}
-    hintless = {profile.error_code for profile in profiles if not profile.user_hint}
+    expected_table_keys = frozenset({"config_error"})
+    expected_default_codes = frozenset({"api_error", "generation_failed"})
+    hinted = {profile.error_code for profile in iter_error_profiles() if profile.user_hint}
+    hintless = {profile.error_code for profile in iter_error_profiles() if not profile.user_hint}
 
     assert not (hinted & set(_FAILURE_GUIDANCE_BY_ERROR_CODE))
-    assert hintless == (set(_FAILURE_GUIDANCE_BY_ERROR_CODE) | _FAILURE_GUIDANCE_DEFAULT_CODES)
+    assert hintless == expected_table_keys | expected_default_codes
 
 
 async def _run_failing_handler(exc: Exception) -> str:
