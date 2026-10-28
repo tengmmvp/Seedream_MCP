@@ -1,7 +1,8 @@
 """跨层一致性守护测试。
 
-锁定四组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
+锁定五组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
 能力表参考图上限与组图总数上限、MCP 注册工具名与 handlers ToolMetadata 工具名、
+webapp 错误状态表与错误档案及错误码槽位取值、
 路径相似建议与 CLI 端口解析的边界行为；另含 loguru exc_info 关键字、security
 标记级别与环境变量键清洗前缀的全源码静态守护，download.py PermissionError
 处理器归类守护，以及 repo-layout.md 仓库与 tests 结构契约的静态守护。新增取值
@@ -15,6 +16,7 @@ import ast
 import functools
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,8 +37,9 @@ from seedream_mcp.tools.handlers._metadata import (
     SEQUENTIAL_GENERATION,
     TEXT_TO_IMAGE,
 )
+from seedream_mcp.definitions import conventions
+from seedream_mcp.definitions.conventions import MAX_SEQUENTIAL_TOTAL_IMAGES
 from seedream_mcp.utils.core.validators import (
-    MAX_SEQUENTIAL_TOTAL_IMAGES,
     VALID_BACKGROUND_MODES,
     VALID_GENERATION_TOOL_TYPES,
     VALID_OPTIMIZE_MODES,
@@ -279,6 +282,177 @@ async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
     assert declared == registered
 
 
+def test_webapp_error_status_map_derives_from_profiles() -> None:
+    """webapp 状态表与错误档案同源：档案码段键值逐条一致，档案外登记段不撞键。"""
+    from seedream_mcp.utils.core.errors import iter_error_profiles
+    from seedream_mcp.webapp import _responses
+
+    extra_status = {error.type: error.http_status for error in _responses._ENDPOINT_OWN_ERRORS}
+    profile_status = {profile.error_code: profile.http_status for profile in iter_error_profiles()}
+    assert not (
+        set(profile_status) & set(extra_status)
+    ), "档案外登记与档案错误码撞键，档案状态被静默覆盖"
+    assert (
+        _responses.ERROR_TYPE_STATUS == profile_status | extra_status
+    ), "状态表偏离档案派生与档案外登记的并集"
+
+
+def test_webapp_error_status_merge_rejects_conflicting_codes() -> None:
+    """状态表合并对撞键 fail-fast，防按合并顺序静默覆盖一侧状态。"""
+    from seedream_mcp.webapp import _responses
+
+    with pytest.raises(ValueError, match="internal_error"):
+        _responses._merge_error_type_status({"internal_error": 500}, {"internal_error": 400})
+
+
+def test_webapp_error_status_profile_segment_rejects_conflicting_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """档案段状态表对同 error_code 不同 http_status fail-fast，防推导静默取后值。"""
+    from seedream_mcp.webapp import _responses
+
+    monkeypatch.setattr(
+        _responses,
+        "iter_error_profiles",
+        lambda: [
+            SimpleNamespace(error_code="conflicting_code", http_status=502),
+            SimpleNamespace(error_code="conflicting_code", http_status=500),
+        ],
+    )
+
+    with pytest.raises(AssertionError):
+        _responses._profile_error_status()
+
+
+# 错误码槽位的 AST 提取面：受跟踪错误构造调用（tools 层）与字符串形态的错误响应
+# （webapp 层）的定位实参、任意调用的 error_type 关键字实参与 error_type 形参缺省值，
+# 字面量与裸名两种取值形态同面提取；WebErrorInfo 构造不在提取面内，其状态随定义携带。
+_LITERAL_ERROR_CODE_CALL_ARGS = {
+    "build_error_dict": 0,
+    "build_error_structured": 1,
+    "respond_structured_error": 1,
+}
+
+
+def _call_tail_name(node: ast.Call) -> str | None:
+    """取调用目标的末段名（`_responses.respond_structured_error` 取 respond_structured_error）。"""
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _parameter_default_pairs(args: ast.arguments) -> list[tuple[ast.arg, ast.expr | None]]:
+    """形参与缺省值按位配对，覆盖位置参数与仅关键字参数两形态，无缺省为 None。"""
+    positional = [*args.posonlyargs, *args.args]
+    return [
+        *zip(positional[len(positional) - len(args.defaults) :], args.defaults),
+        *zip(args.kwonlyargs, args.kw_defaults),
+    ]
+
+
+def _error_type_slot_expressions(tree: ast.Module) -> list[ast.expr]:
+    """收集源码内全部 error_type 槽位上的表达式节点，槽位形态见提取面注释。"""
+    exprs: list[ast.expr] = []
+
+    def add(node: ast.expr | None) -> None:
+        if node is not None:
+            exprs.append(node)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            index = _LITERAL_ERROR_CODE_CALL_ARGS.get(_call_tail_name(node) or "")
+            if index is not None and len(node.args) > index:
+                add(node.args[index])
+            for keyword in node.keywords:
+                if keyword.arg == "error_type":
+                    add(keyword.value)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for param, default in _parameter_default_pairs(node.args):
+                if param.arg == "error_type":
+                    add(default)
+    return exprs
+
+
+def _error_type_literal_sites(tree: ast.Module) -> list[str]:
+    """提取 error_type 槽位上的字符串字面量取值。"""
+    return [
+        expr.value
+        for expr in _error_type_slot_expressions(tree)
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str)
+    ]
+
+
+def _error_type_name_sites(tree: ast.Module) -> list[str]:
+    """提取 error_type 槽位上的裸名，definitions 常量与变量路由两类同名收录。"""
+    return [expr.id for expr in _error_type_slot_expressions(tree) if isinstance(expr, ast.Name)]
+
+
+def test_error_type_slot_values_registered() -> None:
+    """error_type 槽位取值（字面量与 definitions 常量）须落在 webapp 状态表内，任一侧改名即漂移。"""
+    from seedream_mcp.webapp import _responses
+
+    known = set(_responses.ERROR_TYPE_STATUS)
+    defined = vars(conventions)
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    offenders: list[str] = []
+    for source_path in sorted(package_root.glob("**/*.py")):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        offenders += [
+            f"{source_path.name}: {literal}"
+            for literal in _error_type_literal_sites(tree)
+            if literal not in known
+        ]
+        # definitions 常量按取值比对登记；不可解析裸名为变量路由，与属性形态同样跳过
+        offenders += [
+            f"{source_path.name}: {name}"
+            for name in _error_type_name_sites(tree)
+            if name in defined and str(defined[name]) not in known
+        ]
+
+    assert offenders == [], f"错误码槽位取值未登记: {offenders}"
+
+
+def test_error_type_literal_extraction_covers_slot_forms() -> None:
+    """提取面覆盖定位实参、error_type 关键字实参与形参缺省三种字面量形态，裸名同面提取。"""
+    source = (
+        "def _fail(state, message, error_type='browse_failed'):\n"
+        "    build_error_dict(error_type, message)\n"
+        "    build_error_dict(BROWSE_FAILED_ERROR_TYPE, message)\n"
+        "    build_error_dict('generation_failed', message)\n"
+        "    build_error_structured(tool, 'model_info_failed', message)\n"
+        "    respond_structured_error(tool, 'validation_error', message)\n"
+        "    _fail(state, message, error_type='validation_error')\n"
+    )
+    tree = ast.parse(source)
+
+    assert sorted(_error_type_literal_sites(tree)) == [
+        "browse_failed",
+        "generation_failed",
+        "model_info_failed",
+        "validation_error",
+        "validation_error",
+    ]
+    assert _error_type_name_sites(tree) == ["error_type", "BROWSE_FAILED_ERROR_TYPE"]
+
+
+def test_error_type_literal_extraction_skips_variable_and_carried_forms() -> None:
+    """属性取码与展开传参不入提取面；变量路由入裸名面，非 definitions 常量不参与校验。"""
+    source = (
+        "code = compute()\n"
+        "build_error_dict(code, message)\n"
+        "build_error_structured(tool, profile.error_code, message)\n"
+        "respond_structured_error(tool, *error_info)\n"
+        "info = WebErrorInfo('endpoint_error', message, 400)\n"
+    )
+    tree = ast.parse(source)
+
+    assert _error_type_literal_sites(tree) == []
+    assert _error_type_name_sites(tree) == ["code"]
+
+
 def test_start_log_placeholders_match_builder_arity() -> None:
     """各 ToolMetadata 的开始日志模板 {} 占位个数与 builder 参数个数一致。
 
@@ -319,6 +493,22 @@ def test_cpu_offload_threshold_single_definition_in_executors() -> None:
     """卸载尺寸阈值单点定义于 executors，sanitizers 侧出现同名定义即归属漂移。"""
     assert hasattr(executors, "CPU_OFFLOAD_SIZE_THRESHOLD")
     assert not hasattr(sanitizers, "CPU_OFFLOAD_SIZE_THRESHOLD")
+
+
+def test_parallel_request_count_single_definition_in_conventions() -> None:
+    """并行生成上限单点定义于 definitions/conventions，他处同名赋值即归属漂移。"""
+    assert hasattr(conventions, "MAX_PARALLEL_REQUEST_COUNT")
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    offenders: list[str] = []
+    for source_path in sorted(package_root.rglob("*.py")):
+        relative = source_path.relative_to(package_root).as_posix()
+        if relative == "definitions/conventions.py":
+            continue
+        source_text = source_path.read_text(encoding="utf-8")
+        if re.search(r"^MAX_PARALLEL_REQUEST_COUNT\s*=", source_text, re.MULTILINE):
+            offenders.append(relative)
+
+    assert offenders == []
 
 
 def test_security_marked_logs_are_warning_level() -> None:
@@ -474,7 +664,7 @@ def test_style_prompt_prefix_names_registered_tools() -> None:
 
 
 def test_context_probe_keys_match_schema_fields() -> None:
-    """context 的工具特有字段探测键须为某输入模型的真字段，改名漂移即失败。"""
+    """context 的工具特有探测键须为某输入模型的真字段或声明的 property 访问器。"""
     from seedream_mcp.tools.pipeline import context as context_module
     from seedream_mcp.tools.schemas import (
         ImageToImageInput,
@@ -495,10 +685,11 @@ def test_context_probe_keys_match_schema_fields() -> None:
         SequentialGenerationInput,
     ):
         declared |= set(model.model_fields)
+        declared |= {name for name, member in vars(model).items() if isinstance(member, property)}
 
     assert (
         not probed - declared
-    ), f"context 探测键不在任何输入模型字段中: {sorted(probed - declared)}"
+    ), f"context 探测键不在任何输入模型字段或访问器中: {sorted(probed - declared)}"
 
 
 # ==================== 零覆盖小面 ====================
@@ -534,12 +725,15 @@ def test_cli_port_type_rejects_invalid_port() -> None:
 
 _SRC_ROOT = Path(seedream_mcp.__file__).resolve().parent
 
-# S1 包根准入的封闭集合：身份文件＋六域包＋skills 数据目录。
+# S1 包根准入的封闭集合：身份文件＋七域包＋skills 数据目录。
 _ALLOWED_ROOT_FILES = frozenset({"__init__.py", "__main__.py", "version.py", "py.typed"})
-_ALLOWED_ROOT_DIRS = frozenset({"client", "config", "server", "tools", "utils", "webapp", "skills"})
+_ALLOWED_ROOT_DIRS = frozenset(
+    {"client", "config", "definitions", "server", "tools", "utils", "webapp", "skills"}
+)
 
-# D1 跨包边白名单：源组 -> 允许目标组集合（version 为全局豁免不入表）。
+# D1 跨包边白名单：源组 -> 允许目标组集合（version 与 definitions 作目标全局豁免）。
 _ALLOWED_MODULE_DEPS: dict[str, frozenset[str]] = {
+    "definitions": frozenset(),
     "utils.model": frozenset(),
     "utils.core": frozenset({"utils.model"}),
     "utils.io": frozenset({"utils.core"}),
@@ -802,7 +996,7 @@ def _lazy_export_edges() -> set[tuple[str, str]]:
 
 
 def test_package_root_admission() -> None:
-    """包根仅允许身份文件、六域包与 skills 数据目录驻留（S1）。"""
+    """包根仅允许身份文件、七域包与 skills 数据目录驻留（S1）。"""
     for entry in sorted(_SRC_ROOT.iterdir()):
         if entry.name == "__pycache__":
             continue
@@ -813,12 +1007,16 @@ def test_package_root_admission() -> None:
 
 
 def test_module_dependency_edges_follow_d1() -> None:
-    """模块级与 TYPE_CHECKING 跨包导入按 D1 白名单判定，version 全局豁免。"""
+    """模块级与 TYPE_CHECKING 跨包导入按 D1 白名单判定，version 与 definitions 作目标全局豁免。"""
     violations: list[str] = []
     for src, buckets in _scan_module_edges().items():
         src_group = _dep_group(src)
         for dst in buckets["runtime"] | buckets["type_checking"]:
-            if not dst.startswith("seedream_mcp") or dst == "seedream_mcp.version":
+            if (
+                not dst.startswith("seedream_mcp")
+                or dst == "seedream_mcp.version"
+                or dst.startswith("seedream_mcp.definitions")
+            ):
                 continue
             dst_group = _dep_group(dst)
             if dst_group == src_group:

@@ -12,17 +12,10 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
-# 自动保存单文件大小上限默认值，config、download 与 save 共享此单一来源。
-DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
+from ...definitions.conventions import MAX_IMAGE_PIXELS
 
 # 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源。
 DEFAULT_IMAGE_EXTENSION = ".jpeg"
-
-# 参考图与下载两入口的像素上限单一来源。
-MAX_IMAGE_PIXELS = 36_000_000
-
-# 数据目录名：<数据根目录>/DATA_DIR_NAME 下并列 images/thumbs/logs，整体删除即清理。
-DATA_DIR_NAME = ".seedream"
 
 # 格式家族表：家族名 -> 族内扩展名（小写含点号，族序与族内序即展示序）。
 # 同族扩展名互为同格式别名（.jpg/.jpeg、.heic/.heif）；受支持白名单、下载侧
