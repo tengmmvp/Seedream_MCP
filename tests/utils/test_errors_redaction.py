@@ -763,6 +763,70 @@ def test_url_userinfo_tail_stays_linear_on_hostile_intrusion_runs() -> None:
         assert time.perf_counter() - start < 1.0, repr(hostile[:16])
 
 
+def test_sanitize_error_text_strips_overlong_userinfo_before_truncation() -> None:
+    """超限 userinfo 先于 500 字符档截断剥离：@ 终结符落在截断点之外时凭据前缀不随截断保留。"""
+    url = "https://user:" + "a" * 600 + "@example.com/x"
+
+    assert sanitize_error_text(f"failed {url}") == "failed https://example.com/x"
+
+    # 剥离后仍超限的 URL 只截断净数据，标记申报剥离后长度。
+    long_tail = "https://user:" + "a" * 600 + "@example.com/" + "b" * 600
+    redacted = sanitize_error_text(f"failed {long_tail}")
+
+    assert redacted.startswith("<truncated:627 chars> ")
+    assert "aaaa" not in redacted
+    assert "https://example.com/" in redacted
+
+
+def test_sanitize_data_text_strips_overlong_userinfo_before_truncation() -> None:
+    """超限 userinfo 先于 16KB 档截断剥离：@ 终结符落在截断点之外时凭据前缀不随截断保留。"""
+    url = "https://user:" + "a" * 20_000 + "@example.com/x"
+
+    assert sanitize_data_text(url) == "https://example.com/x"
+
+    # 剥离后仍超限的 URL 只截断净数据，标记申报剥离后长度。
+    long_tail = "https://user:" + "a" * 20_000 + "@example.com/" + "b" * 20_000
+    redacted = sanitize_data_text(long_tail)
+
+    assert redacted.startswith("<truncated:20020 chars> ")
+    assert "aaaa" not in redacted
+    assert "https://example.com/" in redacted
+    assert len(redacted) <= 16_384
+
+
+def test_userinfo_strip_skips_at_free_text_via_precheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无字面 @ 的全文经前置守卫跳过 userinfo 正则扫描，含 @ 文本照常全文进入。
+
+    _sanitize_output_string 对截断后文本的兜底剥离保留；守卫消除的是未截断
+    全长度的线性扫描。
+    """
+    import seedream_mcp.utils.core.sanitizers as sanitizers_module
+
+    real_strip = sanitizers_module._strip_url_userinfo
+    calls: list[str] = []
+
+    def _spy(text: str) -> str:
+        calls.append(text)
+        return real_strip(text)
+
+    monkeypatch.setattr(sanitizers_module, "_strip_url_userinfo", _spy)
+
+    at_free_error = "不含 at 符号的普通错误文本 " + "x" * 2_000
+    at_free_url = "https://example.com/" + "a" * 20_000
+    sanitize_error_text(at_free_error)
+    sanitize_data_text(at_free_url)
+
+    assert at_free_error not in calls
+    assert at_free_url not in calls
+
+    with_credentials = "失败 https://user:pw@example.com/x"
+    sanitize_error_text(with_credentials)
+
+    assert with_credentials in calls
+
+
 # ==================== 全角分隔符绕过与结果数据路径净化 ====================
 
 

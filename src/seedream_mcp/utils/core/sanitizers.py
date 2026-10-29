@@ -821,7 +821,7 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
 
 
 def _sanitize_message_for_output(value: Any, limit: int = MESSAGE_OUTPUT_LIMIT) -> str:
-    """对异常 message 先截断再剥离敏感片段，供 format_error_for_user 输出净化。
+    """对异常 message 截断并剥离敏感片段，供 format_error_for_user 输出净化。
 
     非字符串先归一化为文本再进管线，dict 形态不借 str/repr 穿透。
     """
@@ -831,21 +831,24 @@ def _sanitize_message_for_output(value: Any, limit: int = MESSAGE_OUTPUT_LIMIT) 
 def sanitize_error_text(
     message: _SanitizedValue, limit: int = MESSAGE_OUTPUT_LIMIT
 ) -> _SanitizedValue:
-    """对上游错误文本先截断再剥离敏感片段与控制字符，供全部用户可见输出路径共用。
+    """对上游错误文本先剥离 URL userinfo 再截断与全套脱敏，供全部用户可见输出路径共用。
 
-    先截断使脱敏正则的工作长度受 limit 约束，是对抗超长构造输入的纵深兜底；丢弃
-    段凭据随截断消失，保留段凭据被脱敏剥离，截断点落在键名中间时值已一并丢弃，
-    两个方向都不残留。脱敏把短值替换为 *** 可能使产物超过 limit，剥旧标记重拼
-    单标记补偿一轮即收敛：补偿截断后的文本已脱敏，再脱敏恒等；异常路径外的
-    结果数据出口——SSE 失败事件、响应 data 项的 error 字段、并行聚合消息、
-    自动保存 error——统一经本函数收敛为同一防护口径。非字符串原样返回。
+    userinfo 剥离先于截断：@ 终结符落在截断点之后时正则失配，凭据前缀会随截断
+    保留；该模式回溯随总长线性且无字面 @ 时必然失配，普通文本经前置守卫免全文
+    扫描。全文运行不破坏截断对其余脱敏正则工作长度的纵深兜底，丢弃段凭据随
+    截断消失、保留段凭据被脱敏剥离的口径不变。脱敏把短值替换为 *** 可能使产物
+    超过 limit，剥旧标记重拼单标记补偿一轮即收敛：补偿截断后的文本已脱敏，
+    再脱敏恒等；异常路径外的结果数据出口——SSE 失败事件、响应 data 项的 error
+    字段、并行聚合消息、自动保存 error——统一经本函数收敛为同一防护口径。
+    非字符串原样返回。
     """
     if not isinstance(message, str):
         return message
-    sanitized = _sanitize_output_string(_truncate_value_for_output(message, limit=limit))
+    redacted = _strip_url_userinfo(message) if "@" in message else message
+    sanitized = _sanitize_output_string(_truncate_value_for_output(redacted, limit=limit))
     if len(sanitized) > limit:
         sanitized = _sanitize_output_string(
-            _retruncate_with_single_marker(sanitized, limit, len(message))
+            _retruncate_with_single_marker(sanitized, limit, len(redacted))
         )
     if len(sanitized) > limit:
         sanitized = sanitized[:limit]
@@ -908,21 +911,22 @@ def _data_text_needs_full_sanitize(value: str, limit: int) -> bool:
 
 
 def _sanitize_url_data_text(value: str, limit: int) -> str:
-    """纯 URL 数据字段的轻量净化：剥离未配对代理并截断后，再剥离 userinfo、控制字符与空白态 Bearer 令牌。
+    """纯 URL 数据字段的轻量净化：剥离未配对代理与 userinfo 后截断，再压平控制字符并剥离空白态 Bearer 令牌。
 
     查询参数是 URL 的组成部分而非凭据回显，键值裸值脱敏会把签名 URL 的查询串整体
-    替换为 *** 使数据不可用；userinfo 在控制字符压平前剥离，压平产生的空格会打断
-    userinfo 匹配使凭据逃逸；压平拼出的 Bearer 令牌回显由仅空白分支剥离，冒号形态
+    替换为 *** 使数据不可用；userinfo 先于截断与压平剥离——截断丢弃 @ 终结符、
+    压平产生的空格打断匹配，两种改写都会使凭据逃逸，且无字面 @ 时模式必然失配、
+    经前置守卫免全文扫描；压平拼出的 Bearer 令牌回显由仅空白分支剥离，冒号形态
     只剩误伤、不在此剥离。
     """
     stripped = strip_unpaired_surrogates(value)
-    truncated = cast("str", _truncate_value_for_output(stripped, limit=limit))
-    redacted = _strip_url_userinfo(truncated)
-    redacted = CONTROL_CHARS_PATTERN.sub(" ", redacted)
-    redacted = _BEARER_WHITESPACE_PATTERN.sub(r"\1***", redacted)
-    if len(redacted) > limit:
-        redacted = _retruncate_with_single_marker(redacted, limit, len(stripped))
-    return redacted
+    redacted = _strip_url_userinfo(stripped) if "@" in stripped else stripped
+    truncated = cast("str", _truncate_value_for_output(redacted, limit=limit))
+    flattened = CONTROL_CHARS_PATTERN.sub(" ", truncated)
+    flattened = _BEARER_WHITESPACE_PATTERN.sub(r"\1***", flattened)
+    if len(flattened) > limit:
+        flattened = _retruncate_with_single_marker(flattened, limit, len(redacted))
+    return flattened
 
 
 def sanitize_data_text(value: _SanitizedValue, limit: int = DATA_OUTPUT_LIMIT) -> _SanitizedValue:
