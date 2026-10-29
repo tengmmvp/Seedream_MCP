@@ -140,6 +140,20 @@ function clearRefError() {
 }
 
 /**
+ * 为一张待入列的参考图腾出槽位：满档时既有参考图自末位让位、回暂存不丢。
+ */
+export function ensureRefCapacity() {
+  const config = toolConfig(state.tool);
+  let evicted = false;
+  // length > 0 兼作 max=0 工具（文生图）的循环终止防御。
+  while (state.refs.length > 0 && state.refs.length >= config.max) {
+    state.parkedRefs.push(state.refs.pop());
+    evicted = true;
+  }
+  if (evicted) renderReferences();
+}
+
+/**
  * 添加一张参考图并重渲染；超数量上限或 data URI 累计超限时行内提示拒绝。
  * 上传、灯箱回填与 URL 手输均经此汇聚受校验。
  *

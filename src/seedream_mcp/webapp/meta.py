@@ -32,6 +32,7 @@ from ..utils.model.capabilities import (
 from . import _responses, constants
 from ._responses import _NoFollowFileResponse
 from .constants import PAGE_SECURITY_HEADERS, WEB_API_PREFIX, WEB_INDEX_PATH
+from .generate import generate_fallback_timeout_ms
 
 logger = get_logger()
 
@@ -232,6 +233,7 @@ async def web_config_info(_request: Request) -> Response:
     仅回传可用性布尔，不向浏览器泄露服务器绝对路径；
     不可用时前端在图库区给出配置指引。
     unknown_max_reference_images 与 upload_budget_chars 使前端的未知模型参考图上限和上传预算预检与后端配置单一来源；
+    generate_fallback_timeout_ms 下发满档等待预算作前端 preflight 失败的兜底；
     响应附 cache-control: no-store，兼作鉴权探测端点的状态不落代理缓存。
     """
     config = get_active_config()
@@ -251,6 +253,7 @@ async def web_config_info(_request: Request) -> Response:
             "supported_extensions": list(SUPPORTED_IMAGE_EXTENSIONS_ORDERED),
             "max_request_count": MAX_PARALLEL_REQUEST_COUNT,
             "max_images": MAX_SEQUENTIAL_TOTAL_IMAGES,
+            "generate_fallback_timeout_ms": generate_fallback_timeout_ms(config),
             "images_root_available": images_root_available,
             "images_root_hint": (
                 ""

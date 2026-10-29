@@ -16,11 +16,16 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from starlette.requests import Request
 
 from _lib.cpu_offload_spy import CpuOffloadSpy
 from _lib.subprocess_helpers import _run_in_subprocess
 from _lib.web_fixtures import web_asgi_client, write_workspace_config
-from seedream_mcp.config import SeedreamConfig, set_active_config
+from seedream_mcp.config import SeedreamConfig, get_active_config, set_active_config
+from seedream_mcp.definitions.conventions import (
+    IMAGE_TO_IMAGE_TOOL_NAME,
+    MAX_PARALLEL_REQUEST_COUNT,
+)
 from seedream_mcp.server.transport import _build_streamable_app
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.sanitizers import _CONTAINER_REPR_DEPTH_LIMIT
@@ -31,7 +36,22 @@ from seedream_mcp.webapp.constants import (
     STATIC_PAGE_EXTENSIONS,
     STATIC_SECURITY_HEADERS,
 )
+from seedream_mcp.webapp.generate import _preflight_timeout_ms
 from seedream_mcp.webapp.meta import _upload_budget_chars
+
+
+def _full_load_preflight_request() -> Request:
+    """满档预检请求：表单上限请求数加图层拆分满额产图，与前端兜底口径一致。"""
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [],
+            "query_string": (
+                f"request_count={MAX_PARALLEL_REQUEST_COUNT}&layer_decomposition=1".encode()
+            ),
+        }
+    )
 
 
 def test_upload_budget_derivation_floors_at_zero() -> None:
@@ -62,12 +82,16 @@ async def test_production_app_serves_web_console(
     assert info["images_root_available"] is True
     # 前端派生所需的字段齐备：未知模型档位与参考图上限与后端 unknown 家族同源，
     # 数值上限与后端常量同源，上传预算与请求体上限同源，水印默认值与配置同源；
-    # 生成等待预算由生成端点 preflight 按同一输入推导，原料不在本端点下发。
+    # 满档等待预算兜底与生成端点 preflight 的同投影推导一致（经真实预检入口
+    # 复算），预算本体仍由 preflight 按输入单源推导。
     assert info["fallback_presets"] == ["1K", "1.5K", "2K", "3K", "4K"]
     assert info["unknown_max_reference_images"] == 14
     assert info["upload_budget_chars"] == 61 * 1024 * 1024
     assert info["max_request_count"] == 10
     assert info["max_images"] == 15
+    assert info["generate_fallback_timeout_ms"] == _preflight_timeout_ms(
+        _full_load_preflight_request(), get_active_config(), IMAGE_TO_IMAGE_TOOL_NAME
+    )
     assert info["default_watermark"] is False
     assert static_response.status_code == 200
     assert html_direct_response.status_code == 404
@@ -77,7 +101,7 @@ async def test_production_app_serves_web_console(
 async def test_config_info_drops_generate_timeout_materials(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """config-info 不下发生成等待预算原料：预算由生成端点 preflight 按输入单源推导，防前端并存第二套推导。"""
+    """config-info 只下发满档兜底预算不下发推导原料：预算由生成端点 preflight 按输入单源推导，防前端并存第二套推导。"""
     images_root = tmp_path / ".seedream" / "images"
     images_root.mkdir(parents=True)
     config = SeedreamConfig(
@@ -92,6 +116,7 @@ async def test_config_info_drops_generate_timeout_materials(
 
     info = response.json()
     assert info["auto_save_enabled"] is True
+    assert isinstance(info["generate_fallback_timeout_ms"], int)
     for removed in (
         "generate_timeout_ms",
         "api_retry_budget_ms",
@@ -104,6 +129,33 @@ async def test_config_info_drops_generate_timeout_materials(
         "generate_max_images_per_request",
     ):
         assert removed not in info
+
+
+async def test_config_info_fallback_budget_tracks_active_config(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """满档兜底预算随活动配置推导：运维上调 API 超时后下发值同步抬升。
+
+    兜底若为静态常量，调参部署 preflight 失败时按缺省档提前放弃仍在计费的
+    等待。
+    """
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(tmp_path)))
+    app = _build_streamable_app("127.0.0.1", False, "", True)
+
+    async with web_asgi_client(app) as client:
+        baseline = (await client.get("/web/api/config-info")).json()["generate_fallback_timeout_ms"]
+        set_active_config(
+            SeedreamConfig(
+                api_key="test_key",
+                api_timeout=1200,
+                workspace_root=str(tmp_path),
+            )
+        )
+        tuned = (await client.get("/web/api/config-info")).json()["generate_fallback_timeout_ms"]
+
+    assert tuned > baseline
 
 
 async def test_production_app_without_web_returns_404(

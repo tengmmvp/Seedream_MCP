@@ -22,7 +22,9 @@ from _lib.web_fixtures import (
     write_workspace_config,
 )
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.tools.outputs.sanitize import _REQUEST_FAILED_TYPE
 from seedream_mcp.utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS_ORDERED
+from seedream_mcp.utils.model.capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 from seedream_mcp.webapp.constants import (
     STATIC_DIR,
     WEB_API_BROWSE,
@@ -557,6 +559,32 @@ def test_gallery_lightbox_budget_scales_with_content_length() -> None:
     assert re.search(r"finally\s*\{\s*disarm\(\);\s*\}", body), "计时器未在 finally 撤销"
 
 
+def test_lightbox_reference_eviction_is_unconditional() -> None:
+    """灯箱回填的满档腾挪无条件执行，槽位操作收敛 refs.js。
+
+    腾挪仅存在于文生图切换分支时，图生图唯一槽位已占（含切工具自动恢复的
+    占位）与多图融合满档下同一动作被数量上限拒绝，成败取决于先前所在工具；
+    让位项回暂存不丢，腾挪后列表即时重渲染。
+    """
+    gallery_js = read_js_module_source("gallery.js")
+    refs_js = read_js_module_source("refs.js")
+    use = function_body(gallery_js, r"export async function useLightboxAsReference\(.*?^}")
+    code = _js_code_without_comments(use)
+    switch_block, _ = _balanced_brace_block(
+        code, code.index("{", code.index("state.tool === TOOL_TEXT_TO_IMAGE"))
+    )
+    assert ".click();" in switch_block, "文生图分支缺切图生图动作"
+    assert "ensureRefCapacity" not in switch_block, "腾挪仍困在工具切换分支，路径未统一"
+    assert use.count("ensureRefCapacity();") == 1, "回填前缺无条件腾挪"
+    assert use.index("ensureRefCapacity();") < use.index('addReference("data_uri"'), "腾挪晚于入列"
+    evictor = function_body(refs_js, r"export function ensureRefCapacity\(.*?^}")
+    assert "state.parkedRefs.push(state.refs.pop());" in evictor, "让位项未回暂存不丢"
+    assert re.search(
+        r"state\.refs\.length > 0\s*&&\s*state\.refs\.length >= config\.max", evictor
+    ), "腾挪循环缺终止防御或满档判定"
+    assert "renderReferences();" in evictor, "腾挪后未重渲染参考图列表"
+
+
 def test_gallery_advance_guards_missing_next_offset() -> None:
     """next_offset 缺失的契约破坏不改状态；空停滞页原偏移原地重扫不污染回退栈。"""
     advance = function_body(
@@ -766,6 +794,26 @@ def test_refs_fallback_budget_matches_server_derivation() -> None:
     assert match, "refs.js 回退预算常量形态改变，守护需同步"
     default_body = SeedreamConfig(api_key="guard-key").http_max_body_size
     assert int(match.group(1)) * 1024 * 1024 == _upload_budget_chars(default_body)
+
+
+def test_refs_fallback_ref_limit_matches_server_default() -> None:
+    """refs.js 回退参考图上限与服务端 unknown 家族默认上限常量一致。"""
+    refs_js = read_js_module_source("refs.js")
+    match = re.search(r"DEFAULT_UNKNOWN_REF_LIMIT = (\d+);", refs_js)
+    assert match, "refs.js 回退参考图上限常量形态改变，守护需同步"
+    assert int(match.group(1)) == SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+
+
+def test_request_failed_sentinel_matches_backend_constant() -> None:
+    """generate.js 批次内失败占位哨兵与后端 _REQUEST_FAILED_TYPE 一致。
+
+    哨兵失配时失败请求卡静默丢失失败原因，失败计数与状态行文案失真。
+    """
+    generate_js = read_js_module_source("generate.js")
+    match = re.search(r'const REQUEST_FAILED_TYPE = "([^"]+)";', generate_js)
+    assert match, "generate.js 失败占位哨兵常量形态改变，守护需同步"
+    assert match.group(1) == _REQUEST_FAILED_TYPE, "跨语言失败占位哨兵失配"
+    assert "item.type === REQUEST_FAILED_TYPE" in generate_js, "哨兵常量未消费"
 
 
 def test_upload_accept_matches_supported_mimes() -> None:

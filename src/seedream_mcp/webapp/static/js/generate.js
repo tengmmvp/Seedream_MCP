@@ -397,10 +397,20 @@ function buildRenderDots() {
   }
 }
 
-// preflight 失败时的生成等待预算静态保守上限：
-// 按服务端默认配置的满档推导×1.5 取整到百万圆整档，兜底覆盖调幅有限的部署；
-// 超时消息已提示服务端可能仍在执行。
+// config 不可得时 preflight 失败回退的等待预算缺省：按服务端默认配置的满档
+// 推导×1.5 取整到百万圆整档（守护测试锁定下限）；超时消息已提示服务端可能
+// 仍在执行。
 const GENERATE_FALLBACK_TIMEOUT_MS = 25000000;
+
+// preflight 失败的等待兜底：优先 config-info 下发的满档推导（随部署配置走），
+// 不可得才落缺省常量。
+function generateFallbackTimeoutMs() {
+  const fromServer =
+    state.configInfo && state.configInfo.generate_fallback_timeout_ms;
+  return Number.isFinite(fromServer) && fromServer > 0
+    ? fromServer
+    : GENERATE_FALLBACK_TIMEOUT_MS;
+}
 
 // preflight 请求自身的等待上限：本机回环仅推导预算，毫秒级完成；到点截断的
 // 是故障态等待，回退保守上限。
@@ -454,7 +464,7 @@ const preflightCache = new Map();
  * 经生成端点 preflight 取等待预算：把提交快照的请求体投影成预算相关的五个
  * 查询参数（计数键仅投影正整数，download_tail 三态投影 true→"1"、false→"0"、
  * 缺省省略），不发请求体；省略键由服务端按同缺省推导，两侧键集由后端契约测试
- * 对账。同投影命中未超龄缓存免往返；请求失败回静态保守上限，不阻断提交。
+ * 对账。同投影命中未超龄缓存免往返；请求失败回退保守上限，不阻断提交。
  *
  * @param {string} tool - 提交时刻快照的工具标识。
  * @param {Object} body - 提交时刻快照的请求体。
@@ -497,7 +507,7 @@ async function preflightTimeoutMs(tool, body) {
   } catch {
     /* 网络、非 2xx 与载荷异常一律回退保守上限 */
   }
-  return GENERATE_FALLBACK_TIMEOUT_MS;
+  return generateFallbackTimeoutMs();
 }
 
 // 在途提交的取消控制器：非 null 即提交全程占用，主按钮呈现「取消」，占用期内
@@ -646,6 +656,10 @@ const RESULT_IMAGE_CONCURRENCY = 4;
 // 401 命中卡片的过期文案：令牌门已由请求层弹出，卡片只标注补输后的重试方式。
 const TOKEN_EXPIRED_CARD_MESSAGE = "令牌已过期，重新输入后请再次生成";
 
+// 批次内失败占位项的 type 哨兵，与后端 sanitize 的 _REQUEST_FAILED_TYPE 一致，
+// 由守护测试对账。
+const REQUEST_FAILED_TYPE = "image_generation.request_failed";
+
 // 结果渲染：web_path 优先走本服务鉴权图片端点，blob 装载使令牌只进请求头
 // 不进 URL；外链 url 走裸 fetch 防令牌外送，失败回退 img.src 直连，跨域
 // img 标签不受 CORS 限制。卡片先全部落地再分批装载，单张失败只降级该卡片
@@ -659,7 +673,7 @@ async function renderResults(payload) {
     const card = document.createElement("div");
     card.className = "result-card";
     // 批次内失败占位项展示原因。
-    if (item.type === "image_generation.request_failed") {
+    if (item.type === REQUEST_FAILED_TYPE) {
       failedCount += 1;
       const reason =
         item.error && item.error.message ? item.error.message : "未知错误";

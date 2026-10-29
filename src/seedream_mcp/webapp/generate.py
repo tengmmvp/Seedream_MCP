@@ -172,6 +172,56 @@ def _parse_clamped_query_int(
     return min(max(parsed, lower), upper)
 
 
+def _wait_budget_ms(
+    config: SeedreamConfig,
+    tool_name: str,
+    *,
+    request_count: int,
+    parallelism: int | None = None,
+    layer_decomposition: bool = False,
+    max_images: int | None = None,
+    image_count: int = 0,
+    download_tail: bool | None = None,
+) -> int:
+    """等待预算毫秒：波次调度预算加按需计入的自动保存下载尾巴。
+
+    download_tail 三态：None 回退全局自动保存开关，True/False 为请求级覆盖
+    （显式 True 覆盖全局关闭，与 pipeline 的生效值合成同口径）。
+    """
+    budget_ms = _generate_scheduling_budget_ms(config, request_count, parallelism=parallelism)
+    include_tail = config.auto_save_enabled if download_tail is None else download_tail
+    if not include_tail:
+        return budget_ms
+    total_images = request_count * _per_request_image_count(
+        tool_name,
+        layer_decomposition=layer_decomposition,
+        max_images=max_images,
+        image_count=image_count,
+    )
+    # 保存信号量为进程级共享（并发生成请求均分槽位），单请求按
+    # ceil(max_concurrent / generate_concurrency) 个槽位折算下载波次；未满载时
+    # 实际下载更快，预算取保守的满载均分假设。
+    slots_per_request = math.ceil(config.auto_save_max_concurrent / config.generate_concurrency)
+    tail_ms = math.ceil(total_images / slots_per_request) * worst_case_download_budget_ms(
+        config.auto_save_download_timeout, config.auto_save_max_retries
+    )
+    return budget_ms + tail_ms
+
+
+def generate_fallback_timeout_ms(config: SeedreamConfig) -> int:
+    """满档等待预算：表单上限请求数加图层拆分满额产图的最坏推导。
+
+    config-info 下发此值作前端 preflight 失败的等待兜底，随部署配置走；预算
+    本体仍由生成端点 preflight 按输入单源推导。
+    """
+    return _wait_budget_ms(
+        config,
+        IMAGE_TO_IMAGE_TOOL_NAME,
+        request_count=MAX_PARALLEL_REQUEST_COUNT,
+        layer_decomposition=True,
+    )
+
+
 def _preflight_timeout_ms(request: Request, config: SeedreamConfig, tool_name: str) -> int:
     """预检按 query 投影推导前端等待预算（波次调度预算加自动保存下载尾巴），不读请求体与图片目录。
 
@@ -183,20 +233,15 @@ def _preflight_timeout_ms(request: Request, config: SeedreamConfig, tool_name: s
     request_count = _parse_clamped_query_int(
         query.get("request_count"), 1, MAX_PARALLEL_REQUEST_COUNT, default=1
     )
-    budget_ms = _generate_scheduling_budget_ms(
+    # download_tail 三态投影请求级 auto_save 覆盖：0/1 对应 body 显式 false/true。
+    download_tail = query.get("download_tail")
+    return _wait_budget_ms(
         config,
-        request_count,
+        tool_name,
+        request_count=request_count,
         parallelism=_parse_clamped_query_int(
             query.get("parallelism"), 1, MAX_PARALLEL_REQUEST_COUNT
         ),
-    )
-    # download_tail 三态投影请求级 auto_save 覆盖：0/1 对应 body 显式 false/true，
-    # 显式 true 覆盖全局关闭（与 pipeline 的生效值合成同口径），缺省回退全局开关。
-    download_tail = query.get("download_tail")
-    if download_tail == "0" or (download_tail != "1" and not config.auto_save_enabled):
-        return budget_ms
-    total_images = request_count * _per_request_image_count(
-        tool_name,
         layer_decomposition=query.get("layer_decomposition") == "1",
         max_images=_parse_clamped_query_int(
             query.get("max_images"), 1, MAX_SEQUENTIAL_TOTAL_IMAGES
@@ -204,15 +249,8 @@ def _preflight_timeout_ms(request: Request, config: SeedreamConfig, tool_name: s
         image_count=_parse_clamped_query_int(
             query.get("image_count"), 0, SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES, default=0
         ),
+        download_tail=None if download_tail not in ("0", "1") else download_tail == "1",
     )
-    # 保存信号量为进程级共享（并发生成请求均分槽位），单请求按
-    # ceil(max_concurrent / generate_concurrency) 个槽位折算下载波次；未满载时
-    # 实际下载更快，预算取保守的满载均分假设。
-    slots_per_request = math.ceil(config.auto_save_max_concurrent / config.generate_concurrency)
-    tail_ms = math.ceil(total_images / slots_per_request) * worst_case_download_budget_ms(
-        config.auto_save_download_timeout, config.auto_save_max_retries
-    )
-    return budget_ms + tail_ms
 
 
 async def _run_web_generation(

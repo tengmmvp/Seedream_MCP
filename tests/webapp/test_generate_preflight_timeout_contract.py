@@ -128,7 +128,7 @@ def test_generate_preflight_submit_snapshot_and_wire_contract() -> None:
     """提交快照与预检契约：快照先于预检，查询参数自快照构造且为无体轻请求。
 
     提交时请求体与工具一次性快照并复用至 POST，表单不得二次读取；预检任何
-    失败取静态保守上限且不阻断提交；config-info 已收缩的五项原料字段在
+    失败回退等待预算兜底且不阻断提交；config-info 已收缩的五项原料字段在
     前端不得再有任何引用。
     """
     generate_js = read_js_module_source("generate.js")
@@ -149,7 +149,7 @@ def test_generate_preflight_submit_snapshot_and_wire_contract() -> None:
         r"await postJson\(\s*`/web/api/generate/\$\{tool}`,\s*body,\s*timeoutMs,",
         submit,
     ), "生成请求未复用快照的请求体与工具"
-    assert "return GENERATE_FALLBACK_TIMEOUT_MS;" in generate_js, "预检失败未回退静态保守上限"
+    assert "return generateFallbackTimeoutMs();" in generate_js, "预检失败未回退等待预算兜底"
     preflight = _preflight_js_body()
     assert re.search(
         r"postJsonRaw\(\s*`/web/api/generate/\$\{tool}\?\$\{params}`,\s*PREFLIGHT_TIMEOUT_MS,\s*\)",
@@ -201,14 +201,28 @@ def test_generate_preflight_cache_invalidated_on_config_reload() -> None:
     assert "preflightCache.clear()" in fetch, "配置落新未整体失效预算缓存"
 
 
-def test_generate_timeout_fallback_covers_server_derivation() -> None:
-    """generate.js 静态保守上限保有不低于服务端默认满档推导 1.5 倍的裕度。
+def test_generate_fallback_prefers_config_info_derivation() -> None:
+    """preflight 失败的等待兜底优先消费 config-info 下发的满档推导。
 
-    preflight 失败时前端取该上限等待生成；上限按服务端默认配置的满档推导
-    （表单上限请求数、图层拆分满额产图并计入最坏下载尾巴）×1.5 预置，
-    兜底覆盖调幅有限的部署；服务端调参（api_timeout、生成并发、下载预算
-    与并发、批次与图层上限）抬升推导使裕度失守时在此失败，提示同步抬升
-    上限常量。
+    载荷值随部署配置走，调参部署 preflight 失败不再被缺省常量提前掐断；
+    常量仅兜底 config 不可得窗口。
+    """
+    generate_js = read_js_module_source("generate.js")
+    helper = function_body(generate_js, r"function generateFallbackTimeoutMs\(.*?^}")
+    assert (
+        "state.configInfo.generate_fallback_timeout_ms" in helper
+    ), "回退未消费 config-info 下发的满档推导"
+    assert "GENERATE_FALLBACK_TIMEOUT_MS" in helper, "缺 config 不可得的常量兜底"
+    assert "return generateFallbackTimeoutMs();" in _preflight_js_body(), "预检失败未走统一回退取值"
+
+
+def test_generate_timeout_fallback_covers_server_derivation() -> None:
+    """generate.js 缺省常量保有不低于服务端默认满档推导 1.5 倍的裕度。
+
+    config-info 可得时前端优先消费其下发的满档推导（载荷对账另行守护），
+    本常量仅兜底 config 不可得窗口；按服务端默认配置的满档推导（表单上限
+    请求数、图层拆分满额产图并计入最坏下载尾巴）×1.5 取整到百万圆整档预置，
+    服务端调参抬升默认推导使裕度失守时在此失败，提示同步抬升该常量。
     """
     generate_js = read_js_module_source("generate.js")
     cap = re.search(r"GENERATE_FALLBACK_TIMEOUT_MS = (\d+);", generate_js)

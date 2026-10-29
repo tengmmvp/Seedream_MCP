@@ -25,7 +25,7 @@ import {
   TOOL_IMAGE_TO_IMAGE,
   TOOL_TEXT_TO_IMAGE,
 } from "./api.js";
-import { addReference, toolConfig } from "./refs.js";
+import { addReference, ensureRefCapacity } from "./refs.js";
 
 /** 图库单页条数。 */
 const GALLERY_PAGE_SIZE = 60;
@@ -497,8 +497,9 @@ function releaseLightboxUrl() {
 
 /**
  * 回填参考图：config-info 不再下发图片目录绝对路径，前端无从拼本地路径，改用
- * 灯箱已持有的 blob 转 data URI 作为参考图值。文生图工具自动切到图生图，
- * hash 变化由浏览器原生 hashchange 事件驱动视图切换。
+ * 灯箱已持有的 blob 转 data URI 作为参考图值。文生图工具自动切到图生图；满档
+ * 时既有参考图经 ensureRefCapacity 统一让位，不因所在工具与进入路径而异。
+ * 回填成功后 hash 跳回生成台，视图切换由浏览器原生 hashchange 事件驱动。
  */
 export async function useLightboxAsReference() {
   const blob = currentLightboxBlob;
@@ -506,15 +507,8 @@ export async function useLightboxAsReference() {
     return;
   if (state.tool === TOOL_TEXT_TO_IMAGE) {
     document.querySelector(`[data-tool="${TOOL_IMAGE_TO_IMAGE}"]`).click();
-    // 切工具时恢复的旧参考图可能占满唯一槽位，让位给用户显式选择的灯箱图，
-    // 被顶出的仍回暂存不丢。
-    while (
-      state.refs.length > 0 &&
-      state.refs.length >= toolConfig(TOOL_IMAGE_TO_IMAGE).max
-    ) {
-      state.parkedRefs.push(state.refs.pop());
-    }
   }
+  ensureRefCapacity();
   try {
     const dataUri = await blobToDataUri(blob);
     // 拒绝（数量或体积超限）时停留灯箱不跳转，具体原因已落生成台提示位。
