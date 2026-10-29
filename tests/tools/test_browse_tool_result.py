@@ -207,7 +207,7 @@ async def test_browse_images_ignores_outside_images_without_crashing(
 
     monkeypatch.setattr(
         browse_core_module,
-        "find_images_in_directory",
+        "_scan_resolved_directory",
         _fake_find_images_in_directory,
     )
 
@@ -233,7 +233,7 @@ async def test_browse_images_empty_format_filter_skips_scan(
     def _fail_find(*args: object, **kwargs: object) -> NoReturn:
         raise AssertionError("无有效后缀时不应触发目录扫描")
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fail_find)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _fail_find)
 
     result = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, format_filter=[])
@@ -417,7 +417,7 @@ async def test_browse_images_hit_path_pages_without_rescan(
         scan_calls.append(limit)
         return original_scan(**kwargs)
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _counting_scan)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _counting_scan)
 
     seed = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=7, offset=0)
@@ -761,7 +761,7 @@ async def test_browse_images_empty_message_sanitizes_unreadable_dir_paths(
         kwargs["unreadable_dirs"].append(hostile)
         return []
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_find)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _fake_find)
 
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
     try:
@@ -1111,7 +1111,7 @@ async def test_browse_details_shares_scan_cache_with_plain_browse(
         scan_calls.append(kwargs)
         return real_scan(**kwargs)
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _counting_scan)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _counting_scan)
 
     await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
     result = await handle_browse_images(
@@ -1208,7 +1208,7 @@ async def test_browse_images_surrogate_filename_does_not_break_serialization(
     def _fake_find(**kwargs: object) -> list[Path]:
         return [dirty, clean]
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_find)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _fake_find)
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
@@ -1366,7 +1366,7 @@ async def test_browse_images_dropped_entries_do_not_consume_page_quota(
         assert isinstance(limit, int)
         return scan_order[:limit]
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _fake_scan)
 
     page1 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
@@ -1632,7 +1632,7 @@ async def test_browse_images_stalled_window_terminates_under_mtime_churn(
         os.utime(images_root, ns=(churn_ns["next"], churn_ns["next"]))
         return real_scan(**kwargs)
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _churning_scan)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _churning_scan)
 
     result = await asyncio.wait_for(
         handle_browse_images(BrowseImagesInput(directory=".", recursive=False, limit=2)),
@@ -1812,7 +1812,7 @@ async def test_browse_stalled_by_out_of_scope_drops_reports_permanent_marker(
         assert isinstance(limit, int)
         return scan_order[:limit]
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _fake_scan)
 
     result = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
@@ -1858,7 +1858,7 @@ async def test_browse_stalled_empty_page_at_nonzero_offset_guides_resume(
         assert isinstance(limit, int)
         return scan_order[:limit]
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _fake_scan)
 
     result = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=4)
@@ -1929,7 +1929,7 @@ async def test_browse_stalled_out_of_scope_permanent_from_first_call(
         scan_limits.append(limit)
         return scan_order[:limit]
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _fake_scan)
 
     params = BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
     for result in [await handle_browse_images(params) for _ in range(3)]:
@@ -2125,7 +2125,7 @@ async def test_browse_images_out_of_scope_warning_aggregates_across_rescan_round
         assert isinstance(limit, int)
         return scan_order[:limit]
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _fake_scan)
 
     warnings: list[str] = []
     with capture_loguru_messages(warnings):
@@ -2163,7 +2163,7 @@ async def test_browse_images_out_of_scope_warning_survives_scan_exception(
             return scan_order[:limit]
         raise OSError("scan exploded mid-rescan")
 
-    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+    monkeypatch.setattr(browse_core_module, "_scan_resolved_directory", _fake_scan)
 
     warnings: list[str] = []
     with capture_loguru_messages(warnings):
@@ -2217,7 +2217,7 @@ def test_scan_and_filter_directory_passes_include_and_quota(
     from seedream_mcp.utils.io import scan as io_scan
 
     # scanner 取 browse 作用域的同名属性，外部替换该属性即可替换底层扫描。
-    assert captured["scanner"] is io_scan.find_images_in_directory
+    assert captured["scanner"] is io_scan._scan_resolved_directory
     # scope_signature 与 include 同为接线层下发参数：删除传参的回归在此当场暴露。
     assert captured["scope_signature"] == io_scan.read_scope_signature(
         [seeding.workspace.resolve()]

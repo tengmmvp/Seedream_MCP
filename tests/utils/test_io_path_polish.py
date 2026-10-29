@@ -289,18 +289,18 @@ def test_suggest_similar_paths_reuses_scan_cache(
 ) -> None:
     """重复的校验失败命中 io_scan 扫描缓存，同目录不重复全量扫描。
 
-    suggest_similar_paths 显式注入 io_scan.find_images_in_directory 为扫描器，
+    suggest_similar_paths 显式注入 io_scan._scan_resolved_directory 为扫描器，
     计数补丁挂在 io_scan 命名空间即可覆盖注入点。
     """
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     calls = {"count": 0}
-    original_scan = io_scan_module.find_images_in_directory
+    original_scan = io_scan_module._scan_resolved_directory
 
     def _counting_scan(*args: object, **kwargs: object) -> list[Path]:
         calls["count"] += 1
         return original_scan(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(io_scan_module, "find_images_in_directory", _counting_scan)
+    monkeypatch.setattr(io_scan_module, "_scan_resolved_directory", _counting_scan)
 
     first = io_scan_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)])
     second = io_scan_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)])

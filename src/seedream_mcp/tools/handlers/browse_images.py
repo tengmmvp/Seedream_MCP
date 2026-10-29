@@ -32,16 +32,16 @@ from ...utils.io.path import (
     is_within_any,
     is_within_any_nc_parts,
     is_within_resolved,
-    normalize_path,
     normcase_parts,
     read_scope_denial_message,
+    resolve_against_base,
 )
 from ...utils.io.scan import (
     ScanEntry,
     ScanIncompleteCause,
     ScanResult,
+    _scan_resolved_directory,
     cached_find_images_in_directory,
-    find_images_in_directory,
     read_scope_signature,
 )
 from ..pipeline._failures import log_tiered_failure
@@ -347,15 +347,14 @@ def _scan_and_filter_directory(
         return is_within_any_nc_parts(entry.resolved_nc_parts, scope_parts)
 
     try:
-        # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性
-        # 即可生效。
+        # 扫描核心 _scan_resolved_directory 经本模块作用域注入，外部替换本模块同名属性即可生效。
         scan_result = cached_find_images_in_directory(
             resolved_dir=resolved_dir,
             recursive=recursive,
             max_depth=max_depth,
             format_filter=format_filter,
             scan_limit=remaining,
-            scanner=find_images_in_directory,
+            scanner=_scan_resolved_directory,
             unreadable_dirs=unreadable_dirs,
             include=_within_read_scope,
             scope_signature=read_scope_signature(read_scope),
@@ -408,7 +407,7 @@ def _normalize_format_filter(raw: list[str] | None) -> tuple[list[str] | None, b
     """过滤出受支持的图片扩展名，返回 (过滤值, 是否无有效后缀)。
 
     仅保留受支持的扩展名；空列表与全部不受支持的输入均标记为无有效后缀，并保留原始
-    输入供 structuredContent 回显。空列表不能透传给 ``find_images_in_directory``，其将
+    输入供 structuredContent 回显。空列表不能透传给 ``_scan_resolved_directory``，其将
     空列表视为未限制而扫描全部。None 表示不限制、不标记。
 
     Args:
@@ -476,11 +475,14 @@ async def build_browse_fallback_result(
 
 async def _resolve_browse_directories(
     directory: str,
+    resolved_directory: Path | None = None,
 ) -> tuple[list[Path], list[Path], Path | None, str | None]:
     """目录解析阶段：求值读权限并解析请求目录，供越界判定与扫描取用。
 
-    绝对目录判读权限，相对目录仅限图片目录内。解析成功返回单个已 resolve 目录；
-    路径无效与相对越界携带错误消息，绝对越界返回 None。
+    resolved_directory 为调用方经 resolve_against_base 同口径预解析的结果，提供时
+    免重复解析，相对与读权限判定照常执行。绝对目录判读权限，相对目录仅限图片
+    目录内。解析成功返回单个已 resolve 目录；路径无效与相对越界携带错误消息，
+    绝对越界返回 None。
     """
 
     # 读权限求值与请求目录的 resolve/normalize 可能阻塞网络挂载目录，整体下沉
@@ -490,16 +492,25 @@ async def _resolve_browse_directories(
         """求值工作区、图片目录与读权限并解析请求目录，返回四元组。
 
         三类位置经 get_read_context 单点求值共享，消除本函数内对图片目录与工作区
-        的重复解析。
+        的重复解析；请求目录解析经 resolve_against_base 与 Web 图库共用同一组合。
         """
         workspace_roots, images_root, read_scope = get_read_context()
-        try:
-            # 相对路径以图片目录为基准；默认目录 "." 即图片目录本身。
-            resolved_dir = normalize_path(directory, str(images_root))
-        except ValueError as exc:
-            # 异常消息内含用户输入路径，经净化后才进入错误通道。
-            return workspace_roots, read_scope, None, sanitize_error_text(f"目录路径无效: {exc}")
-        if not os.path.isabs(directory) and not is_within_resolved(resolved_dir, images_root):
+        if resolved_directory is not None:
+            resolved_dir = resolved_directory
+            within_images_root = is_within_resolved(resolved_directory, images_root)
+        else:
+            try:
+                # 相对路径以图片目录为基准；默认目录 "." 即图片目录本身。
+                resolved_dir, within_images_root = resolve_against_base(directory, images_root)
+            except ValueError as exc:
+                # 异常消息内含用户输入路径，经净化后才进入错误通道。
+                return (
+                    workspace_roots,
+                    read_scope,
+                    None,
+                    sanitize_error_text(f"目录路径无效: {exc}"),
+                )
+        if not os.path.isabs(directory) and not within_images_root:
             return (
                 workspace_roots,
                 read_scope,
@@ -750,6 +761,7 @@ async def execute_browse_request(
     *,
     resolved_directories: list[Path],
     bounds_scope: list[Path] | None = None,
+    resolved_directory: Path | None = None,
 ) -> CallToolResult:
     """执行图片浏览主逻辑：求值读权限、解析目录、扫描分页并装配工具结果。
 
@@ -765,6 +777,8 @@ async def execute_browse_request(
         bounds_scope: 条目过滤的替代界，与读权限求交后生效，空列表拒绝；None 时按
             读权限（工作区 ∪ 图片目录）过滤；Web 图库传入图片目录使越界条目在
             扫描源头剔除。
+        resolved_directory: 调用方经 resolve_against_base 同口径预解析的请求目录，
+            提供时免重复解析；None 时按 directory 现解析。
 
     Returns:
         浏览工具结果，目录无效、越界与模型可自纠的参数错误为 is_error=True，目录
@@ -781,7 +795,7 @@ async def execute_browse_request(
     directory = params.effective_directory
 
     workspace_roots, read_scope, resolved_dir, dir_error = await _resolve_browse_directories(
-        directory
+        directory, resolved_directory
     )
 
     state = _BrowseRequestState.from_params(
@@ -853,6 +867,7 @@ async def handle_browse_images(
     ctx: Context[Any, Any] | None = None,
     *,
     bounds_scope: list[Path] | None = None,
+    resolved_directory: Path | None = None,
 ) -> CallToolResult:
     """处理图片浏览请求，扫描读权限（工作区 ∪ 图片目录）内指定目录的图片并分页返回。
 
@@ -864,6 +879,8 @@ async def handle_browse_images(
         ctx: MCP 上下文，用于进度上报，可为 None。
         bounds_scope: 条目过滤的替代界，与读权限求交后生效，None 时按读权限过滤；
             透传给 execute_browse_request。
+        resolved_directory: 调用方经 resolve_against_base 同口径预解析的请求目录，
+            提供时免重复解析；透传给 execute_browse_request。
 
     Returns:
         浏览工具结果，失败时 isError 为 True。
@@ -872,7 +889,11 @@ async def handle_browse_images(
     resolved_directories: list[Path] = []
     try:
         return await execute_browse_request(
-            params, ctx, resolved_directories=resolved_directories, bounds_scope=bounds_scope
+            params,
+            ctx,
+            resolved_directories=resolved_directories,
+            bounds_scope=bounds_scope,
+            resolved_directory=resolved_directory,
         )
     except Exception as exc:
         log_tiered_failure(logger, exc, "浏览图片处理失败")

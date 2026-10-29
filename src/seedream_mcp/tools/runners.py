@@ -114,6 +114,7 @@ async def run_browse_images(
     workspace_roots: ListRootsResult | None = None,
     *,
     bounds_scope: list[Path] | None = None,
+    resolved_directory: Path | None = None,
 ) -> CallToolResult:
     """注入工作区边界后委托 ``handle_browse_images`` 处理图片浏览请求。
 
@@ -122,9 +123,13 @@ async def run_browse_images(
         ctx: MCP 上下文，用于进度上报，可为 None。
         workspace_roots: 会话 Roots 声明，None 时保持当前工作区状态。
         bounds_scope: 条目过滤的替代界，与读权限求交后生效，None 时按读权限过滤。
+        resolved_directory: 调用方经 resolve_against_base 同口径预解析的请求目录，
+            提供时浏览核心免重复解析；None 时按 directory 现解析。
     """
     async with workspace_roots_scope_from_result(workspace_roots):
-        return await handle_browse_images(params, ctx=ctx, bounds_scope=bounds_scope)
+        return await handle_browse_images(
+            params, ctx=ctx, bounds_scope=bounds_scope, resolved_directory=resolved_directory
+        )
 
 
 async def run_get_model_info(config: SeedreamConfig) -> CallToolResult:

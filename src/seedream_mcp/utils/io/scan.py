@@ -3,7 +3,9 @@
 find_images_in_directory 为按 normcase 稳定顺序的深度优先遍历，条目预算封顶
 物化量；cached_find_images_in_directory 以 (目录路径, recursive, max_depth,
 格式过滤元组, 扫描函数, 读范围签名) 为键缓存有序扫描结果，供 browse_images
-翻页共享，消除深翻页的重复文件系统扫描。条目存储 ScanEntry（resolved 路径
+翻页共享，消除深翻页的重复文件系统扫描。包装层直调已 resolve 目录的扫描核心
+_scan_resolved_directory，倍增扩窗各轮免重复 resolve 预检；UNC 拒绝与存在性
+判定仍为公共入口的纵深闸。条目存储 ScanEntry（resolved 路径
 与 normcase 分量），扫描完成时 resolve 一次，深翻页命中免于逐文件重复 resolve；
 结果以冻结 ScanResult 外传，是否扫到目录末尾按原始扫描量判定，
 resolve 失败剔除不折损早停事实，不完整成因（截断/停滞/剔除）
@@ -412,8 +414,8 @@ def cached_find_images_in_directory(
     不付注定原地复现的扩窗重扫，间隔届满或请求范围更大时落回扩窗重扫并照常接续谱系；
     扫描到目录末尾即标记 complete，后续任意 scan_limit 均不再扫描。
     条目预算截断的扫描未到目录末尾，不按 complete 缓存，后续更大扫描可重新尝试。
-    scanner 可注入，默认本模块的 find_images_in_directory。两个出口均返回独立副本，
-    调用方原地修改不会篡改缓存；不可读目录随条目缓存并经收集列表去重透传。
+    scanner 可注入，缺省直调本模块的 _scan_resolved_directory 核心。两个出口均返回
+    独立副本，调用方原地修改不会篡改缓存；不可读目录随条目缓存并经收集列表去重透传。
     include 谓词与 resolve 剔除同口径由本层端到端承担配额填充：
     足量契约与停滞判定按满足谓词的可解析条目计，扩窗在循环内部完成；
     缓存条目恒存未过滤的 resolved 窗口，同读范围签名内共享，
@@ -426,8 +428,8 @@ def cached_find_images_in_directory(
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
         scan_limit: 扫描数量上限，用于未命中或前缀扩展时的早停与是否扫到目录末尾
             的判定。
-        scanner: 底层扫描函数，签名同 find_images_in_directory；None 时使用
-            默认实现。
+        scanner: 底层扫描函数，签名同 _scan_resolved_directory（首参为已
+            resolve 目录的字符串）；None 时使用默认实现。
         unreadable_dirs: 可选收集列表，扫描中无法读取的目录追加至此；缓存命中时
             回放条目内记录的不可读目录。
         include: 可选扫描条目的保留谓词，resolve 后过滤返回条目；None 表示不过滤；
@@ -462,7 +464,7 @@ def cached_find_images_in_directory(
     if scanner is not None:
         scan = scanner
     else:
-        scan = find_images_in_directory
+        scan = _scan_resolved_directory
     cache_key = (
         str(resolved_dir),
         recursive,
@@ -515,6 +517,7 @@ def cached_find_images_in_directory(
         # 停滞基线取缓存窗口的谓词满足量：扩窗首轮对照即计入零进展，免多烧一趟
         # 注定无果的加倍列举。
         previous_included = len(hit_window)
+    directory_arg = str(resolved_dir)
     # 扫描前捕获目录 mtime 使指纹与 images 自洽：扫描后捕获会在并发写入时反映新增
     # 而 images 未含，命中时持续返回陈旧列表。递归扫描不依赖 mtime 失效，跳过捕获。
     base_mtime = None if recursive else _get_directory_mtime_ns(resolved_dir)
@@ -531,7 +534,7 @@ def cached_find_images_in_directory(
         round_unreadable: list[Path] = []
         round_truncated: list[bool] = []
         scanned_images = scan(
-            directory=str(resolved_dir),
+            directory=directory_arg,
             recursive=recursive,
             max_depth=max_depth,
             extensions=format_filter,
@@ -617,7 +620,7 @@ def find_images_in_directory(
 
     安全前置条件：本函数不做工作区越界校验，调用方必须先确认 directory 位于允许
     的工作区根之内。UNC 形式的入参与 normalize_path 同口径在 resolve 前拒绝，返回
-    空列表并记录告警。
+    空列表并记录告警；resolve 失败降级为空结果，其后委托 _scan_resolved_directory 核心。
     单次调用物化的条目数（含非图片）受 _SCAN_ENTRY_BUDGET 预算封顶，重扫趟只计
     新增物化段使倍增摊销不翻倍计数，超限丢弃当批、终止遍历并返回已收集结果，向
     truncated 追加截断标记供调用方感知结果不完整；heapq.nsmallest 选前缀须消费
@@ -645,23 +648,56 @@ def find_images_in_directory(
         OSError: 扫描中途的文件系统错误向上传播，供调用方区分「扫完」与「中途
             出错」；单个目录不可读经 unreadable_dirs 收集后跳过，不视为失败。
     """
+    if is_unc_path(directory):
+        # 与 normalize_path 等 resolve 站点同口径在 resolve 前拦截。
+        logger.warning("拒绝 UNC 形式的目录扫描入参，返回空结果: {}", directory)
+        return []
+
+    try:
+        dir_path = Path(directory).resolve()
+    except Exception as e:
+        logger.error("搜索图片文件失败 {}: {}", directory, e)
+        return []
+
+    return _scan_resolved_directory(
+        str(dir_path),
+        recursive=recursive,
+        max_depth=max_depth,
+        extensions=extensions,
+        limit=limit,
+        unreadable_dirs=unreadable_dirs,
+        truncated=truncated,
+    )
+
+
+def _scan_resolved_directory(
+    directory: str,
+    *,
+    recursive: bool,
+    max_depth: int,
+    extensions: list[str] | None,
+    limit: int | None,
+    unreadable_dirs: list[Path] | None,
+    truncated: list[bool] | None,
+) -> list[Path]:
+    """扫描已 resolve 目录内的图片，遍历与降级口径见 find_images_in_directory。
+
+    信任前置：入参已 resolve 且经 UNC 拒绝（cached 包装层与公共入口的委托契约），
+    本函数不重复预检。
+    """
     images: list[Path] = []
 
     if limit is not None and limit <= 0:
         return images
 
-    if is_unc_path(directory):
-        # 与 normalize_path 等 resolve 站点同口径在 resolve 前拦截。
-        logger.warning("拒绝 UNC 形式的目录扫描入参，返回空结果: {}", directory)
-        return images
-
     try:
-        dir_path = Path(directory).resolve()
-
-        if not dir_path.exists() or not dir_path.is_dir():
+        dir_path = Path(directory)
+        if not dir_path.is_dir():
             logger.warning("目录不存在或不是目录: {}", directory)
             return images
     except Exception as e:
+        # Python 3.12 的 is_dir 对非忽略集 errno 的 stat 失败上抛，与 resolve
+        # 失败同口径降级为空结果而非上抛。
         logger.error("搜索图片文件失败 {}: {}", directory, e)
         return images
 
@@ -792,13 +828,14 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
                 logger.warning("拒绝 UNC 形式的建议搜索目录，跳过该目录: {}", search_dir)
                 continue
             resolved_dir = Path(search_dir).resolve()
+            # 扫描核心经本模块作用域显式注入，外部替换本模块同名属性即可生效。
             matched_entries = cached_find_images_in_directory(
                 resolved_dir=resolved_dir,
                 recursive=True,
                 max_depth=2,
                 format_filter=None,
                 scan_limit=500,
-                scanner=find_images_in_directory,
+                scanner=_scan_resolved_directory,
             ).images
 
             for entry in matched_entries:

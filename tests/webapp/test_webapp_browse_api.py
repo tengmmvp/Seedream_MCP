@@ -196,6 +196,75 @@ async def test_browse_rejects_directory_outside_read_scope(
     _assert_structured_failure(response, "browse_images", "invalid_directory", status=400)
 
 
+def _install_resolution_counters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[str], list[str]]:
+    """在 web 层与 browse 核心两处挂计数透传的共享解析组合，返回各自调用记录。
+
+    任一侧退回本地 normalize_path 拼装时计数落空，守护随即失败。
+    """
+    import seedream_mcp.tools.handlers.browse_images as browse_core_module
+    import seedream_mcp.webapp.gallery as gallery_module
+    from seedream_mcp.utils.io.path import (
+        BoundedResolution,
+        resolve_against_base as real_resolve,
+    )
+
+    gallery_calls: list[str] = []
+    core_calls: list[str] = []
+
+    def _gallery_resolve(directory: str, images_root: Path) -> BoundedResolution:
+        gallery_calls.append(directory)
+        return real_resolve(directory, images_root)
+
+    def _core_resolve(directory: str, images_root: Path) -> BoundedResolution:
+        core_calls.append(directory)
+        return real_resolve(directory, images_root)
+
+    monkeypatch.setattr(gallery_module, "resolve_against_base", _gallery_resolve)
+    monkeypatch.setattr(browse_core_module, "resolve_against_base", _core_resolve)
+    return gallery_calls, core_calls
+
+
+async def test_browse_resolves_request_directory_once_and_reuses_in_core(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """请求目录经共享解析组合在端点解析一次后透传 browse 复用：核心不再重复解析。"""
+    images_root = write_workspace_config(tmp_path)
+    (images_root / "2026-08-20").mkdir()
+    (images_root / "2026-08-20" / "a.png").write_bytes(make_png_bytes())
+    gallery_calls, core_calls = _install_resolution_counters(monkeypatch)
+    app = build_web_app()
+
+    response = await _post_browse(app, {})
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert gallery_calls == ["."]
+    assert core_calls == []
+
+
+async def test_browse_malformed_directory_falls_back_to_core_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """形态非法目录端点不透传解析结果，browse 核心经同一共享组合现解析报具体原因。"""
+    write_workspace_config(tmp_path)
+    gallery_calls, core_calls = _install_resolution_counters(monkeypatch)
+    app = build_web_app()
+
+    response = await _post_browse(app, {"directory": "//server/share/x"})
+
+    _assert_structured_failure(response, "browse_images", "validation_error", status=400)
+    assert gallery_calls == ["//server/share/x"]
+    assert core_calls == ["//server/share/x"]
+
+
 async def test_browse_rejects_parent_escape_relative_directory(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
@@ -337,7 +406,7 @@ async def test_web_browse_filters_outside_entries_at_source(
 ) -> None:
     """越界条目经 bounds_scope 在扫描源头剔除，响应不出现界外路径与计数虚高。"""
     import seedream_mcp.tools.handlers.browse_images as browse_module
-    from seedream_mcp.utils.io.scan import find_images_in_directory
+    from seedream_mcp.utils.io.scan import _scan_resolved_directory
 
     images_root = write_workspace_config(tmp_path)
     day_dir = images_root / "2026-08-20" / "text_to_image"
@@ -345,13 +414,13 @@ async def test_web_browse_filters_outside_entries_at_source(
     (day_dir / "a.png").write_bytes(make_png_bytes())
     outside = tmp_path / "outside.png"
     outside.write_bytes(make_png_bytes())
-    real_scanner = find_images_in_directory
+    real_scanner = _scan_resolved_directory
 
     def _scanner(directory: str, **kwargs: Any) -> list[Path]:
         found = real_scanner(directory, **kwargs)
         return found + [outside] if found else found
 
-    monkeypatch.setattr(browse_module, "find_images_in_directory", _scanner)
+    monkeypatch.setattr(browse_module, "_scan_resolved_directory", _scanner)
     app = build_web_app()
 
     response = await _post_browse(app, {})

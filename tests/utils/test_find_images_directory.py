@@ -23,6 +23,7 @@ from _lib.log_fakes import capture_loguru_messages
 from _lib.os_fakes import (
     _GatedFailureCounts,
     _install_counting_normcase_parts,
+    _install_counting_realpath,
     _install_failing_resolve_for,
 )
 from _lib.scan_fakes import _scan_entry
@@ -301,6 +302,25 @@ def test_find_images_returns_empty_when_directory_missing(tmp_path: Path) -> Non
     """目录不存在时返回空列表而非抛出异常。"""
     missing = tmp_path / "does_not_exist"
     assert find_images_in_directory(str(missing), recursive=False) == []
+
+
+def test_find_images_degrades_to_empty_when_stat_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目录预检的 stat 级失败降级为空结果：Python 3.12 的 is_dir 对非忽略 errno 上抛而非返回 False。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def _raise_is_dir(self: Path) -> bool:
+        raise OSError("sharing violation")
+
+    monkeypatch.setattr(Path, "is_dir", _raise_is_dir)
+
+    errors: list[str] = []
+    with capture_loguru_messages(errors):
+        result = find_images_in_directory(str(tmp_path), recursive=False)
+
+    assert result == []
+    assert any("搜索图片文件失败" in message for message in errors)
 
 
 def test_find_images_swallows_permission_error(
@@ -1014,6 +1034,95 @@ def test_cached_find_prefix_growth_crosses_resolve_failure_run(
     assert second.images == first.images
     assert second.complete is False
     assert limits == [3, 6]
+
+
+def test_cached_find_directory_resolve_not_repeated_per_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缺省扫描绑定直调已 resolve 核心：倍增扩窗各轮不再对目录重复 resolve 预检。"""
+    for name in ("0_bad1.png", "0_bad2.png", "a.png", "b.png", "c.png", "d.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_module.reset_directory_scan_cache()
+    realpath_calls = _install_counting_realpath(monkeypatch)
+    _install_failing_resolve_for(monkeypatch, "0_bad1.png", "0_bad2.png")
+    limits: list[int] = []
+    original_core = scan_module._scan_resolved_directory
+
+    def _limit_recording_core(**kwargs: Any) -> list[Path]:
+        limits.append(kwargs["limit"])
+        return original_core(**kwargs)
+
+    monkeypatch.setattr(scan_module, "_scan_resolved_directory", _limit_recording_core)
+
+    result = _scan_state(tmp_path, recursive=False, max_depth=1, scan_limit=3)
+
+    assert [entry.resolved_path.name for entry in result.images] == [
+        "a.png",
+        "b.png",
+        "c.png",
+        "d.png",
+    ]
+    # 扩窗两轮的 limit 均抵达替身；目录本身不进入 resolve 路径。
+    assert limits == [3, 6]
+    assert str(tmp_path) not in realpath_calls
+
+
+def test_cached_find_directory_arg_str_transparent_to_scanner(tmp_path: Path) -> None:
+    """注入扫描器收到的目录参数为普通 str（值即 str(resolved_dir)），可原样转交公共入口。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_module.reset_directory_scan_cache()
+    scanned_dirs: list[object] = []
+    original_scan = find_images_in_directory
+
+    def _recording_scan(**kwargs: Any) -> list[Path]:
+        scanned_dirs.append(kwargs["directory"])
+        return original_scan(**kwargs)
+
+    result = _scan_state(
+        tmp_path, recursive=False, max_depth=1, scan_limit=10, scanner=_recording_scan
+    )
+
+    assert [entry.resolved_path.name for entry in result.images] == ["a.png"]
+    assert all(isinstance(directory, str) for directory in scanned_dirs)
+    assert scanned_dirs == [str(tmp_path)]
+
+
+def test_cached_find_missing_directory_returns_empty_complete(tmp_path: Path) -> None:
+    """缺失目录按空扫完成处理：complete 空结果，不混入不可读目录污染空结果文案。"""
+    scan_module.reset_directory_scan_cache()
+    unreadable: list[Path] = []
+
+    result = _scan_state(
+        tmp_path / "missing",
+        recursive=False,
+        max_depth=1,
+        scan_limit=10,
+        unreadable_dirs=unreadable,
+    )
+
+    assert result.images == []
+    assert result.complete is True
+    assert result.incomplete_cause is None
+    assert unreadable == []
+
+
+def test_cached_find_degrades_to_empty_when_stat_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cached 直调核心的目录预检 stat 级失败同样降级：空结果收场，不向调用方上抛。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_module.reset_directory_scan_cache()
+
+    def _raise_is_dir(self: Path) -> bool:
+        raise OSError("sharing violation")
+
+    monkeypatch.setattr(Path, "is_dir", _raise_is_dir)
+
+    result = _scan_state(tmp_path, recursive=False, max_depth=1, scan_limit=10)
+
+    assert result.images == []
+    assert result.complete is True
+    assert result.incomplete_cause is None
 
 
 def test_cached_find_scan_exhausted_replays_cached_complete(tmp_path: Path) -> None:

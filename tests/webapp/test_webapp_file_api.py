@@ -177,6 +177,19 @@ async def test_file_endpoints_missing_file_returns_404(web_app_with_image: Any) 
     assert missing_image.status_code == 404
 
 
+async def test_thumbnail_directory_named_like_image_returns_404(
+    web_app_with_image: Any, tmp_path: Path
+) -> None:
+    """目录名带图片扩展名时缩略图按缺失口径归 404，不落入解码失败的 422。"""
+    (tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "dir.png").mkdir()
+
+    response = await web_get(
+        web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/dir.png"
+    )
+
+    _assert_endpoint_error(response, "not_found", status=404)
+
+
 @pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
 @pytest.mark.parametrize(
     "path",
@@ -301,6 +314,93 @@ async def test_file_endpoints_serve_posix_colon_filenames(
     response = await web_get(app, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/photo:1.png")
 
     assert response.status_code == 200
+
+
+async def test_file_endpoints_serve_leading_space_filename_as_listed(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """前导空白文件名按图库下发的原样匹配服务，端点归一不再造成列出却 404。"""
+    from urllib.parse import quote
+
+    images_root = write_workspace_config(tmp_path)
+    spaced_bytes = make_png_bytes(width=16, height=16)
+    (images_root / " photo.png").write_bytes(spaced_bytes)
+    app = build_web_app()
+
+    async with web_asgi_client(app) as client:
+        listing = await client.post("/web/api/browse", json={})
+    assert listing.status_code == 200
+    web_paths = [item["web_path"] for item in listing.json()["images"]]
+    assert " photo.png" in web_paths
+
+    encoded = quote(" photo.png", safe="")
+    image_response = await web_get(app, f"/web/api/image?path={encoded}")
+    thumbnail_response = await web_get(app, f"/web/api/thumbnail?path={encoded}")
+
+    assert image_response.status_code == 200
+    assert image_response.content == spaced_bytes
+    assert thumbnail_response.status_code == 200
+    assert thumbnail_response.content[:3] == b"\xff\xd8\xff"
+
+
+async def test_file_endpoints_leading_space_filename_not_confused_with_plain_sibling(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """前导空白名与去空格兄弟并存时按原样取对应文件，不发生取错。"""
+    from urllib.parse import quote
+
+    images_root = write_workspace_config(tmp_path)
+    spaced_bytes = make_png_bytes(width=16, height=16)
+    plain_bytes = make_png_bytes(width=8, height=8)
+    (images_root / " photo.png").write_bytes(spaced_bytes)
+    (images_root / "photo.png").write_bytes(plain_bytes)
+    app = build_web_app()
+
+    spaced = await web_get(app, f"/web/api/image?path={quote(' photo.png', safe='')}")
+    plain = await web_get(app, "/web/api/image?path=photo.png")
+
+    assert spaced.status_code == 200
+    assert spaced.content == spaced_bytes
+    assert plain.status_code == 200
+    assert plain.content == plain_bytes
+
+
+@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
+async def test_file_endpoints_whitespace_only_path_returns_400(
+    web_app_with_image: Any, endpoint: str
+) -> None:
+    """纯空白 path 不再被归一为空串，按扩展名白名单口径拒绝 400。"""
+    response = await web_get(web_app_with_image, f"/web/api/{endpoint}?path=%20%20")
+
+    _assert_endpoint_error(response, "invalid_path", status=400)
+
+
+@pytest.mark.parametrize(("endpoint", "expected"), [("thumbnail", 1), ("image", 0)])
+async def test_file_endpoints_existence_stat_paid_once(
+    web_app_with_image: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    expected: int,
+) -> None:
+    """存在性判定每请求至多一次 is_file：原图端点的打开序列自带同口径拒绝。"""
+    image_path = tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png"
+    real_is_file = Path.is_file
+    calls: list[str] = []
+
+    def _counting_is_file(self: Path) -> bool:
+        if self == image_path:
+            calls.append(str(self))
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", _counting_is_file)
+
+    response = await web_get(
+        web_app_with_image, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/a.png"
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == expected
 
 
 async def test_thumbnail_goes_through_cache_wrapper(
@@ -507,7 +607,7 @@ async def test_image_endpoint_source_vanished_before_send_returns_404(
     real_resolve = files_module.resolve_web_relative_path
 
     def _resolve_then_unlink(rel: str, images_root: Path) -> Path:
-        # resolve 的存在性检查通过后删除源文件，注入发送前的消失窗口。
+        # 解析通过后删除源文件，注入发送前的消失窗口。
         resolved = real_resolve(rel, images_root)
         resolved.unlink()
         return resolved
@@ -567,7 +667,7 @@ async def test_image_endpoint_directory_named_like_image_returns_404(
     real_resolve = files_module.resolve_web_relative_path
 
     def _resolve_then_replace_with_directory(rel: str, images_root: Path) -> Path:
-        # 存在性检查通过后把源图换为同名目录，注入解析后打开前的目录形态。
+        # 解析通过后把源图换为同名目录，注入解析后打开前的目录形态。
         resolved = real_resolve(rel, images_root)
         resolved.unlink()
         resolved.mkdir()
@@ -593,7 +693,7 @@ async def test_image_endpoint_non_regular_handle_returns_404(
     real_resolve = files_module.resolve_web_relative_path
 
     def _resolve_then_replace_with_device(rel: str, images_root: Path) -> Path:
-        # 存在性检查通过后把源图换为字符设备路径，注入打开成功但非常规的句柄。
+        # 解析通过后把源图换为字符设备路径，注入打开成功但非常规的句柄。
         resolved = real_resolve(rel, images_root)
         resolved.unlink()
         return Path(os.devnull)

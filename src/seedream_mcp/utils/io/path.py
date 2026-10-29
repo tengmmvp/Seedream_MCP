@@ -22,7 +22,7 @@ from collections import OrderedDict
 from collections.abc import Iterable
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Callable, Generic, TypeVar
+from typing import Callable, Generic, NamedTuple, TypeVar
 
 from ..core.errors import SeedreamConfigError
 from ...definitions.conventions import DATA_DIR_NAME
@@ -864,6 +864,38 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
     except Exception as e:
         logger.error("路径标准化失败 {}: {}", path, e)
         raise ValueError(f"无效的路径格式: {path}") from e
+
+
+class BoundedResolution(NamedTuple):
+    """以基准目录为界的路径解析结果。
+
+    Attributes:
+        resolved: 已 resolve 的路径。
+        within_base: 是否落在基准目录内（含等于基准目录）。
+    """
+
+    resolved: Path
+    within_base: bool
+
+
+def resolve_against_base(path: str, base: Path) -> BoundedResolution:
+    """以 base 为基准解析路径并判定界内性，解析组合单源供多端共用。
+
+    形态拒绝语义随 normalize_path 单源演化，调用方各自保留错误通道；界内性为
+    is_within_resolved 的纯词法比较，不做文件系统 IO。
+
+    Args:
+        path: 输入路径，可为相对或绝对。
+        base: 已 resolve 的基准目录，相对路径以其为前缀解析。
+
+    Returns:
+        已解析路径与其界内性。
+
+    Raises:
+        ValueError: 路径形态非法，拒绝原因见 normalize_path。
+    """
+    resolved = normalize_path(path, str(base))
+    return BoundedResolution(resolved, is_within_resolved(resolved, base))
 
 
 def images_root_relative(path: str | Path, images_root: Path) -> str | None:
