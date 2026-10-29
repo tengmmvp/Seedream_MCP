@@ -471,6 +471,36 @@ def test_aggregate_failed_placeholder_error_type_classifies_exception() -> None:
     assert result["data"][0]["error"]["type"] == "auth_error"
 
 
+@pytest.mark.parametrize(
+    ("request_results", "request_errors", "expected_type"),
+    [
+        ([None], {1: SeedreamAPIError("认证失败", status_code=401)}, "auth_error"),
+        (
+            [{"success": False, "status": "failed", "data": [], "error": {"message": "软失败"}}],
+            {},
+            "generation_failed",
+        ),
+    ],
+    ids=["exception-classified", "soft-failure-fallback"],
+)
+def test_aggregate_placeholder_error_built_by_build_error_dict(
+    request_results: list[dict[str, Any] | None],
+    request_errors: dict[int, Exception],
+    expected_type: str,
+) -> None:
+    """占位项 error 经 build_error_dict 构建：字段集与其余错误对象同构，构建器
+    增字段时占位项不再静默漂移。"""
+    from seedream_mcp.tools.outputs import build_error_dict
+
+    result = aggregate_parallel_generation_results(
+        request_results=request_results, request_errors=request_errors
+    )
+
+    placeholder = result["data"][0]["error"]
+    assert placeholder == build_error_dict(expected_type, placeholder["message"])
+    assert set(placeholder) == {"type", "message"}
+
+
 def test_aggregate_parallel_generation_results_all_failed_keeps_error_details() -> None:
     """全部失败时聚合保留每个请求的错误明细与批次 errors 列表。"""
     result = aggregate_parallel_generation_results(

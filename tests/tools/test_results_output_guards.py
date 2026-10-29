@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from typing import Any
 
 import pytest
@@ -21,6 +22,10 @@ from seedream_mcp.tools.pipeline._failures import (
 from seedream_mcp.tools.pipeline.auto_save import auto_save_from_urls
 from seedream_mcp.tools.pipeline.results import (
     _build_generation_structured_result,
+    _extract_deadline_exceeded,
+    _failure_render_context,
+    _format_failure_section,
+    _sanitize_usage_or_empty,
     extract_images,
     format_generation_response,
     update_result_with_auto_save,
@@ -28,7 +33,11 @@ from seedream_mcp.tools.pipeline.results import (
 from seedream_mcp.tools.outputs.sanitize import _sanitize_image_errors, sanitize_error_dict
 from seedream_mcp.tools.outputs import _stringify_keys
 from seedream_mcp.utils.core.errors import SeedreamAPIError, response_reports_failure
-from seedream_mcp.utils.core.sanitizers import _truncate_value_for_output
+from seedream_mcp.utils.core.sanitizers import (
+    DATA_OUTPUT_LIMIT,
+    MESSAGE_OUTPUT_LIMIT,
+    _truncate_value_for_output,
+)
 from seedream_mcp.utils.io.save import AutoSaveResult
 
 from _lib.generation_fixtures import make_generation_context
@@ -575,6 +584,32 @@ def test_deadline_exceeded_surfaced_in_both_channels() -> None:
     assert structured["deadline_exceeded"] is True
 
 
+def test_extract_deadline_exceeded_returns_plain_bool() -> None:
+    """提取器返回纯 bool：仅键值 True 视为发生，其余形态归 False，无幻影第三态。"""
+    assert _extract_deadline_exceeded({"deadline_exceeded": True}) is True
+    for marker in (False, "true", 1, None):
+        assert _extract_deadline_exceeded({"deadline_exceeded": marker}) is False
+    assert _extract_deadline_exceeded({}) is False
+
+
+@pytest.mark.parametrize("marker", [False, "true", 1, None], ids=["false", "str", "int", "none"])
+def test_deadline_marker_non_true_forms_omitted_in_both_channels(marker: Any) -> None:
+    """非 True 形态的 deadline 标记两通道均不输出，与 truncated_events 的缺失口径一致。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [{"url": "https://example.com/a.png"}],
+        "usage": {"generated_images": 1},
+        "deadline_exceeded": marker,
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _structured(result)
+
+    assert "总时长预算" not in text
+    assert structured["deadline_exceeded"] is None
+
+
 # ==================== 双重净化收敛 ====================
 
 
@@ -979,6 +1014,16 @@ def test_usage_non_finite_floats_rendered_identically_across_channels() -> None:
         assert f"  {label}: {structured['usage'][key]}" in text
     assert "nan" not in text
     assert "inf" not in text
+
+
+def test_sanitize_usage_or_empty_converges_non_dict_to_empty_dict() -> None:
+    """usage 净化守卫单点：dict 净化，非 dict 与缺键一律归空 dict。"""
+    sanitized = _sanitize_usage_or_empty({"usage": {"output_tokens": float("nan")}})
+    assert sanitized == {"output_tokens": 0.0}
+
+    for malformed in (None, "not-a-dict", ["a"], 7):
+        assert _sanitize_usage_or_empty({"usage": malformed}) == {}
+    assert _sanitize_usage_or_empty({}) == {}
 
 
 # ==================== usage 净化遍历健壮性 ====================
@@ -1455,6 +1500,12 @@ def test_generation_failure_predicate_single_source() -> None:
     assert getattr(common_module, "response_reports_failure") is response_reports_failure
 
 
+def test_usage_sanitization_guard_single_source_across_consumers() -> None:
+    """流水线与两出口的 usage 守卫共用同一单点定义，消费方不再各自直连净化器。"""
+    assert getattr(common_module, "_sanitize_usage_or_empty") is _sanitize_usage_or_empty
+    assert not hasattr(common_module, "_sanitize_usage")
+
+
 def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> None:
     """深嵌套 {"data": ...} 链经迭代下钻提取，不因 RecursionError 使成功生成翻错。
 
@@ -1782,6 +1833,53 @@ def test_precomputed_failure_message_consumed_by_both_outlets() -> None:
     assert "图片生成失败: 预设失败消息" in text
     assert "boom" not in text
     assert structured["error"]["message"] == "预设失败消息"
+
+
+def test_failure_render_context_triple_single_derivation() -> None:
+    """失败渲染上下文三元组单点推导：聚合判定决定消息上限，错误载荷共用回落口径。"""
+    aggregated = _failure_render_context(
+        {"error": {"message": "m"}, "batch": {"errors": [{"request_index": 1, "message": "m"}]}}
+    )
+    assert aggregated == (True, DATA_OUTPUT_LIMIT, {"message": "m"})
+
+    plain = _failure_render_context({"error": "   "})
+    assert plain == (False, MESSAGE_OUTPUT_LIMIT, "未知错误")
+
+
+def test_failure_message_limit_derivation_skips_payload_computation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """消息上限由聚合判定直取：限额派生路径不再经三元组白算错误载荷。"""
+    calls: list[dict[str, Any]] = []
+
+    def _spy(result: dict[str, Any]) -> Any:
+        calls.append(result)
+        return "未知错误"
+
+    monkeypatch.setattr(results_module, "_effective_raw_error", _spy)
+
+    result = {
+        "error": {"message": "总览"},
+        "batch": {"errors": [{"request_index": 0, "message": "分项失败"}]},
+    }
+    text = _format_failure_section(result, failure_message="预设失败消息")
+
+    assert text.startswith("图片生成失败: 预设失败消息")
+    assert "请求 0: 分项失败" in text
+    assert calls == []
+
+
+def test_failure_render_context_confined_to_message_verdict() -> None:
+    """失败渲染上下文三元组仅由可读消息判定单点消费，两出口不再整组取用。"""
+    assert "_failure_render_context" not in inspect.getsource(
+        results_module._format_failure_section
+    )
+    assert "_failure_render_context" not in inspect.getsource(
+        results_module._build_generation_structured_result
+    )
+    assert "_failure_render_context" in inspect.getsource(
+        results_module._failure_message_for_result
+    )
 
 
 def test_failure_aggregated_invalid_message_verdicts_match_across_channels() -> None:

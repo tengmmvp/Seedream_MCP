@@ -185,7 +185,7 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
 
     # 短文本粗筛：长度不超过两阈值较小者时两项计数必然在限内，跳过正则扫描。
     # 计数扫描为全量 O(n)，超长提示词的扫描成本由调用侧
-    # client._validate_common_generation_params 统一经工作线程执行，函数自身保持
+    # client.prevalidate_common_generation_params 统一经工作线程执行，函数自身保持
     # 同步契约。
     chinese_count = 0
     english_word_count = 0

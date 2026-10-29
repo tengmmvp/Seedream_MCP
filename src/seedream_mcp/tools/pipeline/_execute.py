@@ -27,7 +27,7 @@ from ...utils.io.path import resolve_images_root
 from ...utils.io.save import AutoSaveResult
 from ..outputs import build_error_structured, build_structured_tool_result
 from ..outputs.channels import PREVIEW_CHANNEL, output_channel_enabled, output_channels_scope
-from ..outputs.sanitize import _sanitize_image_errors, _sanitize_usage
+from ..outputs.sanitize import _sanitize_image_errors
 from ..schemas import GenerationInputParams
 from ._failures import _failure_guidance_for_code, log_tiered_failure
 from ._paths import prevalidate_save_path
@@ -50,6 +50,7 @@ from .parallel import (
 from .results import (
     _build_generation_structured_result,
     _failure_message_for_result,
+    _sanitize_usage_or_empty,
     extract_images,
     format_generation_response,
     update_result_with_auto_save,
@@ -159,28 +160,19 @@ async def _auto_save_generation_images(
             )
             await _yield_for_cancellation()
             shared_download_manager = _try_get_shared_download_manager(ctx)
-            if context.response_format == "url":
-                auto_save_results, saveable_indices = await auto_save_from_urls(
-                    result,
-                    context.prompt,
-                    config,
-                    context.save_path,
-                    context.custom_name,
-                    tool_name,
-                    download_manager=shared_download_manager,
-                    images=images,
-                )
-            else:
-                auto_save_results, saveable_indices = await auto_save_from_base64(
-                    result,
-                    context.prompt,
-                    config,
-                    context.save_path,
-                    context.custom_name,
-                    tool_name,
-                    download_manager=shared_download_manager,
-                    images=images,
-                )
+            auto_save_entry = (
+                auto_save_from_urls if context.response_format == "url" else auto_save_from_base64
+            )
+            auto_save_results, saveable_indices = await auto_save_entry(
+                result,
+                context.prompt,
+                config,
+                context.save_path,
+                context.custom_name,
+                tool_name,
+                download_manager=shared_download_manager,
+                images=images,
+            )
 
             if auto_save_results:
                 result = update_result_with_auto_save(result, auto_save_results, saveable_indices)
@@ -205,8 +197,7 @@ def _format_generation_outputs(
 ) -> tuple[str, dict[str, Any]]:
     """结果格式化阶段：生成响应文本与 structuredContent。"""
     # usage 与图片列表同口径一次净化，文本与结构化两出口共用同一结果。
-    raw_usage = result.get("usage")
-    sanitized_usage = _sanitize_usage(raw_usage) if isinstance(raw_usage, dict) else {}
+    sanitized_usage = _sanitize_usage_or_empty(result)
     # 失败消息与 usage 同模式一次计算，两出口共用同一判定产物。
     failure_message = (
         _failure_message_for_result(result) if response_reports_failure(result) else None

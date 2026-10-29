@@ -141,20 +141,18 @@ def aggregate_parallel_generation_results(
             if isinstance(usage, dict):
                 for key, value in usage.items():
                     _add_usage_value(merged_usage, key, value)
-            # 占位项 error 与 build_error_dict 同契约：type 取异常归约码，软失败结果
-            # 无异常时维持 generation_failed 兜底档。
+            # 占位项 error 的 type 取异常归约码，软失败结果无异常时维持
+            # generation_failed 兜底档。
+            error_type = (
+                _classify_generation_error_type(request_exc)
+                if request_exc is not None
+                else "generation_failed"
+            )
             merged_data.append(
                 {
                     "type": _REQUEST_FAILED_TYPE,
                     "request_index": request_index,
-                    "error": {
-                        "type": (
-                            _classify_generation_error_type(request_exc)
-                            if request_exc is not None
-                            else "generation_failed"
-                        ),
-                        "message": error_message,
-                    },
+                    "error": build_error_dict(error_type, error_message),
                 }
             )
             continue
@@ -290,6 +288,12 @@ def _effective_raw_error(result: dict[str, Any]) -> Any:
     return raw_error
 
 
+def _failure_render_context(result: dict[str, Any]) -> tuple[bool, int, Any]:
+    """失败可读消息判定的 (聚合判定, 消息上限, 有效错误载荷) 三元组单点推导。"""
+    aggregated = _is_aggregated_result(result)
+    return aggregated, message_limit_for(aggregated), _effective_raw_error(result)
+
+
 def _failure_error_message(
     raw_error: dict[str, Any], *, aggregated: bool, message_limit: int
 ) -> str:
@@ -322,9 +326,7 @@ def _failure_error_message(
 
 def _failure_message_for_result(result: dict[str, Any]) -> str:
     """失败结果可读消息的单点计算，文本与结构化出口及流水线共用同一产物。"""
-    aggregated = _is_aggregated_result(result)
-    message_limit = message_limit_for(aggregated)
-    raw_error = _effective_raw_error(result)
+    aggregated, message_limit, raw_error = _failure_render_context(result)
     if isinstance(raw_error, dict):
         return _failure_error_message(raw_error, aggregated=aggregated, message_limit=message_limit)
     return sanitize_error_text(normalize_message_text(raw_error))
@@ -339,8 +341,8 @@ def _format_failure_section(result: dict[str, Any], *, failure_message: str | No
     文本。聚合格式的消息为本侧组装产物（含恢复指引），净化改用防御性宽上限防
     截断指引；脱敏口径两档一致。
     """
-    aggregated = _is_aggregated_result(result)
-    message_limit = message_limit_for(aggregated)
+    # 消息上限只依赖聚合判定，不取失败渲染上下文的其余分量。
+    message_limit = message_limit_for(_is_aggregated_result(result))
 
     error_text = (
         failure_message if failure_message is not None else _failure_message_for_result(result)
@@ -491,6 +493,15 @@ def _format_usage_section(usage: dict[str, Any]) -> list[str]:
     return ["使用统计:", *items, ""]
 
 
+def _sanitize_usage_or_empty(result: dict[str, Any]) -> dict[str, Any]:
+    """净化 result 的 usage 键；非 dict 形态按声明 schema 收敛为空 dict。"""
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    sanitized: dict[str, Any] = _sanitize_usage(usage)
+    return sanitized
+
+
 def _extract_truncated_events(result: dict[str, Any]) -> int | None:
     """提取 SSE 解析记录的因超限或解析失败丢弃的事件数，仅接受正整数，其余形态视为无该信息。"""
     value = result.get("truncated_events")
@@ -499,9 +510,9 @@ def _extract_truncated_events(result: dict[str, Any]) -> int | None:
     return value
 
 
-def _extract_deadline_exceeded(result: dict[str, Any]) -> bool | None:
-    """提取 SSE 流超时提前终止标记，仅接受真值布尔，其余形态视为无该信息。"""
-    return True if result.get("deadline_exceeded") is True else None
+def _extract_deadline_exceeded(result: dict[str, Any]) -> bool:
+    """提取 SSE 流超时提前终止标记，仅键值为 True 时视为发生。"""
+    return result.get("deadline_exceeded") is True
 
 
 def format_generation_response(
@@ -540,7 +551,7 @@ def format_generation_response(
     if images is None:
         images = _sanitize_image_errors(extract_images(result))
     if usage is None:
-        usage = _sanitize_usage(result.get("usage"))
+        usage = _sanitize_usage_or_empty(result)
 
     parts: list[str] = [title, f"尺寸: {size}", ""]
 
@@ -615,14 +626,9 @@ def _build_generation_structured_result(
     failed = response_reports_failure(result)
     # status 为上游自由文本，同口径净化；非 str 归 None，畸形形态不使构造抛校验异常。
     raw_status = result.get("status")
-    # usage 与 batch 的非 dict 形态按声明 schema 收敛为空 dict 与 None。
-    raw_usage = result.get("usage", {})
+    # batch 的非 dict 形态按声明 schema 收敛为 None。
     raw_batch = result.get("batch")
-    sanitized_usage = (
-        usage
-        if usage is not None
-        else (_sanitize_usage(raw_usage) if isinstance(raw_usage, dict) else {})
-    )
+    sanitized_usage = usage if usage is not None else _sanitize_usage_or_empty(result)
     payload: dict[str, Any] = {
         "tool": tool_name,
         "success": not failed,
@@ -652,7 +658,7 @@ def _build_generation_structured_result(
         payload["truncated_events"] = truncated_events
 
     deadline_exceeded = _extract_deadline_exceeded(result)
-    if deadline_exceeded is not None:
+    if deadline_exceeded:
         payload["deadline_exceeded"] = deadline_exceeded
 
     if context.enable_auto_save:
@@ -666,8 +672,7 @@ def _build_generation_structured_result(
         payload["auto_save"] = {"enabled": False}
 
     if failed:
-        aggregated = _is_aggregated_result(result)
-        message_limit = message_limit_for(aggregated)
+        message_limit = message_limit_for(_is_aggregated_result(result))
         raw_error = _effective_raw_error(result)
         # message 终值与文本出口共用同一产物，failure_message 为 None 时在此单点现算。
         message = (

@@ -61,7 +61,7 @@ async def test_validate_common_generation_params_synthesizes_defaults() -> None:
     config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0-pro", default_watermark=True)
     client = SeedreamClient(config)
 
-    layered = await client._validate_common_generation_params(
+    layered = await client.prevalidate_common_generation_params(
         prompt=None,
         optimize_prompt_options=None,
         size=None,
@@ -76,7 +76,7 @@ async def test_validate_common_generation_params_synthesizes_defaults() -> None:
     assert layered.size == "auto"
     assert layered.watermark is True
 
-    plain = await client._validate_common_generation_params(
+    plain = await client.prevalidate_common_generation_params(
         prompt="p",
         optimize_prompt_options=None,
         size=None,
@@ -89,6 +89,29 @@ async def test_validate_common_generation_params_synthesizes_defaults() -> None:
 
     assert plain.size == config.default_size
     assert plain.watermark is config.default_watermark
+
+
+def test_prevalidate_common_generation_params_is_single_public_entry() -> None:
+    """公共参数校验仅存单一公共入口：私有转发形态不回归，签名覆盖四个生成
+    方法的全部公共参数，新增参数漏列即在批次级预校验之外。"""
+    import inspect
+
+    assert not hasattr(SeedreamClient, "_validate_common_generation_params")
+
+    entry_params = set(
+        inspect.signature(SeedreamClient.prevalidate_common_generation_params).parameters
+    )
+    entry_params.discard("self")
+    method_specific = {"image", "background", "max_images"}
+    for method in (
+        SeedreamClient.text_to_image,
+        SeedreamClient.image_to_image,
+        SeedreamClient.multi_image_fusion,
+        SeedreamClient.sequential_generation,
+    ):
+        common = set(inspect.signature(method).parameters) - method_specific
+        common.discard("self")
+        assert common <= entry_params, method.__name__
 
 
 def test_build_common_request_assembles_shared_params() -> None:

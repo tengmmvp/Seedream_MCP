@@ -220,6 +220,74 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
     assert "  Base64 数据: 4 字符" in response_text
 
 
+async def test_auto_save_entry_call_contract_parity_across_response_formats(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """url 与 b64_json 仅自动保存入口不同：两入口收到同一参数集，无分支级分叉。"""
+    from seedream_mcp.tools.pipeline import _execute as execute_module
+
+    calls: dict[str, dict[str, Any]] = {}
+
+    def _recording_entry(entry_name: str) -> Any:
+        async def _fake(
+            result: dict[str, Any],
+            prompt: str | None,
+            config: SeedreamConfig,
+            save_path: str | None,
+            custom_name: str | None,
+            tool_name: str,
+            download_manager: Any = None,
+            images: list[dict[str, Any]] | None = None,
+        ) -> tuple[list[Any], list[int]]:
+            del result
+            calls[entry_name] = {
+                "prompt": prompt,
+                "config": config,
+                "save_path": save_path,
+                "custom_name": custom_name,
+                "tool_name": tool_name,
+                "download_manager": download_manager,
+                "images": images,
+            }
+            return [], []
+
+        return _fake
+
+    monkeypatch.setattr(execute_module, "auto_save_from_urls", _recording_entry("url"))
+    monkeypatch.setattr(execute_module, "auto_save_from_base64", _recording_entry("b64_json"))
+
+    async def fake_url_result(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self, kwargs
+        return {
+            "success": True,
+            "data": [{"url": GENERATED_URL}],
+            "usage": {},
+            "status": "completed",
+        }
+
+    async def fake_b64_result(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self, kwargs
+        return {"success": True, "data": [{"b64_json": "QUJD"}], "usage": {}, "status": "completed"}
+
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
+    set_active_config(config)
+
+    monkeypatch.setattr(SeedreamClient, "text_to_image", fake_url_result)
+    await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
+
+    monkeypatch.setattr(SeedreamClient, "text_to_image", fake_b64_result)
+    await run_text_to_image(
+        TextToImageInput(prompt="a cat", response_format=ResponseFormat.B64_JSON), config, ctx=None
+    )
+
+    # 载荷随格式变化：url 入口收 url 图，b64 入口收 b64 图。
+    assert calls["url"]["images"] == [{"url": GENERATED_URL}]
+    assert calls["b64_json"]["images"] == [{"b64_json": "QUJD"}]
+    # 其余参数逐项一致，download_manager 等新增参数对两入口同步生效。
+    del calls["url"]["images"], calls["b64_json"]["images"]
+    assert calls["url"] == calls["b64_json"]
+
+
 async def test_run_text_to_image_degrades_when_auto_save_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

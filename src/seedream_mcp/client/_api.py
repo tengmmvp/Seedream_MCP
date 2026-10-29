@@ -202,7 +202,7 @@ class SeedreamClient(_ClientHTTPMixin):
             output_format,
             stream,
             tools,
-        ) = await self._validate_common_generation_params(
+        ) = await self.prevalidate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
@@ -303,7 +303,7 @@ class SeedreamClient(_ClientHTTPMixin):
             output_format,
             stream,
             tools,
-        ) = await self._validate_common_generation_params(
+        ) = await self.prevalidate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
@@ -404,7 +404,7 @@ class SeedreamClient(_ClientHTTPMixin):
             output_format,
             stream,
             tools,
-        ) = await self._validate_common_generation_params(
+        ) = await self.prevalidate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
@@ -504,7 +504,7 @@ class SeedreamClient(_ClientHTTPMixin):
             output_format,
             stream,
             tools,
-        ) = await self._validate_common_generation_params(
+        ) = await self.prevalidate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
@@ -578,7 +578,7 @@ class SeedreamClient(_ClientHTTPMixin):
         except Exception as e:
             raise self._finalize_generation_error("组图输出", e)
 
-    async def _validate_common_generation_params(
+    async def prevalidate_common_generation_params(
         self,
         *,
         prompt: str | None,
@@ -596,7 +596,8 @@ class SeedreamClient(_ClientHTTPMixin):
         size 与 watermark 未显式传入时按 config.default_size / default_watermark
         兜底合成；图层拆分场景 size 未显式传入时按官方默认取 auto。各方法特有的
         图片数量与序列校验仍在各自方法内执行。绑定共享请求计划时按输入快照复用
-        批内首次校验结果。
+        批内首次校验结果——批次分发前调用一次即完成整批预校验，校验失败立即上抛，
+        异常类型与消息和单请求路径一致。
         """
         resolved_size, resolved_watermark = resolve_effective_generation_defaults(
             size=size,
@@ -636,36 +637,6 @@ class SeedreamClient(_ClientHTTPMixin):
         if plan is not None:
             return await plan.get_or_validate(inputs, _validate)
         return await _validate()
-
-    async def prevalidate_common_generation_params(
-        self,
-        *,
-        prompt: str | None,
-        optimize_prompt_options: dict[str, Any] | None,
-        size: str | None,
-        watermark: bool | None,
-        response_format: str,
-        output_format: str | None,
-        stream: bool,
-        tools: list[dict[str, Any]] | None,
-        layer_decomposition: bool = False,
-    ) -> None:
-        """批次分发前校验公共参数一次，结果经共享计划供同批各请求复用。
-
-        校验失败立即上抛，异常类型与消息和单请求路径一致；未绑定共享计划时仅执行
-        校验，无缓存效果。
-        """
-        await self._validate_common_generation_params(
-            prompt=prompt,
-            optimize_prompt_options=optimize_prompt_options,
-            size=size,
-            watermark=watermark,
-            response_format=response_format,
-            output_format=output_format,
-            stream=stream,
-            tools=tools,
-            layer_decomposition=layer_decomposition,
-        )
 
     async def close(self) -> None:
         """关闭 HTTP 客户端连接；与 _ensure_client 经 _client_lock 串行，并发安全。"""
