@@ -794,6 +794,11 @@ def test_build_config_accepts_all_valid_http_allowed_hosts_forms(
     [
         ("https://api.example.com", "scheme 或斜杠"),
         ("api.example.com/path", "scheme 或斜杠"),
+        ("api.example.com#fragment", "host、host:port、host:\\*"),
+        ("api.example.com?a=1", "host、host:port、host:\\*"),
+        ("user@api.example.com", "host、host:port、host:\\*"),
+        ("api%2f.example.com", "host、host:port、host:\\*"),
+        ("api.example.com%25", "host、host:port、host:\\*"),
         ("*:8080", "host、host:port、host:\\*"),
         ("*.example.com", "host、host:port、host:\\*"),
         ("*", "host、host:port、host:\\*"),
@@ -801,6 +806,7 @@ def test_build_config_accepts_all_valid_http_allowed_hosts_forms(
         ("api.example.com:", "host、host:port、host:\\*"),
         ("[2001:db8::1", "host、host:port、host:\\*"),
         ("api.example.com:0", "host、host:port、host:\\*"),
+        ("api.example.com:08000", "host、host:port、host:\\*"),
         ("api.example.com:99999", "host、host:port、host:\\*"),
         ("api.example.com:８０", "ASCII"),
         ("api.example.com.", "host、host:port、host:\\*"),
@@ -821,7 +827,7 @@ def test_build_config_accepts_all_valid_http_allowed_hosts_forms(
 def test_build_config_rejects_malformed_http_allowed_hosts_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str, match: str
 ) -> None:
-    """含 scheme/斜杠、大写、非尾部通配、端口非数字或超范围、空标签或首尾点号、畸形方括号或 IPv6 带 zone-id 与非压缩规范形的条目构建期拒绝。"""
+    """含 scheme/斜杠、URL 成分字符（#?@%）、大写、非尾部通配、端口非数字、前导零或超范围、空标签或首尾点号、畸形方括号或 IPv6 带 zone-id 与非压缩规范形的条目构建期拒绝。"""
     monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS={raw_value}\n")

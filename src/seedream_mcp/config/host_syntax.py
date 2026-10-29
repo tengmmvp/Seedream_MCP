@@ -42,11 +42,28 @@ def _bracket_ipv6_literal(entry: str) -> str | None:
     return entry[1:end] if end > 1 else None
 
 
+# 真实 Host 头主机部分不含的符号：端口、通配、逗号与方括号界定符及 URL 成分字符
+# #?@%（fragment、query、userinfo、百分号编码）。
+_HOST_PART_FORBIDDEN_SYMBOLS = frozenset(":*[],#?@%")
+
+
+def _is_valid_host_port(port_text: str) -> bool:
+    """Host 允许列表条目与 Host 头匹配共用的端口谓词：1-65535 且无前导零的纯 ASCII 数字。
+
+    SDK 的 Host 校验为精确串比较，前导零端口虽数值合法但与客户端规范化形态不匹配，
+    按无效拒绝；数值解析委托 strict_http_int，超长数字串归 None，避免裸 int() 的
+    ValueError 逃逸破坏配置层错误契约。
+    """
+    port = strict_http_int(port_text)
+    return port is not None and not port_text.startswith("0") and port <= 65535
+
+
 def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
     """拆分 Host 允许列表条目为 host 与端口后缀，无法识别的形态返回 None。
 
-    端口后缀为空串、":<1-65535 的无前导零 ASCII 数字>" 或 ":*"；host 为方括号 IPv6 字面量
-    或不含逗号、冒号、通配符与方括号，首尾无点号且无连续点号的非空主机名。
+    端口后缀为空串、":<谓词 _is_valid_host_port 认可的端口>" 或 ":*"；host 为方括号
+    IPv6 字面量或不含禁区符号与首尾及连续点号的非空主机名，禁区见
+    _HOST_PART_FORBIDDEN_SYMBOLS。
     """
     if entry.startswith("["):
         literal = _bracket_ipv6_literal(entry)
@@ -56,26 +73,19 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
     else:
         idx = entry.rfind(":")
         host, suffix = (entry, "") if idx == -1 else (entry[:idx], entry[idx:])
-        # 逗号与连续点不出现在真实 Host 头中，序列形态误拼的条目在此拒绝。
+        # 首尾点与连续点亦属误拼形态，在此拒绝。
         if (
             not host
             or host.startswith(".")
             or host.endswith(".")
             or ".." in host
-            or any(ch in host for ch in (":", "*", "[", "]", ","))
+            or any(ch in host for ch in _HOST_PART_FORBIDDEN_SYMBOLS)
         ):
             return None
     if suffix in ("", ":*"):
         return host, suffix
-    if suffix.startswith(":"):
-        port_text = suffix[1:]
-        # SDK 的 Host 校验为精确串比较，前导零端口虽数值合法但与客户端规范化形态
-        # 不匹配，按无效条目拒绝。
-        # 数值解析委托 strict_http_int：超长数字串归 None，避免裸 int() 的 ValueError
-        # 逃逸破坏配置层错误契约。
-        port = strict_http_int(port_text)
-        if port is not None and not port_text.startswith("0") and 1 <= port <= 65535:
-            return host, suffix
+    if suffix.startswith(":") and _is_valid_host_port(suffix[1:]):
+        return host, suffix
     return None
 
 

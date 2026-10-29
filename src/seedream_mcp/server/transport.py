@@ -29,6 +29,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from ..config.host_syntax import (
     _bracket_ipv6_literal,
     _decompose_allowed_host_entry,
+    _is_valid_host_port,
     bind_host_invalid_reason,
 )
 from ..config import get_active_config
@@ -247,21 +248,38 @@ def _content_length_or_none(value: bytes | None) -> int | None:
     return strict_http_int(value)
 
 
+def _is_valid_host_port_bytes(port: bytes) -> bool:
+    """bytes 端口经 host_syntax 的条目侧端口谓词判定，非 ASCII 字节按畸形拒绝。"""
+    try:
+        return _is_valid_host_port(port.decode("ascii"))
+    except ValueError:
+        return False
+
+
 def _strip_host_port(host: bytes) -> bytes:
     """剥离 Host 头值的端口部分，IPv6 字面量如 [::1]:8000 保留方括号主机部分。
 
-    右方括号后仅容空或冒号端口，其余尾随内容按原样返回以偏离白名单条目。
+    端口形态共用 host_syntax 的条目侧端口谓词，畸形端口整值返回以偏离白名单
+    条目；空端口形态（[::1]:）按 SDK 口径容忍；方括号后非冒号尾随内容同样
+    整值返回。
     """
     if host.startswith(b"["):
         end = host.find(b"]")
         if end == -1:
             return host
         remainder = host[end + 1 :]
-        if remainder and not remainder.startswith(b":"):
+        if remainder in (b"", b":"):
+            return host[: end + 1]
+        if not remainder.startswith(b":") or not _is_valid_host_port_bytes(remainder[1:]):
             return host
         return host[: end + 1]
     idx = host.rfind(b":")
-    return host if idx == -1 else host[:idx]
+    if idx == -1:
+        return host
+    port = host[idx + 1 :]
+    if port and not _is_valid_host_port_bytes(port):
+        return host
+    return host[:idx]
 
 
 def _error_body(error: str, description: str) -> bytes:
@@ -990,8 +1008,9 @@ class _AppHostGuardMiddleware:
         """按裸 host、精确端口、端口通配三形态判定 Host 头值。
 
         通配条目以剥离末端口后的主机部分比对基值：多冒号 Host 剥离后仍含内层
-        端口，不等基值而拒绝，比 SDK 的纯前缀 startswith(base_host + ":") 放行
-        更严，属有意的 fail-closed 分歧；其余形态与 SDK 语义一致。
+        端口，畸形端口整值返回，均不等基值而拒绝，比 SDK 的纯前缀
+        startswith(base_host + ":") 放行更严，属有意的 fail-closed 分歧；其余
+        形态与 SDK 语义一致。
         """
         if host in self._bare_hosts or host in self._exact_hosts:
             return True

@@ -65,12 +65,18 @@ def _websocket_scope(headers: list[tuple[bytes, bytes]]) -> dict[str, Any]:
         b"127.0.0.1:8000",
         b"localhost",
         b"localhost:8000",
+        b"localhost:",
         b"[::1]",
         b"[::1]:8000",
+        b"[::1]:",
     ],
 )
 async def test_guard_allows_loopback_hosts(host: bytes) -> None:
-    """回环 Host 含带端口与 IPv6 方括号形态均放行到内层应用，不产生 403。"""
+    """回环 Host 含带端口与 IPv6 方括号形态均放行到内层应用，不产生 403。
+
+    空端口形态（[::1]:、localhost:）按 SDK 口径容忍；非空端口段须过
+    host_syntax 的条目侧端口谓词，畸形端口见拒绝用例。
+    """
     inner = _InnerApp()
     sink = _MessageSink()
     guard = _LoopbackHostGuardMiddleware(inner)
@@ -91,10 +97,21 @@ async def test_guard_allows_loopback_hosts(host: bytes) -> None:
         b"sub.localhost.evil.com",
         b"[::1]evil.com",
         b"[::1]evil.com:8000",
+        b"[::1]:8000:9000",
+        b"[::1]:8000x",
+        b"[::1]:08000",
+        b"[::1]:70000",
+        b"localhost:8000x",
+        b"localhost:08000",
+        b"127.0.0.1:70000",
     ],
 )
 async def test_guard_rejects_non_loopback_hosts(host: bytes) -> None:
-    """外部域名与私网 Host 头一律 403 拒绝，方括号后尾随内容不得截断为回环主机。"""
+    """外部域名与私网 Host 头一律 403 拒绝，方括号后尾随内容不得截断为回环主机。
+
+    端口畸形（非数字 8000x、前导零 08000、超范围 70000）的 Host 整值拒绝，
+    与允许列表条目侧端口谓词同口径，不因剥离端口而命中回环基值。
+    """
     inner = _InnerApp()
     sink = _MessageSink()
     guard = _LoopbackHostGuardMiddleware(inner)

@@ -511,10 +511,21 @@ async def _run_app_host_guard(
         (("api.example.com:8443",), b"api.example.com:8443", True),
         (("api.example.com:8443",), b"api.example.com:9000", False),
         (("api.example.com:*",), b"api.example.com:8000", True),
+        (("api.example.com:*",), b"api.example.com:8443", True),
+        (("api.example.com:*",), b"api.example.com:", True),
         (("api.example.com:*",), b"api.example.com", False),
         (("api.example.com:*",), b"api.example.com:9001:9002", False),
+        (("api.example.com:*",), b"api.example.com:8000x", False),
+        (("api.example.com:*",), b"api.example.com:08000", False),
+        (("api.example.com:*",), b"api.example.com:70000", False),
         (("api.example.com:*",), b"API.EXAMPLE.COM:8000", False),
         (("[::1]:*",), b"[::1]:8000", True),
+        (("[::1]:*",), b"[::1]:", True),
+        (("[::1]:*",), b"[::1]:8000:9000", False),
+        (("[::1]:*",), b"[::1]:8000x", False),
+        (("[::1]:*",), b"[::1]:08000", False),
+        (("[::1]:*",), b"[::1]:70000", False),
+        (("[2001:db8::1]:*",), b"[2001:db8::1]:8000:9000", False),
         (("[::1]:*",), b"[::1]..", False),
         (("[::ffff:192.0.2.1]:*",), b"[::ffff:192.0.2.1]:8443", True),
         (("api.example.com",), b"evil.example.com", False),
@@ -525,7 +536,11 @@ async def _run_app_host_guard(
 async def test_app_host_guard_entry_matching_semantics(
     entries: tuple[str, ...], host: bytes | None, permitted: bool
 ) -> None:
-    """裸 host、精确端口与端口通配三形态匹配与 SDK 同语义；多冒号 Host 剥离末端口后不等通配基值，拒绝。"""
+    """裸 host、精确端口与端口通配三形态匹配与 SDK 同语义；多冒号与畸形端口 Host（含方括号 IPv6 形态）整值拒绝。
+
+    端口形态共用 host_syntax 的条目侧端口谓词，空端口形态按 SDK 口径容忍
+    放行；条目侧会被拒绝的端口在匹配侧同样不得命中通配基值。
+    """
     reached, sent = await _run_app_host_guard(entries, host)
 
     if permitted:
