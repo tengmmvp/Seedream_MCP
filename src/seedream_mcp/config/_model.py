@@ -28,7 +28,11 @@ from .sources import (
     normalize_model_selector,
 )
 from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
-from ..utils.core.sanitizers import is_printable_ascii, is_sensitive_key
+from ..utils.core.sanitizers import (
+    ERROR_TEXT_SEGMENT_JOINER,
+    is_printable_ascii,
+    is_sensitive_key,
+)
 from ..definitions.defaults import (
     DEFAULT_CLEANUP_DAYS,
     DEFAULT_DATE_FOLDER,
@@ -315,8 +319,8 @@ class SeedreamConfig:
         if base_url_scheme == "http":
             if not self.allow_http_base_url:
                 raise SeedreamConfigError(
-                    "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝；"
-                    "仅自建可信内网端点可设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免"
+                    "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝"
+                    f"{ERROR_TEXT_SEGMENT_JOINER}仅自建可信内网端点可设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免"
                 )
             self._build_warnings.append(
                 (
@@ -811,8 +815,8 @@ def _first_invalid_request_state_key_message(
         if len(key) < _REQUEST_STATE_KEY_MIN_BYTES:
             return (
                 f"request_state_secret_keys 第 {index} 个密钥解码后仅 {len(key)} 字节，"
-                f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
-                f"生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
+                f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串"
+                f"{ERROR_TEXT_SEGMENT_JOINER}生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
                 f"{_env_var_suffix('request_state_secret_keys')}"
             )
         if key in seen:

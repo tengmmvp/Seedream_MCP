@@ -11,7 +11,7 @@ from dotenv import dotenv_values
 
 from ..utils.core.errors import SeedreamConfigError, has_message_value
 from ..utils.core.logs import EarlyMessageBuffer
-from ..utils.core.sanitizers import is_printable_ascii
+from ..utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER, is_printable_ascii
 from ..utils.core.validators import INT_TEXT_PATTERN, parse_bool
 from ..utils.model.capabilities import MODEL_ALIASES
 
@@ -252,8 +252,9 @@ def _read_env_values(env_file: str | None) -> tuple[dict[str, str], _RuntimeEnvI
             # 项目根 .env 缺失或无有效键时 CWD .env 是唯一来源，属隐式加载。
             _BUILD_WARNINGS.append(
                 "WARNING",
-                f"已加载当前工作目录 .env（{runtime_env_path}）；"
-                "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
+                f"已加载当前工作目录 .env（{runtime_env_path}）"
+                f"{ERROR_TEXT_SEGMENT_JOINER}进程工作目录不受控时其中的 .env 可能注入非预期配置，"
+                "请确认启动目录可信",
             )
 
     return {**default_values, **runtime_values}, injection
@@ -380,8 +381,8 @@ def _decode_request_state_key_entries(
         except ValueError as exc:
             raise SeedreamConfigError(
                 f"request_state_secret_keys 第 {effective_index} 个条目不是合法的十六进制密钥，"
-                f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
-                f"生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
+                f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串"
+                f"{ERROR_TEXT_SEGMENT_JOINER}生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
                 f"{_env_var_suffix('request_state_secret_keys')}"
             ) from exc
     return tuple(material) or None

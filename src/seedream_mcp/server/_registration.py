@@ -145,10 +145,11 @@ from ..tools.outputs import (
     GenerationStructuredOutput,
     GetModelInfoStructuredOutput,
     build_error_structured,
-    build_structured_tool_result,
+    build_error_tool_result,
 )
 from ..utils.core.errors import SeedreamConfigError
 from ..utils.core.logs import get_logger
+from ..utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 from ..utils.io.path import get_workspace_roots
 from ..utils.io.roots import (
     modern_revision_negotiated,
@@ -281,7 +282,7 @@ def _validation_error_message(exc: ValidationError) -> str:
         location = ".".join(str(item) for item in error["loc"])
         message = str(error["msg"])
         parts.append(f"{location}: {message}" if location else message)
-    return "；".join(parts)
+    return ERROR_TEXT_SEGMENT_JOINER.join(parts)
 
 
 async def _validation_error_result(tool_name: str, exc: ValidationError) -> CallToolResult:
@@ -295,9 +296,10 @@ async def _validation_error_result(tool_name: str, exc: ValidationError) -> Call
     单字段约束失败经 SDK 参数模型先行拒绝、错误结果不带 structuredContent，
     两形态并存为既定契约。
     """
-    message = _validation_error_message(exc)
-    structured = build_error_structured(tool_name, "validation_error", message)
-    return await build_structured_tool_result(message, structured, is_error=True)
+    structured = build_error_structured(
+        tool_name, "validation_error", _validation_error_message(exc)
+    )
+    return await build_error_tool_result(structured)
 
 
 async def _run_tool_pipeline(

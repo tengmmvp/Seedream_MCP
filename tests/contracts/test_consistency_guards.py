@@ -4,9 +4,10 @@
 能力表参考图上限与组图总数上限、MCP 注册工具名与 handlers ToolMetadata 工具名、
 webapp 错误状态表与错误档案及错误码槽位取值、
 路径相似建议与 CLI 端口解析的边界行为；另含 loguru exc_info 关键字、security
-标记级别与环境变量键清洗前缀的全源码静态守护，download.py PermissionError
-处理器归类守护，以及 repo-layout.md 仓库与 tests 结构契约的静态守护。新增取值
-或改名时两侧须同步，本文件在各处失败即暴露漂移。
+标记级别与环境变量键清洗前缀的全源码静态守护，
+错误段分隔符的拼装点消费与内联字面量边界守护，
+download.py PermissionError 处理器归类守护，以及 repo-layout.md 仓库与 tests
+结构契约的静态守护。新增取值或改名时两侧须同步，本文件在各处失败即暴露漂移。
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ from __future__ import annotations
 import argparse
 import ast
 import functools
+import io
 import re
+import tokenize
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -509,6 +512,190 @@ def test_parallel_request_count_single_definition_in_conventions() -> None:
             offenders.append(relative)
 
     assert offenders == []
+
+
+# 段分隔符单源的十四个消费点：模块相对路径与函数名，任一回归为内联字面量即漂移。
+_SEGMENT_JOINER_CONSUMER_SITES: tuple[tuple[str, str], ...] = (
+    ("utils/core/errors.py", "format_error_for_user"),
+    ("tools/pipeline/_execute.py", "execute_generation_handler"),
+    ("server/_registration.py", "_validation_error_message"),
+    ("tools/pipeline/results.py", "aggregate_parallel_generation_results"),
+    ("webapp/_responses.py", "images_root_unavailable_error"),
+    ("tools/handlers/browse_images.py", "build_browse_fallback_result"),
+    ("tools/handlers/browse_images.py", "_build_empty_browse_result"),
+    ("utils/io/path.py", "read_scope_denial_message"),
+    ("utils/core/validators.py", "capability_gate_error"),
+    ("config/_builder.py", "_build_config_unlocked_body"),
+    ("config/_model.py", "_validate_api_endpoint"),
+    ("config/_model.py", "_first_invalid_request_state_key_message"),
+    ("config/sources.py", "_decode_request_state_key_entries"),
+    ("config/sources.py", "_read_env_values"),
+)
+
+
+def _function_body_uses_name(module_relative: str, function_name: str, name: str) -> bool:
+    """判定模块内目标函数体是否引用给定名字。"""
+    tree = ast.parse((_SRC_ROOT / module_relative).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != function_name:
+            continue
+        return any(isinstance(child, ast.Name) and child.id == name for child in ast.walk(node))
+    return False
+
+
+def test_error_segment_joiner_consumed_at_assembly_sites() -> None:
+    """十四处多段错误与提示文案拼装点统一消费 sanitizers 的段分隔符常量，回归字面量即漂移。"""
+    offenders = [
+        f"{module_relative}: {function_name}"
+        for module_relative, function_name in _SEGMENT_JOINER_CONSUMER_SITES
+        if not _function_body_uses_name(module_relative, function_name, "ERROR_TEXT_SEGMENT_JOINER")
+    ]
+
+    assert offenders == [], f"拼装点未消费 ERROR_TEXT_SEGMENT_JOINER: {offenders}"
+
+
+# 判定保留的内联「；」站点：静态散文、枚举与事实并列的句内标点，非段装配。
+# 收录模块相对路径加字面量片段，改动任一侧文本须重新判定。
+_INLINE_JOINER_EXEMPTIONS = frozenset(
+    {
+        "server/cli.py: 模型别名；完整 Model ID 或 Endpoint ID 经 SEEDREAM_MODEL_ID 环境变量传入；",
+        "tools/handlers/get_model_info.py: ；像素总量 ",
+        "tools/schemas.py: 图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词；",
+        "tools/schemas.py:  张，部分模型上限更低；",
+        "tools/schemas.py:  张；",
+        "tools/schemas.py: 是否开启图层拆分，需当前模型支持；",
+        "tools/schemas.py: 图片透明通道，需当前模型支持；",
+        "tools/schemas.py: 生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值，需当前模型支持；",
+        "tools/schemas.py:  档位或 auto，未提供时默认 auto；",
+        "tools/schemas.py: ；",
+        "tools/schemas.py: 并行度上限（1-10），不得超过 request_count；",
+        "utils/core/logs.py: 标准库日志未被 loguru 拦截，也不经控制字符防护；",
+        "utils/model/capabilities.py: ；",
+    }
+)
+
+
+def _string_literal_body(token_text: str) -> str:
+    """剥出 STRING 字面量引号壳内正文，跳过字母前缀并按 1 或 3 连排引号去壳。"""
+    prefix_end = 0
+    while token_text[prefix_end].isalpha():
+        prefix_end += 1
+    quote = token_text[prefix_end]
+    quote_length = 3 if token_text[prefix_end : prefix_end + 3] == quote * 3 else 1
+    return token_text[prefix_end + quote_length : -quote_length]
+
+
+def _inline_segment_joiner_sites(source: str) -> list[str]:
+    """提取位于拼接或 f-string 插值边界的内联「；」字面量及整体恰为「；」的孤立 joiner 字面量，句内标点不入提取面。"""
+    tokens = [
+        token
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type
+        not in (
+            tokenize.COMMENT,
+            tokenize.NL,
+            tokenize.NEWLINE,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+            tokenize.ENCODING,
+            tokenize.ENDMARKER,
+        )
+    ]
+
+    def is_brace(token: tokenize.TokenInfo | None, text: str) -> bool:
+        return token is not None and token.type == tokenize.OP and token.string == text
+
+    def unit_facing(index: int, forward: bool) -> bool:
+        """判定偏移侧是否为朝向本侧的字符串单元边界，含显式 + 拼接的中转。"""
+        step = 1 if forward else -1
+        offset = index + step
+        if not 0 <= offset < len(tokens):
+            return False
+        facing_type = tokenize.FSTRING_START if forward else tokenize.FSTRING_END
+        neighbor = tokens[offset]
+        if neighbor.type in (tokenize.STRING, facing_type):
+            return True
+        if neighbor.type == tokenize.OP and neighbor.string == "+":
+            beyond = offset + step
+            return 0 <= beyond < len(tokens) and tokens[beyond].type in (
+                tokenize.STRING,
+                facing_type,
+            )
+        return False
+
+    sites: list[str] = []
+    for index, token in enumerate(tokens):
+        if token.type == tokenize.STRING:
+            body = _string_literal_body(token.string)
+            if (
+                body == "；"
+                or (body.startswith("；") and unit_facing(index, forward=False))
+                or (body.endswith("；") and unit_facing(index, forward=True))
+            ):
+                sites.append(body)
+        elif token.type == tokenize.FSTRING_MIDDLE:
+            previous = tokens[index - 1] if index else None
+            following = tokens[index + 1] if index + 1 < len(tokens) else None
+            heads_boundary = is_brace(previous, "}") or (
+                previous is not None
+                and previous.type == tokenize.FSTRING_START
+                and unit_facing(index - 1, forward=False)
+            )
+            tails_boundary = is_brace(following, "{") or (
+                following is not None
+                and following.type == tokenize.FSTRING_END
+                and unit_facing(index + 1, forward=True)
+            )
+            if (token.string.startswith("；") and heads_boundary) or (
+                token.string.endswith("；") and tails_boundary
+            ):
+                sites.append(token.string)
+    return sites
+
+
+def test_error_segment_joiner_inline_literals_confined_to_exemptions() -> None:
+    """拼接与插值边界的内联「；」全源码仅余判定保留站点，清单内外回归字面量即漂移。"""
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    offenders: list[str] = []
+    for source_path in sorted(package_root.rglob("*.py")):
+        relative = source_path.relative_to(package_root).as_posix()
+        if relative == "utils/core/sanitizers.py":
+            continue  # 常量定义站点，值本身即「；」。
+        for snippet in _inline_segment_joiner_sites(source_path.read_text(encoding="utf-8")):
+            site = f"{relative}: {snippet}"
+            if site not in _INLINE_JOINER_EXEMPTIONS:
+                offenders.append(site)
+
+    assert offenders == [], (
+        "拼接边界出现未登记的内联「；」，错误与提示段装配须改用 "
+        f"ERROR_TEXT_SEGMENT_JOINER 或重新判定豁免: {offenders}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('x = "a；"\n"b"', ["a；"]),
+        ('x = """a；"""\n"b"', ["a；"]),
+        ('x = "a；" + "b"', ["a；"]),
+        ('x = "a"\n"；b"', ["；b"]),
+        ('x = "；".join(parts)', ["；"]),
+        ('x = """；""".join(parts)', ["；"]),
+        ('x = b"""；""".join(parts)', ["；"]),
+        ("x = f\"（{'；'.join(parts)}）\"", ["；"]),
+        ('x = f"{p}；{q}"', ["；"]),
+        ('x = f"{p}；"\n"b"', ["；"]),
+        ('x = "一次写定的枚举句 a；b；c"', []),
+        ('x = "完整句；"', []),
+    ],
+)
+def test_inline_segment_joiner_extraction_targets_boundaries_only(
+    source: str, expected: list[str]
+) -> None:
+    """提取面含拼接与插值边界的「；」及孤立「；」joiner 字面量，句内标点与孤立整句不入提取面。"""
+    assert _inline_segment_joiner_sites(source) == expected
 
 
 def test_security_marked_logs_are_warning_level() -> None:

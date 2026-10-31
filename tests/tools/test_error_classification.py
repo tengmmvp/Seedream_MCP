@@ -35,6 +35,7 @@ from seedream_mcp.utils.core.errors import (
     handle_api_error,
     iter_error_profiles,
 )
+from seedream_mcp.utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 
 # ==================== has_message_value：缺失判定 ====================
 
@@ -286,6 +287,15 @@ def test_format_unknown_error() -> None:
     assert "未知错误" in format_error_for_user(ValueError("unexpected"))
 
 
+def test_format_error_for_user_joins_hint_with_segment_joiner() -> None:
+    """user_hint 以段分隔符拼为单段，跨段信息不以换行拼接。"""
+    rendered = format_error_for_user(SeedreamValidationError("尺寸超出允许范围"))
+
+    assert rendered == (
+        f"参数验证失败: 尺寸超出允许范围{ERROR_TEXT_SEGMENT_JOINER}" "请检查对应参数的取值范围。"
+    )
+
+
 def test_format_api_error_truncates_long_message() -> None:
     """API 错误 message 超长时被截断，避免上游回显的敏感长片段进入用户可见输出。"""
     long_msg = "x" * 2000
@@ -493,6 +503,16 @@ async def test_handler_failure_text_without_hint_appends_table_guidance() -> Non
     text = await _run_failing_handler(ValueError("unexpected"))
 
     assert text.endswith("请根据错误信息排查后重试。")
+
+
+async def test_handler_failure_text_joins_guidance_with_segment_joiner() -> None:
+    """查表建议以段分隔符拼为单段，跨段信息不以换行拼接。"""
+    text = await _run_failing_handler(ValueError("unexpected"))
+
+    assert text == (
+        f"文生图生成失败：未知错误: unexpected{ERROR_TEXT_SEGMENT_JOINER}"
+        "请根据错误信息排查后重试。"
+    )
 
 
 async def test_handler_failure_text_429_retry_hint_appears_exactly_once() -> None:

@@ -233,6 +233,10 @@ async def test_tool_call_returns_structured_error_on_unexpected_failure(
     assert structured["status"] == "failed"
     assert structured["error"]["type"] == "model_info_failed"
     assert "payload assembly exploded" in structured["error"]["message"]
+    first_block = result.content[0]
+    assert isinstance(first_block, TextContent)
+    # 两通道同源：可见文本取结构化 error.message 的净化产物，边界不做二次净化。
+    assert first_block.text == structured["error"]["message"]
 
 
 # ==================== 工具描述派生守护 ====================

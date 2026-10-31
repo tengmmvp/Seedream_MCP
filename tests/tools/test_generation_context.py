@@ -501,6 +501,35 @@ def test_aggregate_placeholder_error_built_by_build_error_dict(
     assert set(placeholder) == {"type", "message"}
 
 
+def test_aggregate_placeholder_error_routes_through_build_error_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """占位项 error 的构造路由经 results 模块引用的 build_error_dict 单一构造点。
+
+    直构内联 dict 时构建器增字段（如顶层 error 的 code 键）不会自动跟进占位项，
+    净化幂等使构造差异无法经产物相等检出，故以构造路由锁定。
+    """
+    from seedream_mcp.tools.pipeline import results as results_module
+    from seedream_mcp.tools.outputs import build_error_dict
+
+    built: list[dict[str, Any]] = []
+
+    def _spy(error_type: str, message: str) -> dict[str, Any]:
+        payload = build_error_dict(error_type, message)
+        built.append(payload)
+        return payload
+
+    monkeypatch.setattr(results_module, "build_error_dict", _spy)
+    result = aggregate_parallel_generation_results(
+        request_results=[None], request_errors={1: RuntimeError("请求超时")}
+    )
+
+    placeholder = result["data"][0]["error"]
+    assert placeholder in built
+    # 占位项与全失败批次的顶层 error 均经同一入口。
+    assert result["error"] in built
+
+
 def test_aggregate_parallel_generation_results_all_failed_keeps_error_details() -> None:
     """全部失败时聚合保留每个请求的错误明细与批次 errors 列表。"""
     result = aggregate_parallel_generation_results(

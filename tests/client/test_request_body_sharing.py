@@ -27,6 +27,7 @@ from seedream_mcp.utils.core.errors import (
     resolve_error_profile,
 )
 from seedream_mcp.utils.core.inflight import InflightTaskCancelledError
+from seedream_mcp.utils.core.sanitizers import sanitize_assembled_text
 
 import seedream_mcp.client._api as client_module
 
@@ -621,7 +622,8 @@ async def test_prevalidate_failure_matches_single_request_first_failure(
 ) -> None:
     """批次级预校验失败经 handle_text_to_image 降级的类型与消息与单请求路径一致。
 
-    预校验在批次分发前上抛，整批统一降级，不进入逐请求错误聚合。
+    预校验在批次分发前上抛，整批统一降级，不进入逐请求错误聚合。结构化消息
+    经 build_error_dict 边界兜底净化（组装消息中的换行压平）。
     """
     validation_failure = SeedreamValidationError("预校验拒绝", field="size", value="bad")
 
@@ -653,7 +655,7 @@ async def test_prevalidate_failure_matches_single_request_first_failure(
     assert batch_result.is_error is True
     assert isinstance(batch_result.structured_content, dict)
     batch_error = batch_result.structured_content["error"]
-    assert batch_error["message"] == format_error_for_user(single_exc)
+    assert batch_error["message"] == sanitize_assembled_text(format_error_for_user(single_exc))
     assert batch_error["type"] == resolve_error_profile(single_exc).error_code
 
     # 单请求经同一 handler 的降级结果与批次完全一致，消费方无需按批次数区分错误形态

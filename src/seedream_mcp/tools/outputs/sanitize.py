@@ -7,13 +7,12 @@ from collections.abc import Callable
 from typing import Any
 
 from ...utils.core.sanitizers import (
-    CONTROL_CHARS_PATTERN,
     DATA_OUTPUT_LIMIT,
     MESSAGE_OUTPUT_LIMIT,
+    normalize_inline_text,
     normalize_message_text,
     sanitize_data_text,
     sanitize_error_text,
-    strip_unpaired_surrogates,
 )
 
 
@@ -35,7 +34,7 @@ def _flatten_key(key: Any) -> Any:
     """压平单个键：控制字符换空格并剥离未配对代理，非字符串键与干净键原值返回。"""
     if not isinstance(key, str):
         return key
-    return strip_unpaired_surrogates(CONTROL_CHARS_PATTERN.sub(" ", key))
+    return normalize_inline_text(key)
 
 
 def _unique_flat_key(taken: dict[Any, Any], key: Any) -> Any:
@@ -243,9 +242,30 @@ _REQUEST_FAILED_TYPE = "image_generation.request_failed"
 def message_limit_for(trusted_message: bool) -> int:
     """消息净化上限单点：本侧组装产物走防御性宽限，上游自由文本走错误通道上限。
 
-    结果聚合与图片项净化共用本判定，宽限策略调整只改此处。
+    结果聚合与图片项净化共用本判定，宽限策略调整只改此处；组装标记的判定经
+    下方 trusted_* 单点函数接入。
     """
     return DATA_OUTPUT_LIMIT if trusted_message else MESSAGE_OUTPUT_LIMIT
+
+
+def trusted_result_message(result: dict[str, Any]) -> bool:
+    """结果级组装消息判定单点：batch 键仅由并行聚合格式写入，client 的单请求
+    归一化不透传该键；聚合格式的 error 与 batch.errors 的 message
+    为本侧组装消息（构造点逐段净化后拼装——上游错误经 sanitize_error_text、异常经
+    format_error_for_user 可附恢复指引——可超错误通道上限），出口侧据此改用
+    防御性宽上限净化。新增产出长组装消息的结果形态须接入本判定，否则消息被
+    错误通道上限静默截断。
+    """
+    return isinstance(result.get("batch"), dict)
+
+
+def trusted_image_message(image: dict[str, Any]) -> bool:
+    """条目级组装消息判定单点：失败占位项经 type 哨兵标记，其 error.message 为
+    本侧组装消息（异常路径可附恢复指引），据此改用防御性宽上限；上游伪造该
+    type 的可利用面为宽截断，与数据通道的 16KB 上限同量级，脱敏口径不变。新增
+    组装消息占位生产者须复用该哨兵标记。
+    """
+    return image.get("type") == _REQUEST_FAILED_TYPE
 
 
 def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -255,18 +275,17 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
     url、local_path/markdown_ref 与未知键走 sanitize_data_text 保留完整可用性；非
     字符串形态经 _sanitize_value_tree 逐层净化，int 序号保持原值。图片项键名在
     入口压平控制字符（碰撞以 <dup> 后缀保留），合并时原始脏键不再以原值反杀
-    净化值。占位项（type 为请求失败标识）的 error message 为本侧组装产物（含
-    恢复指引），改用防御性宽上限；上游伪造该 type 的可利用面为宽截断，与数据
-    通道的 16KB 上限同量级，脱敏口径不变。仅键名或净化后内容变化的项做浅拷贝，
-    其余项保持原对象引用，传入列表不被修改。限内内容重复净化恒等；超长 URL
-    的截断产物再净化会按错误文本通道口径收敛（产物已不可用，仅长度与形态变
-    化）。全部图片项（含 SSE 失败事件）经此处统一净化，sse 源头不做净化。
+    净化值。占位项的消息宽度经 trusted_image_message 单点判定，宽限口径见该处。
+    仅键名或净化后内容变化的项做浅拷贝，其余项保持原对象引用，传入列表不被
+    修改。限内内容重复净化恒等；超长 URL 的截断产物再净化会按错误文本通道
+    口径收敛（产物已不可用，仅长度与形态变化）。全部图片项（含 SSE 失败事件）
+    经此处统一净化，sse 源头不做净化。
     """
     sanitized_images = images
     for index, image in enumerate(images):
         flat_image = _flatten_mapping_keys(image)
         updates: dict[str, Any] = {}
-        message_limit = message_limit_for(flat_image.get("type") == _REQUEST_FAILED_TYPE)
+        message_limit = message_limit_for(trusted_image_message(flat_image))
         updates.update(
             _sanitize_image_error_entry(flat_image.get("error"), message_limit=message_limit)
         )

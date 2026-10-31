@@ -266,14 +266,95 @@ _SENSITIVE_KEY_KEYWORD_SET = frozenset(_SENSITIVE_KEY_KEYWORDS)
 _KEY_SEGMENT_SPLIT_PATTERN = re.compile(r"[_\- .]")
 
 
+# 双向/隔离控制族的规范码点集：折叠剥离与压平集的并入共用的单一来源；
+# U+2028/U+2029 属行/段分隔符而非双向控制，不入本族。
+_BIDI_ISOLATE_CONTROL_CHARS = frozenset(
+    chr(code_point)
+    for code_point in (
+        0x61C,
+        0x200E,
+        0x200F,
+        0x202A,
+        0x202B,
+        0x202C,
+        0x202D,
+        0x202E,
+        0x2066,
+        0x2067,
+        0x2068,
+        0x2069,
+    )
+)
+
+
+# 压平控制字符集：C0/DEL/NEL 与行/段分隔符并入双向/隔离控制族，压平类、userinfo
+# 空白切入类与掩码边界类的空白成员均由本集派生。
+_FLATTEN_CONTROL_CHARS = frozenset(
+    (
+        *map(chr, range(0x00, 0x20)),
+        chr(0x7F),
+        chr(0x85),
+        chr(0x2028),
+        chr(0x2029),
+        *_BIDI_ISOLATE_CONTROL_CHARS,
+    )
+)
+
+
+def _control_char_class(chars: Iterable[str]) -> str:
+    """码点集合升序拼接为正则字符类，re.escape 使成员增删不涉类元字符转义。"""
+    return "[" + "".join(re.escape(char) for char in sorted(chars)) + "]"
+
+
+# 键值空白字符源集：ASCII 空白加 Unicode 空白，U+2000..U+200A 逐码点展开；键值
+# 空白类与掩码边界类的空白成员均由本集派生。
+_KEYVALUE_WHITESPACE_CHARS = frozenset(
+    map(
+        chr,
+        (
+            0x09,
+            0x0A,
+            0x0B,
+            0x0C,
+            0x0D,
+            0x20,
+            0x85,
+            0xA0,
+            0x1680,
+            *range(0x2000, 0x200B),
+            0x2028,
+            0x2029,
+            0x202F,
+            0x205F,
+            0x3000,
+        ),
+    )
+)
+
+
+# 纯掩码标记形态：星串满三颗（掩码产物恒为 ***）且直达受限边界或词尾才判自身
+# 产物，不再吸收。边界只收重放拼接的邻接形态：压平不改写的非控制空白、CJK
+# 标点一类非 ASCII 非词非控制字符与右括号；ASCII 标点尾段与换行等控制空白是
+# ***+尾段组合或拼接违约，不足三颗的星串是值首星，均照常整词掩码。Bearer 两
+# 分支、键值值首、鉴权方案令牌与值吸收续词统一取本前瞻，幂等口径单一来源。
+_MASK_MARKER_BOUNDARY_CLASS = (
+    _control_char_class((_KEYVALUE_WHITESPACE_CHARS - _FLATTEN_CONTROL_CHARS) | frozenset("])"))
+    + r"|[^\x00-\x9f\s\w*\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+)
+_PURE_MASK_MARKER_SHAPE = r"\*{3,}(?:" + _MASK_MARKER_BOUNDARY_CLASS + r"|$)"
+_PURE_MASK_MARKER_LOOKAHEAD = r"(?!" + _PURE_MASK_MARKER_SHAPE + ")"
+
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出。
 # 两分支前置仅排除 ASCII 词字符，防 v2Bearer 一类词内形态，CJK 邻接的回显照常命中；
 # 冒号分支前置另排除 URL 常见字符（含 =），?auth=bearer:tok 一类 URL 段不误伤，其
 # 令牌到 URL 结构定界符即止不吞后续；URL 数据通道不复用双分支形态，仅取空白分支。
-_BEARER_WHITESPACE_BRANCH = r"(?<![A-Za-z0-9_])(Bearer\s+)\S+"
+_BEARER_WHITESPACE_BRANCH = r"(?<![A-Za-z0-9_])(Bearer\s+)" + _PURE_MASK_MARKER_LOOKAHEAD + r"\S+"
 
 _BEARER_TOKEN_PATTERN = re.compile(
-    _BEARER_WHITESPACE_BRANCH + r"|(?<![A-Za-z0-9_/.=@\-])(Bearer[:：]\s*)[^,;&#?()\s]+",
+    _BEARER_WHITESPACE_BRANCH
+    + r"|(?<![A-Za-z0-9_/.=@\-])(Bearer[:：]\s*)"
+    + _PURE_MASK_MARKER_LOOKAHEAD
+    + r"[^,;&#?()\s]+",
     re.IGNORECASE,
 )
 
@@ -372,12 +453,10 @@ _SENSITIVE_KEYVALUE_KEYS = (
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
 )
 
-# 键值分隔符与值吸收共用的空白字符类：ASCII 空白加 Unicode 空白，封堵借 Unicode
-# 空白分隔的绕过形态；控制空白成员在压平前的首轮匹配中承接「冒号加换行」形态，
-# 压平后空转，保持类自身完备。
-_KEYVALUE_WHITESPACE_CLASS = (
-    r"[\t\n\r \x0b\x0c\x85\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
-)
+# 键值分隔符与值吸收共用的空白字符类：由 _KEYVALUE_WHITESPACE_CHARS 派生，封堵借
+# Unicode 空白分隔的绕过形态；控制空白成员在压平前的首轮匹配中承接「冒号加换行」
+# 形态，压平后空转，保持类自身完备。
+_KEYVALUE_WHITESPACE_CLASS = _control_char_class(_KEYVALUE_WHITESPACE_CHARS)
 
 # 控制空白字符类：作为分隔符交替组的独占分支，覆盖无冒号等号的「键后直接跟
 # 控制空白再跟值」形态，只在压平前的首轮键值匹配中存在。成员为全部 C0 与 NEL
@@ -416,23 +495,55 @@ _SENSITIVE_KEYVALUE_SEPARATOR = (
 # 词呈现键名加分隔符结构时值吸收停止，非敏感键值对作为独立键值对保留原文。
 _SENSITIVE_KEYVALUE_ANY_KEY = r"['\"]?[\w-]+" + _SENSITIVE_KEYVALUE_SEPARATOR
 
+# 鉴权方案词分支：值首词或续词为已知方案（Basic/Bearer 等）时，其后一个无空白令牌
+# 整体吸收、不受停止前瞻约束——base64 令牌的 = 填充（dGVzdA==）呈键值形态，通用
+# 吸收会在填充处截断使令牌逃逸；令牌前置纯掩码标记守卫，方案词后的掩码产物不由
+# 本分支吸收。字面交替与通用分支在首词上可区分，回溯保持线性。
+_AUTH_SCHEME_TOKEN = (
+    "(?:(?:basic|bearer|digest|negotiate)"
+    + _KEYVALUE_WHITESPACE_CLASS
+    + r"+"
+    + _PURE_MASK_MARKER_LOOKAHEAD
+    + r"\S+)"
+)
+
 # 敏感键值裸值模式：敏感键名后跟分隔符与值时剥离值部分，覆盖 api-key=xxx、
 # Authorization: Basic xxx、Cookie: SESSIONID=vvv 等上游错误体回显形态。值吸收
-# 贪婪多词、在下一个键名加分隔符形态前停止，多词凭据整体剥离，相邻非敏感键值对
-# 保留独立形态与括号配平。已知误吞面：Cookie: 后的整段文本与 next token: <eos>
-# 一类普通键值同样被吞，敏感键后的多词值无法与非敏感尾词可靠区分，按 fail-closed
-# 方向宁多脱不漏凭据。
+# 贪婪多词、在下一个键名加分隔符形态前停止（鉴权方案词后的令牌例外，见上），
+# 多词凭据整体剥离，相邻非敏感键值对保留独立形态与括号配平；值首遇纯标记时整段
+# 不重匹配、续词吸收在纯标记处停止，重放下恢复指引保留，***+尾段组合仍照常掩码
+# （影子路径共用本模式，同享幂等）。已知取舍面：Cookie: 后的整段文本与 next
+# token: <eos> 一类普通键值被吞，多词值无法与非敏感尾词可靠区分，宁多脱；值区中
+# 独立 *** 词后的空格分离尾词存活为已签字取舍，收紧会把重放恢复指引一并吞掉。
 _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     r"(?i)("
     + _SENSITIVE_KEYVALUE_KEYS
     + r")("
     + _SENSITIVE_KEYVALUE_SEPARATOR
-    + r")\S+"
-    + r"(?:"
+    + r")"
+    + _PURE_MASK_MARKER_LOOKAHEAD
+    + r"(?:(?:"
+    + _AUTH_SCHEME_TOKEN
+    + r"|\S+)(?:"
     + _KEYVALUE_WHITESPACE_CLASS
-    + r"+(?!"
+    + r"+(?:"
+    + _AUTH_SCHEME_TOKEN
+    + r"|(?!"
     + _SENSITIVE_KEYVALUE_ANY_KEY
-    + r")\S+)*"
+    + r")"
+    + _PURE_MASK_MARKER_LOOKAHEAD
+    + r"\S+))*)"
+)
+
+# 空值尾形的凭据前缀探测：敏感键或 Bearer 冒号形态（冒号分支同前置断言）以分隔符
+# 收尾而值为空时，键值与 Bearer 净化均因值缺失不命中、裸前缀存活；拼接恢复指引前
+# 据此补掩码终止，防下游重放把 joiner 与指引开头吞成掩码。
+_EMPTY_VALUE_CREDENTIAL_TAIL_PATTERN = re.compile(
+    r"(?i)(?:(?<![A-Za-z0-9_/.=@\-])Bearer[:：]\s*|(?:"
+    + _SENSITIVE_KEYVALUE_KEYS
+    + r")(?:"
+    + _SENSITIVE_KEYVALUE_SEPARATOR
+    + r"))\Z"
 )
 
 
@@ -479,27 +590,6 @@ _HOMOGLYPH_FOLD_TABLE = str.maketrans(
         "\u03f3": "j",
         "\u0261": "g",
     }
-)
-
-
-# 双向/隔离控制族的规范码点集：折叠剥离与压平集的并入共用的单一来源；
-# U+2028/U+2029 属行/段分隔符而非双向控制，不入本族。
-_BIDI_ISOLATE_CONTROL_CHARS = frozenset(
-    chr(code_point)
-    for code_point in (
-        0x61C,
-        0x200E,
-        0x200F,
-        0x202A,
-        0x202B,
-        0x202C,
-        0x202D,
-        0x202E,
-        0x2066,
-        0x2067,
-        0x2068,
-        0x2069,
-    )
 )
 
 
@@ -638,14 +728,35 @@ def _folded_shadow_parts(
     return "".join(folded_parts), origins, offsets
 
 
+def _shadow_position_origin(origins: list[int], offsets: list[int], shadow_position: int) -> int:
+    """返回覆盖影子位置 shadow_position 的折叠字符在原文中的下标。"""
+    return origins[bisect_right(offsets, shadow_position) - 1]
+
+
 def _shadow_match_origin_span(
     folded: str, origins: list[int], offsets: list[int], match: re.Match[str]
 ) -> tuple[int, int]:
     """把影子上命中的键值匹配区间映射回原文区间，两套删除计划共用。"""
     return (
-        origins[bisect_right(offsets, match.end(2)) - 1],
-        origins[bisect_right(offsets, match.end() - 1) - 1] + 1,
+        _shadow_position_origin(origins, offsets, match.end(2)),
+        _shadow_position_origin(origins, offsets, match.end() - 1) + 1,
     )
+
+
+# 影子标记判定的裸形态直测模式：折叠翻转的剔除判定复用守卫同源形态。
+_PURE_MASK_MARKER_PATTERN = re.compile(_PURE_MASK_MARKER_SHAPE)
+
+
+def _shadow_value_starts_with_mask_marker(
+    text: str, origins: list[int], offsets: list[int], match: re.Match[str]
+) -> bool:
+    """判定影子键值匹配的值首在原文是否为纯掩码标记。
+
+    影子折叠把全角标点折为 ASCII 标点（；→;、，→,），标记的受限边界在影子上
+    翻成组合形态；原文值首为纯标记时该匹配是折叠伪影。
+    """
+    value_start = _shadow_position_origin(origins, offsets, match.end(2))
+    return _PURE_MASK_MARKER_PATTERN.match(text, value_start) is not None
 
 
 def _redact_disguised_keyvalues(text: str) -> str:
@@ -657,7 +768,8 @@ def _redact_disguised_keyvalues(text: str) -> str:
     其余对切入全删计划构建影子，以同一影子串做触发词预检——预检与匹配器所见
     恒为同一字符串；未命中即原样返回，命中才按该计划匹配。切入全删的影子会连
     空白分隔一并抹掉使键值模式失去锚定点，保留空白控制符的影子在两计划不同时
-    补扫，两计划的掩码区间合并后回写。
+    补扫，两计划的掩码区间合并后回写；值首在原文为纯掩码标记的命中是折叠
+    伪影，剔除使标记判定与非影子轮次同口径。
     """
     full_spans = [match.span() for match in _KEY_DISGUISE_DELETION_PATTERN.finditer(text)]
     if text.isascii() and not full_spans:
@@ -668,6 +780,7 @@ def _redact_disguised_keyvalues(text: str) -> str:
     spans: list[tuple[int, int]] = [
         _shadow_match_origin_span(folded, origins, offsets, match)
         for match in _SENSITIVE_KEYVALUE_PATTERN.finditer(folded)
+        if not _shadow_value_starts_with_mask_marker(text, origins, offsets, match)
     ]
     separator_kept_spans = [
         match.span() for match in _NON_WHITESPACE_CONTROL_DELETION_PATTERN.finditer(text)
@@ -677,6 +790,7 @@ def _redact_disguised_keyvalues(text: str) -> str:
         spans.extend(
             _shadow_match_origin_span(kept_folded, kept_origins, kept_offsets, match)
             for match in _SENSITIVE_KEYVALUE_PATTERN.finditer(kept_folded)
+            if not _shadow_value_starts_with_mask_marker(text, kept_origins, kept_offsets, match)
         )
     merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):
@@ -689,25 +803,6 @@ def _redact_disguised_keyvalues(text: str) -> str:
     return text
 
 
-# 压平控制字符集：C0/DEL/NEL 与行/段分隔符并入双向/隔离控制族，
-# 压平类与 userinfo 空白切入类均由本集派生。
-_FLATTEN_CONTROL_CHARS = frozenset(
-    (
-        *map(chr, range(0x00, 0x20)),
-        "\x7f",
-        "\x85",
-        "\u2028",
-        "\u2029",
-        *_BIDI_ISOLATE_CONTROL_CHARS,
-    )
-)
-
-
-def _control_char_class(chars: Iterable[str]) -> str:
-    """码点集合升序拼接为正则字符类，re.escape 使成员增删不涉类元字符转义。"""
-    return "[" + "".join(re.escape(char) for char in sorted(chars)) + "]"
-
-
 # 控制字符与双向文本/隔离控制符的字符类源：压平模式与 URL userinfo 的 scheme
 # 与 :// 分隔符切入容忍段共用。
 _FLATTEN_CONTROL_CLASS = _control_char_class(_FLATTEN_CONTROL_CHARS)
@@ -716,6 +811,10 @@ _FLATTEN_CONTROL_CLASS = _control_char_class(_FLATTEN_CONTROL_CHARS)
 # 注入伪造行或反转显示方向，替换为空格保留词边界。
 # logs 的日志消息 patcher 共用本常量，两模块的控制字符口径单一来源。
 CONTROL_CHARS_PATTERN = re.compile(_FLATTEN_CONTROL_CLASS)
+
+# 多段文案的单段拼接分隔符：错误通道净化会把换行压平为空格，跨段信息不得以换行
+# 拼接，统一以本分隔符拼为单段；错误与 Web 错误文案的各拼装点共用。
+ERROR_TEXT_SEGMENT_JOINER = "；"
 
 # 零宽不可见字符：ZWSP、ZWNJ、U+2060-2064、BOM 与软连字符整体移除以还原真实键名，
 # 替换为空串而非空格，避免把键名切成两段导致脱敏失效；ZWJ 仅在邻接 ASCII 字符时
@@ -728,10 +827,22 @@ _INVISIBLE_CHARS_PATTERN = re.compile(
 # 结果在协议出口翻为序列化失败。
 _SURROGATE_CHARS_PATTERN = re.compile(r"[\ud800-\udfff]")
 
+# 摘要按行整形的改写触发类：未配对代理与压平控制字符的并集（压平类去除换行符
+# \n——按行拆分消费、永不压平）；全文未命中时逐行整形可证恒等，整段原样放行
+# 免拆分分配。
+_SUMMARY_REWRITE_TRIGGER_PATTERN = re.compile(
+    _SURROGATE_CHARS_PATTERN.pattern + "|" + _control_char_class(_FLATTEN_CONTROL_CHARS - {"\n"})
+)
+
 
 def strip_unpaired_surrogates(value: str) -> str:
     """剥离未配对代理字符；代理均为非 ASCII，ASCII 文本免正则扫描原样返回。"""
     return value if value.isascii() else _SURROGATE_CHARS_PATTERN.sub("", value)
+
+
+def normalize_inline_text(text: str) -> str:
+    """剥离未配对代理并把控制字符压平为空格，零宽原样保留；摘要行整形与输出键压平共用。"""
+    return CONTROL_CHARS_PATTERN.sub(" ", strip_unpaired_surrogates(text))
 
 
 def is_printable_ascii(value: str) -> bool:
@@ -799,9 +910,10 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
 
     非字符串原样返回；message 与 value、error/status 等输出字段共用此净化，
     防护口径一致。处理次序：零宽与代理字符先行移除以还原真实键名，userinfo 在控制
-    字符压平前剥离——压平产生的空格会打断 userinfo 匹配使凭据逃逸；键值匹配在压平
-    前执行一轮并补伪装键（切入删除与全角形近、组合音标与双向/隔离控制符剥离）掩码，
-    压平改写文本时再执行一轮覆盖空格重拼形态，末尾剥 Bearer 令牌。
+    字符压平前剥离——压平产生的空格会打断 userinfo 匹配使凭据逃逸，无字面 @ 时经
+    前置守卫免全文扫描；键值匹配在压平前执行一轮并补伪装键（切入删除与全角形近、
+    组合音标与双向/隔离控制符剥离）掩码，压平改写文本时再执行一轮覆盖空格重拼形态，
+    末尾剥 Bearer 令牌。
     """
     if not isinstance(value, str):
         return value
@@ -809,7 +921,7 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     redacted = strip_unpaired_surrogates(redacted)
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
     redacted = _redact_disguised_keyvalues(redacted)
-    redacted = _strip_url_userinfo(redacted)
+    redacted = _strip_url_userinfo(redacted) if "@" in redacted else redacted
     flattened = CONTROL_CHARS_PATTERN.sub(" ", redacted)
     # 压平仅在改写文本时拼出新的分隔形态，恒等时第二轮对同一字符串可证 no-op。
     if flattened != redacted:
@@ -853,6 +965,30 @@ def sanitize_error_text(
     if len(sanitized) > limit:
         sanitized = sanitized[:limit]
     return cast("_SanitizedValue", sanitized)
+
+
+def sanitize_assembled_text(text: str) -> str:
+    """组装消息的幂等边界净化：全套管线，对掩码产物重放恒等。
+
+    供 build_error_dict 等错误构造边界兜底：构造点遗漏净化的凭据片段（键值
+    裸值、userinfo、Bearer）在此掩码剥离，已掩码标记与恢复指引原样保留。
+    """
+    return _sanitize_output_string(text)
+
+
+def sanitize_summary_lines(text: str) -> str:
+    """组装摘要的按行整形：未配对代理剥离、行内控制字符压平，换行结构与零宽原样保留。
+
+    摘要承载须原样回显的文件名与 URL，零宽与软连字符是合法文件名成分、剥离即
+    断回流路径；摘要通道不做键值匹配，零宽剥离的键名还原在此无对象，凭据掩码
+    由错误构造点的边界净化承担（其在键值匹配前剥零宽）。全文无改写字符时
+    恒等放行，含改写字符才逐行整形，干净行经可打印快路门免正则通过。
+    """
+    if _SUMMARY_REWRITE_TRIGGER_PATTERN.search(text) is None:
+        return text
+    return "\n".join(
+        line if line.isprintable() else normalize_inline_text(line) for line in text.split("\n")
+    )
 
 
 # 数据字段序列化的防御性长度上限：URL 等数据字段不施加错误文本的 500 字符截断，

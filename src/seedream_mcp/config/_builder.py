@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 from ..utils.core.errors import SeedreamConfigError
 from ..utils.core.executors import register_cpu_offload_depth_provider
 from ..utils.core.logs import get_logger
+from ..utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 from ..utils.io.path import (
     clear_resolved_env_root_cache,
     register_data_root_provider,
@@ -127,8 +128,9 @@ def _build_config_unlocked_body(
             _BUILD_WARNINGS.append(
                 "ERROR",
                 f"当前工作目录 .env（{runtime_injection.env_path}）覆盖了项目根 .env"
-                f"（{runtime_injection.default_env_path}）的配置值；"
-                "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
+                f"（{runtime_injection.default_env_path}）的配置值"
+                f"{ERROR_TEXT_SEGMENT_JOINER}进程工作目录不受控时其中的 .env 可能注入非预期配置，"
+                "请确认启动目录可信",
             )
         # 注入清单对独有键逐键反查取值链判定，仅实际由文件层供值的登记键计入。
         effective_keys = sorted(
@@ -140,8 +142,9 @@ def _build_config_unlocked_body(
             _BUILD_WARNINGS.append(
                 "WARNING",
                 f"当前工作目录 .env（{runtime_injection.env_path}）注入了项目根 .env"
-                f"未包含的配置键（{', '.join(effective_keys)}）；"
-                "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
+                f"未包含的配置键（{', '.join(effective_keys)}）"
+                f"{ERROR_TEXT_SEGMENT_JOINER}进程工作目录不受控时其中的 .env 可能注入非预期配置，"
+                "请确认启动目录可信",
             )
     config = SeedreamConfig(**config_kwargs)
     _BUILD_WARNINGS.extend(config._build_warnings)

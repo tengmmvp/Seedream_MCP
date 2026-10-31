@@ -23,6 +23,7 @@ from ...utils.model.capabilities import (
 from ..outputs import (
     GetModelInfoStructuredOutput,
     build_error_structured,
+    build_error_tool_result,
     build_structured_tool_result,
 )
 from ..pipeline import log_tiered_failure
@@ -130,8 +131,7 @@ async def handle_get_model_info(config: SeedreamConfig) -> CallToolResult:
         )
     except Exception as exc:
         log_tiered_failure(logger, exc, "模型信息查询失败")
-        message = format_error_for_user(exc)
         structured = build_error_structured(
-            GET_MODEL_INFO_TOOL_NAME, MODEL_INFO_FAILED_ERROR_TYPE, message
+            GET_MODEL_INFO_TOOL_NAME, MODEL_INFO_FAILED_ERROR_TYPE, format_error_for_user(exc)
         )
-        return await build_structured_tool_result(message, structured, is_error=True)
+        return await build_error_tool_result(structured)

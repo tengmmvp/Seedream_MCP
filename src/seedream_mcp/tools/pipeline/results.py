@@ -16,6 +16,7 @@ from ...utils.core.errors import (
 )
 from ...utils.core.logs import get_logger
 from ...utils.core.sanitizers import (
+    ERROR_TEXT_SEGMENT_JOINER,
     normalize_message_text,
     sanitize_error_text,
 )
@@ -26,6 +27,7 @@ from ..outputs.sanitize import (
     _sanitize_usage,
     message_limit_for,
     sanitize_error_dict,
+    trusted_result_message,
 )
 from ._failures import (
     _classify_generation_error_type,
@@ -135,6 +137,7 @@ def aggregate_parallel_generation_results(
     for request_index, result in enumerate(request_results, start=1):
         if not result or response_reports_failure(result):
             request_exc = request_errors.get(request_index)
+            # 两通道同源：占位项 error 与 batch.errors 共用同一净化产物。
             error_message = _extract_parallel_request_error(result, request_exc)
             error_items.append({"request_index": request_index, "message": error_message})
             usage = result.get("usage") if result else None
@@ -194,11 +197,13 @@ def aggregate_parallel_generation_results(
     }
     if success_requests == 0:
         if error_items:
-            error_preview = "；".join(
+            error_preview = ERROR_TEXT_SEGMENT_JOINER.join(
                 f"请求{item['request_index']}: {item['message']}" for item in error_items[:3]
             )
             if len(error_items) > 3:
-                error_preview += f"；其余 {len(error_items) - 3} 个请求也失败"
+                error_preview += (
+                    f"{ERROR_TEXT_SEGMENT_JOINER}其余 {len(error_items) - 3} 个请求也失败"
+                )
             message = f"并行请求全部失败。{error_preview}"
         else:
             message = "并行请求全部失败"
@@ -269,17 +274,6 @@ def update_result_with_auto_save(
     return updated_result
 
 
-def _is_aggregated_result(result: dict[str, Any]) -> bool:
-    """判定结果是否由并行聚合格式产出。
-
-    batch 键仅由 aggregate_parallel_generation_results 写入，client 的单请求归一化
-    不透传该键；聚合格式的 error 与 batch.errors 的 message 为本侧组装产物
-    （format_error_for_user 逐段净化后拼装，含恢复指引，可超错误通道上限），
-    出口侧据此改用防御性宽上限净化。
-    """
-    return isinstance(result.get("batch"), dict)
-
-
 def _effective_raw_error(result: dict[str, Any]) -> Any:
     """假值与纯空白串的错误载荷回落未知错误，文本与结构化出口共用同一缺失口径。"""
     raw_error = result.get("error")
@@ -290,7 +284,7 @@ def _effective_raw_error(result: dict[str, Any]) -> Any:
 
 def _failure_render_context(result: dict[str, Any]) -> tuple[bool, int, Any]:
     """失败可读消息判定的 (聚合判定, 消息上限, 有效错误载荷) 三元组单点推导。"""
-    aggregated = _is_aggregated_result(result)
+    aggregated = trusted_result_message(result)
     return aggregated, message_limit_for(aggregated), _effective_raw_error(result)
 
 
@@ -324,28 +318,32 @@ def _failure_error_message(
     return "未知错误"
 
 
-def _failure_message_for_result(result: dict[str, Any]) -> str:
-    """失败结果可读消息的单点计算，文本与结构化出口及流水线共用同一产物。"""
-    aggregated, message_limit, raw_error = _failure_render_context(result)
+def _failure_message_from_context(aggregated: bool, message_limit: int, raw_error: Any) -> str:
+    """按渲染上下文推导失败可读消息，供现算与复用上下文的两类调用方共用。"""
     if isinstance(raw_error, dict):
         return _failure_error_message(raw_error, aggregated=aggregated, message_limit=message_limit)
     return sanitize_error_text(normalize_message_text(raw_error))
+
+
+def _failure_message_for_result(result: dict[str, Any]) -> str:
+    """失败结果可读消息的单点计算，文本与结构化出口及流水线共用同一产物。"""
+    return _failure_message_from_context(*_failure_render_context(result))
 
 
 def _format_failure_section(result: dict[str, Any], *, failure_message: str | None = None) -> str:
     """失败时格式化并行失败详情；无 batch 错误信息时仅返回失败概述。
 
     error 为上游自由内容，一律经净化与归一化输出：可读消息由
-    _failure_message_for_result 单点判定，failure_message 传入流水线预计算的共用
-    产物；空值与纯空白串回落未知错误，字面量 None 与字典 repr 不进入用户可见
-    文本。聚合格式的消息为本侧组装产物（含恢复指引），净化改用防御性宽上限防
-    截断指引；脱敏口径两档一致。
+    _failure_message_from_context 单点判定（渲染上下文经 _failure_render_context
+    推导），failure_message 传入流水线预计算的共用产物；空值与纯空白串回落未知
+    错误，字面量 None 与字典 repr 不进入用户可见文本。聚合格式的消息为本侧组装
+    产物（含恢复指引），净化改用防御性宽上限防截断指引；脱敏口径两档一致。
     """
-    # 消息上限只依赖聚合判定，不取失败渲染上下文的其余分量。
-    message_limit = message_limit_for(_is_aggregated_result(result))
-
+    aggregated, message_limit, raw_error = _failure_render_context(result)
     error_text = (
-        failure_message if failure_message is not None else _failure_message_for_result(result)
+        failure_message
+        if failure_message is not None
+        else _failure_message_from_context(aggregated, message_limit, raw_error)
     )
     failure_summary = f"图片生成失败: {error_text}"
     batch_info = result.get("batch")
@@ -672,14 +670,15 @@ def _build_generation_structured_result(
         payload["auto_save"] = {"enabled": False}
 
     if failed:
-        message_limit = message_limit_for(_is_aggregated_result(result))
-        raw_error = _effective_raw_error(result)
+        aggregated, message_limit, raw_error = _failure_render_context(result)
         # message 终值与文本出口共用同一产物，failure_message 为 None 时在此单点现算。
         message = (
-            failure_message if failure_message is not None else _failure_message_for_result(result)
+            failure_message
+            if failure_message is not None
+            else _failure_message_from_context(aggregated, message_limit, raw_error)
         )
         if isinstance(raw_error, dict):
-            # message 键过滤后交净化，终值随后显式写回，同一字符串不二次过净化管线。
+            # message 键过滤后交净化，终值随后显式写回。错误消息恒过净化，净化幂等保证产物不变。
             sanitized_error = sanitize_error_dict(
                 {k: v for k, v in raw_error.items() if k != "message"},
                 message_limit=message_limit,

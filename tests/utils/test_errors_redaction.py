@@ -27,10 +27,13 @@ from seedream_mcp.utils.core.errors import (
 )
 from seedream_mcp.utils.core.sanitizers import (
     CONTROL_CHARS_PATTERN,
+    ERROR_TEXT_SEGMENT_JOINER,
     _sanitize_output_string,
     _truncate_value_for_output,
+    sanitize_assembled_text,
     sanitize_data_text,
     sanitize_error_text,
+    sanitize_summary_lines,
     truncate_upstream_message_fragment,
 )
 
@@ -51,6 +54,15 @@ def test_bearer_pipeline_preserves_surrounding_text() -> None:
     """非键名前缀的 Bearer 令牌保留前后文本；auth 键名形态优先走键值脱敏整体消隐。"""
     assert _sanitize_output_string("header: Bearer s3cret done") == "header: Bearer *** done"
     assert _sanitize_output_string("auth: Bearer s3cret done") == "auth: ***"
+
+
+def test_bearer_mask_replay_idempotent_across_non_whitespace_join() -> None:
+    """掩码产物 Bearer *** 后紧跟非空白拼接字符（分号/闭括号）时重放不吞尾部。"""
+    assembled = "认证失败: Invalid Bearer ***；请检查您的API密钥是否正确设置。"
+    assert _sanitize_output_string(assembled) == assembled
+    assert sanitize_error_text(assembled) == assembled
+    colon_form = "回显 [错误码: Bearer: ***]尾部"
+    assert _sanitize_output_string(colon_form) == colon_form
 
 
 def test_bearer_pipeline_redacts_colon_separated_forms() -> None:
@@ -290,6 +302,12 @@ def test_sanitize_error_text_strips_authorization_basic_scheme() -> None:
     assert sanitize_error_text("echo Authorization: Basic abc123") == "echo Authorization: ***"
 
 
+def test_sanitize_error_text_strips_padded_base64_scheme_token() -> None:
+    """base64 令牌的 = 填充呈键值形态，方案词分支整体吸收令牌不逃逸。"""
+    assert sanitize_error_text("Authorization: Basic dGVzdA==") == "Authorization: ***"
+    assert sanitize_error_text("Authorization: Bearer eyJhbGc=.pa==") == "Authorization: ***"
+
+
 def test_sanitize_error_text_preserves_plain_bearer() -> None:
     """无键名前缀的 Bearer 令牌仍由 Bearer 模式剥离，叠加覆盖。"""
     assert sanitize_error_text("Invalid Bearer sk-secret-token-123") == "Invalid Bearer ***"
@@ -364,6 +382,59 @@ def test_format_error_for_user_strips_crlf_in_message() -> None:
     assert "\n" not in rendered
 
 
+def test_format_error_for_user_bare_bearer_tail_keeps_hint_on_replay() -> None:
+    """裸 Bearer 加尾随空白结尾的 message：收敛空白后拼接，重放后指引完整存活。
+
+    修复前 joiner 直接衔接裸 Bearer 的尾随空白，出口净化的 Bearer 空白分支把
+    joiner 与指引整体吞成掩码，恢复指引丢失；空白变体（NBSP、全角空格）同口径。
+    """
+    hint = "请检查您的API密钥是否正确设置。"
+    for tail in (" ", "  ", chr(0xA0), chr(0x3000)):
+        err = SeedreamAPIError(f"上游回显 Bearer{tail}", status_code=401)
+
+        line = format_error_for_user(err)
+        replayed = sanitize_assembled_text(line)
+
+        assert f"{ERROR_TEXT_SEGMENT_JOINER}{hint}" in line, repr(tail)
+        assert f"{ERROR_TEXT_SEGMENT_JOINER}{hint}" in replayed, repr(tail)
+        assert sanitize_assembled_text(replayed) == replayed, repr(tail)
+
+
+def test_format_error_for_user_empty_value_key_tail_keeps_hint_on_replay() -> None:
+    """裸键值形态（token= 结尾、值为空）的 message：补掩码终止形态，重放后指引完整存活。
+
+    修复前空值尾形在首轮净化因值缺失不命中，出口净化的键值值吸收把 joiner 与
+    指引整体吞成掩码；全角等号与冒号分隔变体同口径。
+    """
+    hint = "请检查对应参数的取值范围。"
+    for tail in ("token=", "token＝", "password:"):
+        err = SeedreamValidationError(f"回显 {tail}")
+
+        line = format_error_for_user(err)
+        replayed = sanitize_assembled_text(line)
+
+        assert f"{ERROR_TEXT_SEGMENT_JOINER}{hint}" in line, repr(tail)
+        assert f"{ERROR_TEXT_SEGMENT_JOINER}{hint}" in replayed, repr(tail)
+        assert sanitize_assembled_text(replayed) == replayed, repr(tail)
+
+
+def test_format_error_for_user_bearer_colon_tail_keeps_hint_on_replay() -> None:
+    """Bearer 冒号形态（令牌为空）结尾的 message：补掩码终止形态，重放后指引完整存活。
+
+    冒号分支的令牌为空时裸前缀以分隔符收尾存活，空白收敛不阻断、须掩码终止；
+    半/全角冒号与尾随空白变体同口径。
+    """
+    hint = "请核对请求参数。"
+    for tail in ("Bearer:", "Bearer：", "Bearer: "):
+        err = SeedreamAPIError(f"鉴权头 {tail}", status_code=400)
+
+        line = format_error_for_user(err)
+        replayed = sanitize_assembled_text(line)
+
+        assert f"{ERROR_TEXT_SEGMENT_JOINER}{hint}" in replayed, repr(tail)
+        assert sanitize_assembled_text(replayed) == replayed, repr(tail)
+
+
 # ==================== CRLF 日志注入剥离 ====================
 
 
@@ -411,6 +482,110 @@ def test_sanitize_error_text_absorption_stops_at_next_keyvalue() -> None:
     键值后的普通尾词无法与凭据多词值区分，按 fail-safe 方向并入值一并脱敏。
     """
     assert sanitize_error_text("token=abc api_key=xyz tail") == "token=*** api_key=***"
+
+
+def test_sanitize_error_text_mask_idempotent_on_masked_marker() -> None:
+    r"""纯掩码标记不再重匹配：*** 值不吸收尾词，重放保留恢复指引。
+
+    值首的纯掩码标记守卫使净化对自身输出幂等；星串不足三颗或后随组合尾段
+    不获放行（见下方组合形态用例），新鲜凭据照常掩码。
+    """
+    assembled = "认证失败: api_key=*** 请检查您的API密钥是否正确设置。"
+    assert sanitize_error_text(assembled) == assembled
+    assert sanitize_error_text("api_key=leaked") == "api_key=***"
+
+
+def test_mask_marker_replay_keeps_guidance_after_auth_scheme_word() -> None:
+    r"""方案词后的掩码产物不吞指引：令牌吸收在纯标记处停，重放幂等。
+
+    鉴权方案分支令牌前置纯掩码标记守卫，basic/bearer 后已掩码的 *** 不再
+    被当作令牌吸收，续词吸收在纯标记处停止，恢复指引保留。
+    """
+    assembled = "token: basic *** 请检查您的API密钥是否正确设置。"
+    redacted = sanitize_assembled_text(assembled)
+    assert "请检查您的API密钥是否正确设置。" in redacted
+    assert sanitize_assembled_text(redacted) == redacted
+
+    header = "Authorization: Bearer *** 后续指引"
+    header_redacted = sanitize_assembled_text(header)
+    assert "后续指引" in header_redacted
+    assert sanitize_assembled_text(header_redacted) == header_redacted
+
+
+def test_mask_marker_replay_boundaries_kept() -> None:
+    r"""满三星标记直达受限边界判纯：空白、CJK 标点与右括号邻接的重放原样保留。
+
+    边界即重放拼接的邻接形态（压平不改写的空白、「；」一类 CJK 标点、
+    括号包裹收尾），越档星串（四星）同样放行，重放不吞尾部。
+    """
+    assert _sanitize_output_string("api_key=*** 尾部") == "api_key=*** 尾部"
+    assert _sanitize_output_string("api_key=**** 尾部") == "api_key=**** 尾部"
+    assert _sanitize_output_string("api_key=***\u3000尾部") == "api_key=***\u3000尾部"
+    assert _sanitize_output_string("认证失败: api_key=***；请检查设置。") == (
+        "认证失败: api_key=***；请检查设置。"
+    )
+    assert _sanitize_output_string("api_key=***。收尾") == "api_key=***。收尾"
+    assert _sanitize_output_string("回显 (Bearer ***) 尾部") == "回显 (Bearer ***) 尾部"
+    assert _sanitize_output_string("回显 [api_key=***]尾部") == "回显 [api_key=***]尾部"
+
+
+def test_mask_marker_combo_tail_still_redacted() -> None:
+    r"""***+尾段组合形态不放行：键值、Bearer 与方案词后的组合整词掩码。
+
+    纯掩码标记守卫只放行星串满三颗且直达受限边界的标记；ASCII 标点尾段、
+    换行与双向控制符一类压平对象、不足三颗的星串都判真值照常掩码，
+    fail-closed 不因幂等守卫弱化。
+    """
+    assert sanitize_error_text("api_key= ***sk-12345") == "api_key= ***"
+    assert _sanitize_output_string("Bearer ***tail123") == "Bearer ***"
+    assert sanitize_error_text("token: basic ***tok1") == "token: ***"
+    # ASCII 标点尾段不属受限边界
+    assert sanitize_error_text("api_key=***-secret99") == "api_key=***"
+    assert sanitize_error_text("api_key=***.secret99") == "api_key=***"
+    assert sanitize_error_text("api_key=***/secret99") == "api_key=***"
+    assert _sanitize_output_string("Bearer ***-secret99") == "Bearer ***"
+    # 换行是压平对象而非拼接边界，多段文案须以「；」拼接
+    assert sanitize_error_text("api_key=***\nsecret99") == "api_key=***"
+    # 双向控制符同属压平对象
+    assert sanitize_error_text("api_key=***\u200esecret99") == "api_key=***"
+    # 不足三颗星不是掩码产物形态
+    assert sanitize_error_text("api_key=* SECRETWORD") == "api_key=***"
+    assert sanitize_error_text("password=** topsecret") == "password=***"
+
+
+def test_mask_marker_space_separated_tail_survives_signed_off() -> None:
+    """独立 *** 词后的空格分离尾词存活：已签字取舍，正常凭据形态对照仍全掩码。
+
+    存活面仅限真凭据的空格前邻为纯 *** 标记（独立成词或附着键值/令牌值位），
+    收紧须废纯标记守卫、会把重放恢复指引一并吞掉，故按已签字取舍锁定现状。
+    """
+    assert sanitize_error_text("token=abc *** sk-12345") == "token=*** *** sk-12345"
+    assert _sanitize_output_string("api_key=*** realsecret99") == "api_key=*** realsecret99"
+    assert _sanitize_output_string("Bearer *** tok123") == "Bearer *** tok123"
+    assert _sanitize_output_string("token: basic *** tok1") == "token: *** *** tok1"
+    # 存活尾词在重放下保持可见，产物幂等
+    assert sanitize_error_text("token=*** *** sk-12345") == "token=*** *** sk-12345"
+    # 对照：无独立 *** 前导与附着尾段组合的正常凭据形态仍全掩码
+    assert sanitize_error_text("api_key=realsecret99") == "api_key=***"
+    assert sanitize_error_text("api_key= ***sk-12345") == "api_key= ***"
+    assert _sanitize_output_string("Bearer tok123") == "Bearer ***"
+
+
+def test_mask_marker_purity_judged_on_original_text_in_shadow_round() -> None:
+    r"""影子轮次的标记纯度按原文判定：全角标点折叠不把纯标记翻成组合形态。
+
+    影子折叠把全角标点折为 ASCII 标点，标记的受限边界在影子上翻成组合；
+    值首在原文为纯标记的影子命中是折叠伪影，剔除后「；」拼接重放经完整管线
+    保留，伪装键的组合真值仍在影子上掩码。换行是压平对象而非拼接边界，
+    多段文案须以「；」拼接。
+    """
+    assembled = "认证失败: api_key=***；请检查您的API密钥是否正确设置。"
+    assert _sanitize_output_string(assembled) == assembled
+    assert sanitize_error_text("认证失败: api_key=***\n请检查您的API密钥是否正确设置。") == (
+        "认证失败: api_key=***"
+    )
+    # 伪装键后的组合真值经影子掩码不受伪影剔除影响
+    assert "sk-1" not in sanitize_error_text("to\x00ken=***sk-1 指引")
 
 
 def test_sanitize_error_text_preserves_adjacent_non_sensitive_keyvalue() -> None:
@@ -799,8 +974,8 @@ def test_userinfo_strip_skips_at_free_text_via_precheck(
 ) -> None:
     """无字面 @ 的全文经前置守卫跳过 userinfo 正则扫描，含 @ 文本照常全文进入。
 
-    _sanitize_output_string 对截断后文本的兜底剥离保留；守卫消除的是未截断
-    全长度的线性扫描。
+    守卫不变量覆盖全部调用点：进入剥离的文本必含字面 @，含 _sanitize_output_string
+    对截断后文本的兜底调用。
     """
     import seedream_mcp.utils.core.sanitizers as sanitizers_module
 
@@ -825,6 +1000,7 @@ def test_userinfo_strip_skips_at_free_text_via_precheck(
     sanitize_error_text(with_credentials)
 
     assert with_credentials in calls
+    assert all("@" in text for text in calls)
 
 
 # ==================== 全角分隔符绕过与结果数据路径净化 ====================
@@ -1349,6 +1525,27 @@ def test_flatten_control_class_locked_to_derived_canonical_set() -> None:
     assert _BIDI_ISOLATE_CONTROL_CHARS < _FLATTEN_CONTROL_CHARS
 
 
+def test_mask_marker_boundary_class_locked_to_derived_whitespace_members() -> None:
+    """守护：掩码边界类第一分支成员恒为空白源集减压平集加右括号对，全码空间扫描锁定。
+
+    成员改回手抄后向空白源集扩成员不进边界类会使掩码幂等失效，反向漂移则新鲜
+    凭据逃逸；键值空白类同锁到同一源集。
+    """
+    from seedream_mcp.utils.core.sanitizers import (
+        _FLATTEN_CONTROL_CHARS,
+        _KEYVALUE_WHITESPACE_CHARS,
+        _KEYVALUE_WHITESPACE_CLASS,
+        _MASK_MARKER_BOUNDARY_CLASS,
+    )
+
+    universe = "".join(map(chr, range(sys.maxunicode + 1)))
+    whitespace_class = re.compile(_KEYVALUE_WHITESPACE_CLASS)
+    assert set(whitespace_class.findall(universe)) == _KEYVALUE_WHITESPACE_CHARS
+    first_branch = re.compile(_MASK_MARKER_BOUNDARY_CLASS.split("|", 1)[0])
+    expected = (_KEYVALUE_WHITESPACE_CHARS - _FLATTEN_CONTROL_CHARS) | frozenset("])")
+    assert set(first_branch.findall(universe)) == expected
+
+
 # ==================== 自由文本键名与 dict 键策略单一来源 ====================
 
 
@@ -1831,6 +2028,34 @@ def test_sanitize_channels_keep_multiline_ascii_summary_stable() -> None:
     # 纯 ASCII 干净文本经输出净化管线返回原对象
     clean = "plain ascii summary without markers"
     assert _sanitize_output_string(clean) is clean
+
+
+def test_summary_lines_trigger_identity_and_rewrite() -> None:
+    """干净摘要经触发扫描恒等放行，命中 ASCII 控制字符仍走按行整形。"""
+    clean = "ok line1\nline2 https://a.b/c.png"
+    assert sanitize_summary_lines(clean) == clean
+    assert sanitize_summary_lines("a\x01b\nc") == "a b\nc"
+    non_ascii_clean = "图片 生成完成.png\n第二行"
+    assert sanitize_summary_lines(non_ascii_clean) == non_ascii_clean
+
+
+def test_summary_lines_preserve_zero_width_for_verbatim_echo() -> None:
+    """摘要通道零宽与软连字符原样保留：合法文件名成分，剥离即断回流路径。
+
+    数据与错误通道照常剥零宽（键名还原供匹配用）；摘要通道无键值匹配，
+    零宽剥离无可还原对象。
+    """
+    soft_hyphen = chr(0x00AD)
+    zwsp = chr(0x200B)
+    zwj = chr(0x200D)
+    line = f"1. D:/x/to{soft_hyphen}ken{zwsp}.png e{zwj}mail.png"
+    assert sanitize_summary_lines(line) == line
+    # 触发改写的行内整形不牵连零宽：控制字符压平、代理剥离，零宽保持原文
+    mixed = f"to{soft_hyphen}ken\x01.png\ud800"
+    assert sanitize_summary_lines(mixed) == f"to{soft_hyphen}ken .png"
+    # 对照组：数据与错误通道的零宽剥离不回退
+    assert sanitize_data_text(f"to{soft_hyphen}ken.png") == "token.png"
+    assert sanitize_error_text(f"to{zwsp}ken=SECRET") == "token=***"
 
 
 def test_is_sensitive_key_matches_fullwidth_and_homoglyph_keys() -> None:

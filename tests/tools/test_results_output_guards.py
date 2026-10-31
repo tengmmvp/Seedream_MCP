@@ -1,16 +1,19 @@
 """results 输出格式化守护测试：自动保存摘要形态、路径折叠与上游 URL 脱敏。
 
 自动保存段落折叠为 N/M 摘要、仅失败项保留明细且编号与图片列表同基准；保存路径
-每张图仅出现一次；URL 为数据字段，净化剥离 userinfo 凭据与 CRLF 但不截断。
+每张图仅出现一次；URL 为数据字段，净化剥离 userinfo 凭据与 CRLF 但不截断；
+错误构造的恒净化入口、聚合净化幂等与错误出口两通道同源收敛在此锁定。
 """
 
 from __future__ import annotations
 
 import dataclasses
 import inspect
-from typing import Any
+from typing import Any, cast
 
 import pytest
+
+from mcp.types import CallToolResult, TextContent
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.pipeline import _execute as common_module
@@ -26,17 +29,34 @@ from seedream_mcp.tools.pipeline.results import (
     _failure_render_context,
     _format_failure_section,
     _sanitize_usage_or_empty,
+    aggregate_parallel_generation_results,
     extract_images,
     format_generation_response,
     update_result_with_auto_save,
 )
-from seedream_mcp.tools.outputs.sanitize import _sanitize_image_errors, sanitize_error_dict
-from seedream_mcp.tools.outputs import _stringify_keys
+from seedream_mcp.tools.outputs import sanitize as sanitize_module
+from seedream_mcp.tools.outputs.sanitize import (
+    _REQUEST_FAILED_TYPE,
+    _sanitize_image_errors,
+    message_limit_for,
+    sanitize_error_dict,
+    trusted_image_message,
+    trusted_result_message,
+)
+from seedream_mcp.tools.outputs import (
+    _stringify_keys,
+    build_error_dict,
+    build_error_structured,
+    build_error_tool_result,
+    build_structured_tool_result,
+)
 from seedream_mcp.utils.core.errors import SeedreamAPIError, response_reports_failure
 from seedream_mcp.utils.core.sanitizers import (
     DATA_OUTPUT_LIMIT,
     MESSAGE_OUTPUT_LIMIT,
     _truncate_value_for_output,
+    sanitize_assembled_text,
+    sanitize_error_text,
 )
 from seedream_mcp.utils.io.save import AutoSaveResult
 
@@ -888,6 +908,205 @@ def test_aggregated_assembled_messages_keep_recovery_guidance() -> None:
     assert f"  请求 1: {guidance}" in text
     assert structured["error"]["message"] == guidance
     assert structured["data"][0]["error"]["message"] == guidance
+
+
+def test_build_error_dict_boundary_sanitizes_idempotently() -> None:
+    """build_error_dict 边界兜底：全套净化管线，掩码片段与后续文案保留。"""
+    payload = build_error_dict(
+        "browse_failed",
+        "下载失败 https://user:secret@host/img.png\r\nBearer abc123",
+    )
+    assert payload["message"] == "下载失败 https://host/img.png  Bearer ***"
+    assert build_error_dict("browse_failed", "api_key=leaked")["message"] == "api_key=***"
+
+    masked = build_error_dict("browse_failed", "api_key=*** 后续指引文案保持完整")
+    assert masked["message"] == "api_key=*** 后续指引文案保持完整"
+
+
+def test_build_error_dict_entry_always_sanitizes() -> None:
+    """恒净化入口语义：净化产物再入边界恒等，未净化凭据片段无信任跳过、恒被掩码。"""
+    producer_message = sanitize_error_text(
+        "下载失败 https://user:secret@host/a.png\r\nBearer abc123"
+    )
+    assert producer_message == "下载失败 https://host/a.png  Bearer ***"
+
+    assert build_error_dict("api_error", producer_message) == {
+        "type": "api_error",
+        "message": producer_message,
+    }
+    assert build_error_dict("api_error", "api_key=leaked")["message"] == "api_key=***"
+
+
+async def test_structured_result_summary_preserves_content_and_structure() -> None:
+    """装配点摘要按行整形：行结构与内容原样保留，控制字符压平，零宽保持原文。
+
+    摘要承载须原样回显的文件名与 URL，装配点不做内容改写（含 Bearer 形态与
+    零宽字符文件名），凭据掩码由错误构造点的边界净化承担。
+    """
+    soft_hyphen = chr(0x00AD)
+    result = await build_structured_tool_result(
+        f"能力快照\n第二行 Bearer token.png 尾部\r注入\n1. D:/x/ima{soft_hyphen}dge.png",
+        {"tool": "get_model_info", "success": True},
+        is_error=False,
+    )
+
+    summary = cast(TextContent, result.content[0]).text
+    assert (
+        summary == f"能力快照\n第二行 Bearer token.png 尾部 注入\n1. D:/x/ima{soft_hyphen}dge.png"
+    )
+
+
+def test_parallel_aggregation_failure_channels_share_sanitized_message() -> None:
+    """聚合失败消息两通道同源：占位项 error 与 batch.errors 同为净化产物、逐字相等。"""
+    dirty = "下载失败 https://user:secret@host/a.png\r\nBearer abc123 请重试"
+    result = aggregate_parallel_generation_results(
+        request_results=[None], request_errors={1: RuntimeError(dirty)}
+    )
+
+    placeholder = result["data"][0]["error"]["message"]
+    batch_message = result["batch"]["errors"][0]["message"]
+    assert placeholder == batch_message
+    assert "user:secret" not in placeholder
+    assert "\r" not in placeholder and "\n" not in placeholder
+    assert "Bearer ***" in placeholder
+
+
+def test_aggregated_recovery_hint_survives_mask_repass() -> None:
+    """聚合占位项消息经完整净化重放后恢复指引保留：键值掩码对掩码产物幂等。"""
+    assembled = "认证失败: api_key=***；请检查您的API密钥是否正确设置。"
+    result = aggregate_parallel_generation_results(
+        request_results=[None], request_errors={1: RuntimeError(assembled)}
+    )
+    expected = "未知错误: 认证失败: api_key=***；请检查您的API密钥是否正确设置。"
+
+    assert result["batch"]["errors"][0]["message"] == expected
+    repassed = _sanitize_image_errors([dict(result["data"][0])])
+    assert repassed[0]["error"]["message"] == expected
+
+
+def test_aggregate_error_output_matches_full_sanitization() -> None:
+    """聚合错误输出与全净化恒等：各分支产物再过净化管线满足幂等。"""
+    dirty = "失败 https://user:secret@host/a.png\r\nBearer abc123"
+    soft_failure = {"success": False, "status": "failed", "data": [], "error": {"message": dirty}}
+
+    result = aggregate_parallel_generation_results(
+        request_results=[soft_failure, None],
+        request_errors={2: RuntimeError(dirty)},
+    )
+
+    # 软失败提取与异常格式化两分支的占位项，加上拼装的顶层 error。
+    sanitized_payloads = [result["data"][0]["error"], result["data"][1]["error"], result["error"]]
+    assert all(
+        payload["message"] == sanitize_assembled_text(payload["message"])
+        for payload in sanitized_payloads
+    )
+
+
+# ==================== 错误出口两通道同源收敛 ====================
+
+
+def _patched_error_tool_result_spy(monkeypatch: pytest.MonkeyPatch, module: Any) -> list[Any]:
+    """在出口模块替换 build_error_tool_result 为记录入参并透传真实组装的 spy。"""
+    calls: list[Any] = []
+    real = module.build_error_tool_result
+
+    async def _spy(structured: dict[str, Any]) -> CallToolResult:
+        calls.append(structured)
+        result: CallToolResult = await real(structured)
+        return result
+
+    monkeypatch.setattr(module, "build_error_tool_result", _spy)
+    return calls
+
+
+async def test_build_error_tool_result_routes_through_structured_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """helper 经 build_structured_tool_result 组装：可见文本取 error.message、is_error 恒 True。"""
+    import seedream_mcp.tools.outputs as outputs_module
+
+    calls: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    sentinel = CallToolResult(content=[], is_error=True)
+
+    async def _spy(message: str, structured: dict[str, Any], **kwargs: Any) -> CallToolResult:
+        calls.append((message, structured, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(outputs_module, "build_structured_tool_result", _spy)
+    structured = build_error_structured("text_to_image", "api_error", "认证失败: api_key=***")
+
+    result = await build_error_tool_result(structured)
+
+    assert calls == [("认证失败: api_key=***", structured, {"is_error": True})]
+    assert result is sentinel
+
+
+async def test_validation_error_exit_routes_through_error_tool_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """输入模型构造失败出口经 build_error_tool_result 组装，回归手工双通道即漂移。"""
+    from pydantic import ValidationError
+
+    from seedream_mcp.definitions.conventions import TEXT_TO_IMAGE_TOOL_NAME
+    from seedream_mcp.server import _registration as registration_module
+    from seedream_mcp.tools.schemas import TextToImageInput
+
+    with pytest.raises(ValidationError) as exc_info:
+        TextToImageInput(prompt="一只猫", request_count=1, parallelism=2)
+
+    calls = _patched_error_tool_result_spy(monkeypatch, registration_module)
+    result = await registration_module._validation_error_result(
+        TEXT_TO_IMAGE_TOOL_NAME, exc_info.value
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["error"]["type"] == "validation_error"
+    assert result.is_error is True
+
+
+async def test_model_info_error_exit_routes_through_error_tool_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模型信息未预期异常出口经 build_error_tool_result 组装，回归手工双通道即漂移。"""
+    from seedream_mcp.tools.handlers import get_model_info as model_info_module
+
+    def _boom(config: Any) -> dict[str, Any]:
+        del config
+        raise RuntimeError("payload assembly exploded")
+
+    monkeypatch.setattr(model_info_module, "build_model_info_payload", _boom)
+    calls = _patched_error_tool_result_spy(monkeypatch, model_info_module)
+    result = await model_info_module.handle_get_model_info(SeedreamConfig(api_key="k"))
+
+    assert len(calls) == 1
+    assert calls[0]["error"]["type"] == "model_info_failed"
+    assert result.is_error is True
+
+
+async def test_browse_error_exit_routes_through_error_tool_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """浏览错误出口 _build_browse_error 经 build_error_tool_result 组装，回归手工双通道即漂移。"""
+    from seedream_mcp.tools.handlers import browse_images as browse_module
+    from seedream_mcp.tools.handlers.browse_images import _BrowseRequestState
+
+    state = _BrowseRequestState(
+        workspace_roots=[],
+        directory=".",
+        resolved_directories=[],
+        recursive=False,
+        max_depth=1,
+        limit=10,
+        offset=0,
+        show_details=False,
+        format_filter=None,
+    )
+    calls = _patched_error_tool_result_spy(monkeypatch, browse_module)
+    result = await browse_module._build_browse_error(state=state, message="目录扫描中断")
+
+    assert len(calls) == 1
+    assert calls[0]["error"] == {"type": "browse_failed", "message": "目录扫描中断"}
+    assert result.is_error is True
 
 
 # ==================== usage 字段净化 ====================
@@ -1846,10 +2065,10 @@ def test_failure_render_context_triple_single_derivation() -> None:
     assert plain == (False, MESSAGE_OUTPUT_LIMIT, "未知错误")
 
 
-def test_failure_message_limit_derivation_skips_payload_computation(
+def test_failure_section_single_context_derivation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """消息上限由聚合判定直取：限额派生路径不再经三元组白算错误载荷。"""
+    """失败段渲染单次推导上下文：预设消息与现算消息共用同一路径，载荷只取一次。"""
     calls: list[dict[str, Any]] = []
 
     def _spy(result: dict[str, Any]) -> Any:
@@ -1866,20 +2085,45 @@ def test_failure_message_limit_derivation_skips_payload_computation(
 
     assert text.startswith("图片生成失败: 预设失败消息")
     assert "请求 0: 分项失败" in text
-    assert calls == []
+    assert calls == [result]
 
 
-def test_failure_render_context_confined_to_message_verdict() -> None:
-    """失败渲染上下文三元组仅由可读消息判定单点消费，两出口不再整组取用。"""
-    assert "_failure_render_context" not in inspect.getsource(
-        results_module._format_failure_section
-    )
-    assert "_failure_render_context" not in inspect.getsource(
-        results_module._build_generation_structured_result
-    )
-    assert "_failure_render_context" in inspect.getsource(
-        results_module._failure_message_for_result
-    )
+def test_failure_render_context_is_single_derivation_point() -> None:
+    """失败渲染上下文为单点推导：两出口经上下文取量，不再直调聚合判定与上限派生。"""
+    for func in (
+        results_module._format_failure_section,
+        results_module._build_generation_structured_result,
+    ):
+        source = inspect.getsource(func)
+        assert "_failure_render_context" in source
+        assert "message_limit_for" not in source
+        assert "trusted_result_message" not in source
+
+
+def test_trusted_message_sentinels_single_pointed() -> None:
+    """宽度哨兵单点化：batch 键与占位 type 的判定只在 sanitize 单点，results 侧无副本。"""
+    results_source = inspect.getsource(results_module)
+    assert "_is_aggregated_result" not in results_source
+    # 聚合哨兵的形状推断表达式与占位 type 比较不再散落结果侧。
+    assert 'isinstance(result.get("batch"), dict)' not in results_source
+    assert "== _REQUEST_FAILED_TYPE" not in results_source
+    # 图片项净化经条目级哨兵单点取宽限。
+    assert "trusted_image_message" in inspect.getsource(sanitize_module._sanitize_image_errors)
+
+
+def test_result_and_item_sentinels_share_width_policy() -> None:
+    """两类组装标记取得同一宽度：任一哨兵标记的长组装消息不被窄限截断，未标记同走窄限。"""
+    long_message = "API调用失败: " + "z" * 700 + " 请检查配置"
+    aggregated = {"error": {"message": long_message}, "batch": {"errors": []}}
+    placeholder = {"type": _REQUEST_FAILED_TYPE, "error": {"message": long_message}}
+
+    result_limit = message_limit_for(trusted_result_message(aggregated))
+    item_limit = message_limit_for(trusted_image_message(placeholder))
+
+    assert result_limit == item_limit == DATA_OUTPUT_LIMIT
+    assert sanitize_error_text(long_message, limit=result_limit) == long_message
+    assert message_limit_for(trusted_result_message({})) == MESSAGE_OUTPUT_LIMIT
+    assert message_limit_for(trusted_image_message({})) == MESSAGE_OUTPUT_LIMIT
 
 
 def test_failure_aggregated_invalid_message_verdicts_match_across_channels() -> None:

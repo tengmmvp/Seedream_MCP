@@ -18,6 +18,7 @@ from typing import Any, NamedTuple
 
 from .errors import SeedreamConfigError, SeedreamValidationError
 from .logs import get_logger
+from .sanitizers import ERROR_TEXT_SEGMENT_JOINER
 from ..model.capabilities import (
     capability_param_label,
     get_max_reference_images,
@@ -568,7 +569,7 @@ def capability_gate_error(
         param_desc = capability_param_label(capability)
     return SeedreamValidationError(
         f"当前模型 {model_id} 不支持{param_desc}，"
-        f"支持的模型：{supported_family_display_names(capability)}；"
+        f"支持的模型：{supported_family_display_names(capability)}{ERROR_TEXT_SEGMENT_JOINER}"
         "如需更换模型，请告知用户调整服务器配置",
         field=field,
         value=value,

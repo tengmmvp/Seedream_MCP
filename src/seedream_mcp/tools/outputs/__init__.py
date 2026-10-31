@@ -3,9 +3,10 @@
 作为 outputSchema 的单一来源：MCPServer 依据本模块模型生成各工具的 structuredContent
 schema，运行时输出也须经模型构造后 model_dump，使声明与实际输出绑定、不漂移。
 TOOL_OUTPUT_MODELS 以工具名键控输出族，错误构造经它绑定各工具声明的 schema；
-build_error_dict 与 build_error_structured 收敛各错误分支的错误结构；
+build_error_dict 与 build_error_structured 收敛各错误分支的错误结构，
+build_error_tool_result 由结构化错误组装两通道同源的错误工具结果，错误出口经它收敛；
 build_structured_json_text 将 structuredContent 序列化为紧凑 JSON 的 TextContent，
-字符串值继承摘要通道净化、二进制载荷替换为长度占位；
+字符串值经数据通道净化、二进制载荷替换为长度占位；
 dump_compact_strict_json 是紧凑严格 JSON 的单一序列化原语，dump_strict_json_bytes
 为其 UTF-8 字节形态，Web 控制台的结构化 JSON 同源委托；
 build_structured_tool_result 把镜像块回传进 content 数组，是「摘要+镜像（+尾部块）」
@@ -34,7 +35,9 @@ from ...definitions.conventions import (
 from ...utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
 from ...utils.core.logs import get_logger
 from ...utils.core.sanitizers import (
+    sanitize_assembled_text,
     sanitize_data_text,
+    sanitize_summary_lines,
     strip_unpaired_surrogates,
     utf8_value_leaf_length,
 )
@@ -225,6 +228,9 @@ TOOL_OUTPUT_MODELS: Mapping[str, type[_BaseStructuredOutput]] = {
 def build_error_dict(error_type: str, message: str) -> dict[str, Any]:
     """构建结构化错误载荷，各工具错误分支共用同一字段集。
 
+    message 恒经 sanitize_assembled_text 幂等净化兜底。边界不截断，长度上限由各
+    错误通道自行维护（含恢复指引的组装消息可至 16KB 宽限）。
+
     Args:
         error_type: 载荷的 type 取值，为归约档案错误码或浏览工具的 browse_failed。
         message: 面向用户的错误消息。
@@ -232,7 +238,7 @@ def build_error_dict(error_type: str, message: str) -> dict[str, Any]:
     Returns:
         含 type 与 message 两键的错误字典。
     """
-    return {"type": error_type, "message": message}
+    return {"type": error_type, "message": sanitize_assembled_text(message)}
 
 
 def build_error_structured(
@@ -315,7 +321,7 @@ def build_structured_json_text(structured: dict[str, Any]) -> TextContent:
 
     规范建议返回 structuredContent 的工具同时在 content 中回传序列化 JSON，
     仅消费 content 的客户端也能取得完整结构化结果；紧凑分隔符省 token。镜像的
-    全部字符串值继承摘要通道的数据净化口径（敏感键值掩码、控制字符压平与防御性
+    全部字符串值经数据通道净化（敏感键值掩码、控制字符压平与防御性
     截断），未经出口净化的回显字段不借镜像进入模型可见通道；b64_json 字符串
     载荷以「Base64 数据: N 字符」占位，与文本摘要口径一致且不限阈值，防镜像
     把完整 base64 复制进模型上下文；structuredContent 字段本身不受影响。非有限
@@ -423,12 +429,13 @@ async def build_structured_tool_result(
 
     规范建议返回 structuredContent 的工具同时在 content 中回传序列化 JSON；本函数是
     该不变量的单一组装点，全部工具出口共用，尾部块承载缩略图预览等内容。摘要文本
-    与结构化载荷共享严格 JSON 出口，未配对代理在装配点统一剥离，含代理的文件名等
-    保留原文内容不再使整个响应翻为序列化失败。载荷尺寸估算达到卸载阈值时镜像构建
-    的树遍历、净化与序列化下沉专用 CPU 线程池执行，小载荷内联构建免线程往返；两条
-    路径失败时同样降级为无镜像结果并记录告警，is_error 取值保持不变。镜像通道经
-    output_channels_scope 关闭的调用方跳过镜像块免付构建成本，摘要与
-    structuredContent 不受影响。
+    在装配点经 sanitize_summary_lines 按行整形：压平控制字符、剥离未配对代理，须
+    原样回显的文件名与 URL（含零宽字符）保持原文，凭据掩码由错误构造点的边界净化
+    承担。载荷尺寸估算达到卸载阈值时镜像构建的树遍历、净化与序列化下沉
+    专用 CPU 线程池执行，小载荷内联构建免线程往返；两条路径失败时
+    同样降级为无镜像结果并记录告警，is_error 取值保持不变。
+    镜像通道经 output_channels_scope 关闭的调用方跳过镜像块免付构建成本，
+    摘要与 structuredContent 不受影响。
 
     Args:
         message: 用户可见的摘要文本，作为首个文本块。
@@ -439,7 +446,7 @@ async def build_structured_tool_result(
     Returns:
         组装完成的工具结果。
     """
-    sanitized_message = strip_unpaired_surrogates(message)
+    sanitized_message = sanitize_summary_lines(message)
     sanitized_structured = _strip_result_payload_surrogates(structured)
     blocks: list[ContentBlock] = [TextContent(type="text", text=sanitized_message)]
     if output_channel_enabled(MIRROR_CHANNEL):
@@ -461,6 +468,25 @@ async def build_structured_tool_result(
     )
 
 
+async def build_error_tool_result(structured: dict[str, Any]) -> CallToolResult:
+    """由结构化错误组装两通道同源的工具结果，错误出口经它收敛。
+
+    可见文本取 structured["error"]["message"]：错误消息经 build_error_dict 等
+    错误构造点净化产出，摘要通道的 sanitize_summary_lines 有意不做凭据掩码，
+    可见文本复用结构化侧同一净化产物才不引入未净化副本。生成失败出口有意保留
+    前缀分叉文本（pipeline/_execute），不经本函数。
+
+    Args:
+        structured: 失败路径的 structuredContent 字典，error.message 须为净化产物。
+
+    Returns:
+        is_error=True 的工具结果。
+    """
+    return await build_structured_tool_result(
+        structured["error"]["message"], structured, is_error=True
+    )
+
+
 __all__ = [
     "BrowseImagesStructuredOutput",
     "GenerationStructuredOutput",
@@ -469,6 +495,7 @@ __all__ = [
     "binary_placeholder_value_leaf_length",
     "build_error_dict",
     "build_error_structured",
+    "build_error_tool_result",
     "build_structured_json_text",
     "build_structured_tool_result",
     "dump_compact_strict_json",

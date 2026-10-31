@@ -22,6 +22,7 @@ from ...utils.core.errors import (
     resolve_error_profile,
     response_reports_failure,
 )
+from ...utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 from ...utils.images.thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
 from ...utils.io.path import resolve_images_root
 from ...utils.io.save import AutoSaveResult
@@ -359,7 +360,7 @@ async def execute_generation_handler(
                 error_message = f"{metadata.failure_prefix}失败：{user_facing_error}"
             else:
                 error_message = (
-                    f"{metadata.failure_prefix}失败：{user_facing_error}\n"
+                    f"{metadata.failure_prefix}失败：{user_facing_error}{ERROR_TEXT_SEGMENT_JOINER}"
                     f"{_failure_guidance_for_code(profile.error_code)}"
                 )
             error_structured = build_error_structured(

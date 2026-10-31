@@ -328,6 +328,8 @@ async def test_cross_field_validation_error_carries_structured_content(
     text_blocks = [content for content in result.content if isinstance(content, TextContent)]
     assert len(text_blocks) == 2
     assert "prompt 不能为空" in text_blocks[0].text
+    # 两通道同源：可见文本取结构化 error.message 的净化产物，边界不做二次净化。
+    assert text_blocks[0].text == structured["error"]["message"]
     assert json.loads(text_blocks[1].text) == structured
     # 失败发生在输入模型构造阶段，间谍处理器未被触达。
     assert "params" not in spy_run_handlers

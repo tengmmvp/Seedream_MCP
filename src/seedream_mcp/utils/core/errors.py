@@ -14,6 +14,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from .sanitizers import (
+    _EMPTY_VALUE_CREDENTIAL_TAIL_PATTERN,
+    ERROR_TEXT_SEGMENT_JOINER,
     _sanitize_message_for_output,
     _truncate_value_for_output,
     sanitize_error_text,
@@ -391,8 +393,8 @@ def format_error_for_user(error: Exception) -> str:
     """按异常类型将错误格式化为面向用户的提示文案。
 
     展示标题与可操作建议取自 resolve_error_profile 归约档案；message 与错误码均
-    先截断再脱敏，上游回显的敏感片段不进入用户可见输出；仅 APIError 携带错误码时
-    附加错误码提示。
+    先截断再脱敏，上游回显的敏感片段不进入用户可见输出，拼接前收敛 message 尾形、
+    产物经出口净化重放后指引仍完整；仅 APIError 携带错误码时附加错误码提示。
     """
     profile = resolve_error_profile(error)
     if isinstance(error, SeedreamAPIError):
@@ -407,9 +409,13 @@ def format_error_for_user(error: Exception) -> str:
     else:
         raw_message = str(error)
         code_hint = ""
-    message = _sanitize_message_for_output(raw_message)
+    # 尾随空白衔接 Bearer 空白分支、空值尾形衔接键值与 Bearer 冒号分支，重放都会把
+    # joiner 与指引开头吞成掩码；收敛尾随空白并对空值尾形补掩码终止形态。
+    message = _sanitize_message_for_output(raw_message).rstrip()
+    if _EMPTY_VALUE_CREDENTIAL_TAIL_PATTERN.search(message):
+        message += "***"
 
     line = f"{profile.display_title}: {message}{code_hint}"
     if profile.user_hint:
-        line += f"\n{profile.user_hint}"
+        line += f"{ERROR_TEXT_SEGMENT_JOINER}{profile.user_hint}"
     return line
