@@ -685,14 +685,19 @@ class _BodyReadAdmission:
         self.abandoned = True
         self._stop_watchdog()
 
+    def _cancel_driven_task(self) -> asyncio.Task[None]:
+        """下游子任务取消单点：对已收尾任务 cancel 为 no-op，返回任务供调用点续收尾。"""
+        task = self.driven_task
+        # 各调用点均不早于子任务赋值点触发：裁决监听在子任务读体内送达，看门狗
+        # 装设与赋值间无 await，监督取消路径先经 run() 判空。
+        assert task is not None
+        task.cancel()
+        return task
+
     def _on_outer_verdict(self) -> None:
         """外层 413 已发出：标记放弃并取消下游子任务，监督者经取消路径退栈归还许可。"""
         self._mark_abandoned()
-        # 裁决监听仅在脱离子任务的读体内触发，回调运行时子任务必已赋值。
-        task = self.driven_task
-        assert task is not None
-        if not task.done():
-            task.cancel()
+        self._cancel_driven_task()
 
     def _begin_timeout_response(self, code: str, description: str) -> None:
         # 408 收尾在放弃前置之上经脱离任务发送，幂等防双发。
@@ -710,11 +715,7 @@ class _BodyReadAdmission:
             # 写背压挂起由 uvicorn 与客户端连接自身收敛，取消留待裁决送达。
             return
         self._begin_timeout_response(*self._timeout_rejection())
-        # 看门狗装设与子任务赋值之间无 await，回调运行时子任务必已赋值。
-        task = self.driven_task
-        assert task is not None
-        if not task.done():
-            task.cancel()
+        self._cancel_driven_task()
 
     async def _receive_wrapper(self) -> Message:
         """tee 边转发边复用外层读体计数：实际越阈补取许可，终帧归还许可，外层超限裁决即放弃。"""
@@ -766,40 +767,39 @@ class _BodyReadAdmission:
 
     async def run(self) -> None:
         """子任务驱动下游并监督读体：越阈申报进入即持闸，看门狗自接管起算覆盖全部读体。"""
-        if (
-            self._policy.declared is not None
-            and self._policy.declared > self._middleware.admission_threshold
-        ):
-            # 到达监督路径的越阈申报进入即持闸：排队等待计入读体窗口，占满时
-            # 挂起有界，临近窗口末获许的请求可随即超窗 408。
-            acquired = await self._acquire_gate()
-            if acquired is None:
-                # 未取得的许可不释放，gate 保持 None 防 finally 过量归还。
-                await self._finalize()
-                return
-            self.gate = acquired
-        # 看门狗自接管即装：首帧前停滞与累计读体窗口共用同一截止定时器，
-        # 懒拉起需另设首帧定时器并在首帧换装，常开销更高。
-        self.watchdog = self._loop.call_later(
-            max(0.0, self._read_deadline - self._loop.time()), self._expire
-        )
-        # 下游经子任务驱动：SDK 内层 anyio CancelScope 与本层取消若共用监督任务，
-        # 取消计数无 1:1 配对保证，隔离到子任务后取消语义各自闭合。
         try:
+            if (
+                self._policy.declared is not None
+                and self._policy.declared > self._middleware.admission_threshold
+            ):
+                # 到达监督路径的越阈申报进入即持闸：排队等待计入读体窗口，占满时
+                # 挂起有界，临近窗口末获许的请求可随即超窗 408。
+                acquired = await self._acquire_gate()
+                if acquired is None:
+                    # 未取得的许可不释放，gate 保持 None 防 finally 过量归还。
+                    return
+                self.gate = acquired
+            # 看门狗自接管即装：首帧前停滞与累计读体窗口共用同一截止定时器，
+            # 懒拉起需另设首帧定时器并在首帧换装，常开销更高。
+            self.watchdog = self._loop.call_later(
+                max(0.0, self._read_deadline - self._loop.time()), self._expire
+            )
+            # 下游经子任务驱动：SDK 内层 anyio CancelScope 与本层取消若共用监督任务，
+            # 取消计数无 1:1 配对保证，隔离到子任务后取消语义各自闭合。
             self.driven_task = asyncio.ensure_future(
                 self._middleware.app(self._scope, self._receive_wrapper, self._send_wrapper)
             )
             await asyncio.shield(self.driven_task)
         except asyncio.CancelledError:
-            # 取消仅在 await 点送达，而子任务在唯一 await 前已同步赋值。
-            task = self.driven_task
-            assert task is not None
+            if self.driven_task is None:
+                # 取消在许可等待期送达：尚无子任务可转发，放行取消经 finally 收尾。
+                raise
+            task = self._cancel_driven_task()
             if not task.cancelled():
                 # 取消来自监督任务自身（服务器断连或关停）：转发子任务并待其落定
                 # 后照抛。落定等待取有界档：吞取消的下游无界驻留时不把监督者与
                 # 准入许可钉死，窗口内重复取消立即放行经 finally 归还许可——脱离子
                 # 任务可能短暂孤儿收尾，其后续写入由 uvicorn 丢弃。
-                task.cancel()
                 await settle_detached_op(task)
                 raise
             # 子任务已被看门狗取消或自行以取消收尾：监督任务未被取消，
@@ -1040,15 +1040,21 @@ class _WebOriginGuardMiddleware:
     def __init__(
         self,
         app: ASGIApp,
-        api_prefix: str,
         allowed_origins: tuple[str, ...] = (),
     ) -> None:
+        # 懒导入沿用 transport 对 webapp 的既有装配形态，stdio/未开 Web 部署不加载 webapp；
+        # 前缀与子树判定同为单源，不设注入参数。
+        from ..webapp.constants import WEB_API_PREFIX, path_in_prefix_subtree
+
         self.app = app
-        self._api_prefix = api_prefix
+        self._api_prefix = WEB_API_PREFIX
+        self._in_prefix_subtree = path_in_prefix_subtree
         self._allowed_origins = frozenset(allowed_origins)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") == "http" and scope.get("path", "").startswith(self._api_prefix):
+        path = scope.get("path", "")
+        # 裸前缀与其子树同属 API 范围。
+        if scope.get("type") == "http" and self._in_prefix_subtree(path, self._api_prefix):
             origin = _header_value(scope, b"origin")
             origin_allowed = origin is not None and self._origin_permitted(scope, origin)
             if origin is not None and not origin_allowed:
@@ -1202,11 +1208,8 @@ def _attach_streamable_http_middleware(
         )
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
     elif web_enabled:
-        from ..webapp.constants import WEB_API_PREFIX
-
         app.add_middleware(
             _WebOriginGuardMiddleware,
-            api_prefix=f"{WEB_API_PREFIX}/",
             allowed_origins=allowed_origins,
         )
         logger.info("Web 操作台未配置令牌，已启用 /web/api 同源 Origin 与跨站 Sec-Fetch 校验")

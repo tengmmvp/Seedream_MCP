@@ -48,8 +48,10 @@ from seedream_mcp.server.transport import (
 from seedream_mcp.utils.core.logs import _sink_filter, get_logger
 from seedream_mcp.utils.core.loop_bound import loop_bound_semaphore
 from seedream_mcp.webapp.constants import (
+    WEB_API_PREFIX,
     WEB_EXEMPT_EXACT_PATHS,
     WEB_EXEMPT_PATH_PREFIXES,
+    path_in_prefix_subtree,
 )
 
 
@@ -467,10 +469,10 @@ def test_attach_omits_origin_guard_when_token_present(active_config: None) -> No
     assert app.bearer_kwargs() is not None
 
 
-def test_attach_passes_api_prefix_to_origin_guard(active_config: None) -> None:
-    """守卫的 API 前缀取自 webapp 常量单一来源，带尾斜杠避免误守 /web/api 同名前缀。"""
-    from seedream_mcp.webapp.constants import WEB_API_PREFIX
-
+def test_attach_passes_only_origins_to_origin_guard(
+    active_config: None,
+) -> None:
+    """守卫装配参数仅放行列表：前缀与子树判定均在构造内钉死 webapp 常量单源。"""
     app = _FakeStarletteApp()
 
     _attach_streamable_http_middleware(app, "127.0.0.1", "", web_enabled=True)
@@ -478,7 +480,7 @@ def test_attach_passes_api_prefix_to_origin_guard(active_config: None) -> None:
     guard_kwargs = next(
         ref.kwargs for ref in app.user_middleware if ref.cls is _WebOriginGuardMiddleware
     )
-    assert guard_kwargs.get("api_prefix") == f"{WEB_API_PREFIX}/"
+    assert guard_kwargs == {"allowed_origins": ()}
 
 
 # ==================== 全 app Host 守卫 ====================
@@ -797,8 +799,6 @@ async def test_health_check_only_matches_exact_health_path(path: str) -> None:
 
 # ==================== Origin 守卫同源判定 ====================
 
-_API_PREFIX = "/web/api/"
-
 
 def _make_guard_app() -> tuple[list[object], _WebOriginGuardMiddleware]:
     """构造记录到达路径的守卫中间件与下游替身，返回记录列表与守卫实例。"""
@@ -807,7 +807,7 @@ def _make_guard_app() -> tuple[list[object], _WebOriginGuardMiddleware]:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         reached.append(scope.get("path"))
 
-    return reached, _WebOriginGuardMiddleware(downstream, api_prefix=_API_PREFIX)
+    return reached, _WebOriginGuardMiddleware(downstream)
 
 
 async def _run_guard(guard: _WebOriginGuardMiddleware, scope: dict[str, Any]) -> list[Message]:
@@ -818,6 +818,14 @@ async def _run_guard(guard: _WebOriginGuardMiddleware, scope: dict[str, Any]) ->
 
     await guard(scope, cast(Receive, None), send)
     return sent
+
+
+def test_origin_guard_pins_webapp_prefix_and_subtree() -> None:
+    """守卫内部钉死 webapp 常量的前缀与子树判定，构造点无从另行注入，免与 404 兜底口径漂移。"""
+    _, guard = _make_guard_app()
+
+    assert guard._api_prefix == WEB_API_PREFIX
+    assert guard._in_prefix_subtree is path_in_prefix_subtree
 
 
 @pytest.mark.parametrize(
@@ -872,6 +880,24 @@ async def test_origin_guard_rejects_cross_origin(origin: bytes, host: bytes | No
     assert "invalid_origin" in body
 
 
+async def test_origin_guard_rejects_cross_origin_on_bare_api_prefix() -> None:
+    """裸 /web/api 同受 Origin 校验：API 范围与路由侧 404 兜底同口径，不留失守缺口。"""
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "path": "/web/api",
+            "headers": [(b"origin", b"http://evil.example"), (b"host", b"127.0.0.1")],
+        },
+    )
+
+    assert reached == []
+    assert sent[0]["status"] == 403
+    assert b"invalid_origin" in sent[1]["body"]
+
+
 async def test_origin_guard_passes_without_origin_header() -> None:
     """无 Origin 头放行，curl 等非浏览器客户端与本地进程不受影响。"""
     reached, guard = _make_guard_app()
@@ -885,7 +911,9 @@ async def test_origin_guard_passes_without_origin_header() -> None:
     assert sent == []
 
 
-@pytest.mark.parametrize("path", ["/web", "/web/static/app.js", "/mcp", "/webx/api/x"])
+@pytest.mark.parametrize(
+    "path", ["/web", "/web/static/app.js", "/mcp", "/webx/api/x", "/web/api-v2"]
+)
 async def test_origin_guard_only_checks_api_prefix(path: str) -> None:
     """非 API 前缀路径不校验 Origin，静态页面与 MCP 端点不受守卫影响。"""
     reached, guard = _make_guard_app()
@@ -956,6 +984,25 @@ async def test_origin_guard_fetch_site_rejection_matrix(
         assert reached == []
         assert sent[0]["status"] == 403
         assert b"cross_site_fetch" in sent[1]["body"]
+
+
+async def test_origin_guard_rejects_cross_site_fetch_on_bare_api_prefix() -> None:
+    """裸 /web/api 的 GET 跨站加载同样 403：Sec-Fetch 校验覆盖整个 API 范围。"""
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/web/api",
+            "headers": [(b"sec-fetch-site", b"cross-site"), (b"host", b"127.0.0.1")],
+        },
+    )
+
+    assert reached == []
+    assert sent[0]["status"] == 403
+    assert b"cross_site_fetch" in sent[1]["body"]
 
 
 # ==================== 暴露风险告警文案测试 ====================
@@ -2375,6 +2422,54 @@ async def test_large_body_admission_external_cancel_settles_downstream_task(
     # 重抛前下游任务已被取消并等待终结，不留孤儿，异常也经吞没取回。
     assert downstream_finished.is_set(), "取消路径未等待下游任务收尾"
     assert spy.release_calls == 1
+
+
+async def test_large_body_admission_cancel_during_permit_wait_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """许可等待期收到的监督取消直接放行：尚无子任务可转发取消，不误发 408。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    holder_started = asyncio.Event()
+    release_holder = asyncio.Event()
+
+    async def holder_downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, receive, send
+        holder_started.set()
+        await release_holder.wait()
+
+    middleware = _admission_stack(holder_downstream, 1, 30, _ADMISSION_THRESHOLD)
+
+    async def queued_receive() -> Message:
+        return {"type": "http.request", "body": b"queued", "more_body": False}
+
+    holder = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, None),
+            cast(Send, _silence_send),
+        )
+    )
+    assert await asyncio.wait_for(holder_started.wait(), timeout=5), "持闸者未进入下游"
+
+    queued = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, queued_receive),
+            cast(Send, _silence_send),
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not queued.done(), "排队请求应卡在许可等待"
+
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+    assert queued.cancelled(), "许可等待期的取消须原样传播"
+    assert spy.release_calls == 0, "等待者未持有许可，不得归还"
+
+    release_holder.set()
+    await asyncio.wait_for(holder, timeout=5)
+    assert spy.release_calls == 1, "持闸者退栈后许可恰归还一次"
 
 
 async def test_large_body_admission_external_cancel_terminal_frame_never_double_releases_permit(
