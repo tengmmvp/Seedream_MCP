@@ -28,6 +28,7 @@ from ..core.errors import SeedreamConfigError
 from ...definitions.conventions import DATA_DIR_NAME
 from ..core.logs import EarlyMessageBuffer, get_logger
 from ..core.bounded_store import store_bounded_entry
+from ..core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 
 logger = get_logger()
 
@@ -212,7 +213,7 @@ READ_SCOPE_AUTH_ENV_HINT = f"{_WORKSPACE_ROOT_ENV} 或 {_DATA_ROOT_ENV}"
 def read_scope_denial_message(noun: str) -> str:
     """构造越出读取范围的拒绝消息，noun 取目录或路径。"""
     return (
-        f"{noun}不在读取范围内；可通过客户端工作区（MCP Roots）、"
+        f"{noun}不在读取范围内{ERROR_TEXT_SEGMENT_JOINER}可通过客户端工作区（MCP Roots）、"
         f"{READ_SCOPE_AUTH_ENV_HINT} 授权该{noun}"
     )
 

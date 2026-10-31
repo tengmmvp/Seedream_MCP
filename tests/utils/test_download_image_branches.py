@@ -1951,6 +1951,28 @@ def _overflow_resume_response(*, interrupted: bool = False) -> _FakeResponse:
     return response
 
 
+def _segment_overflow_unknown_total_response(*, interrupted: bool = False) -> _FakeResponse:
+    """构造总长未知、交付越过声明分片的 206：声明 50 字节分片，实发 90 字节。
+
+    interrupted 为真时交付全部字节后断流，而非干净收尾。
+    """
+    declared_segment = 50
+    tail = _RESUME_BODY[_RESUME_SPLIT : _RESUME_SPLIT + 90]
+    response = _FakeResponse(
+        status=206,
+        headers={
+            "content-type": "image/png",
+            "etag": _RESUME_ETAG,
+            "content-range": f"bytes {_RESUME_SPLIT}-{_RESUME_SPLIT + declared_segment - 1}/*",
+            "content-length": str(len(tail)),
+        },
+        content_chunks=[] if interrupted else [tail],
+    )
+    if interrupted:
+        response.content = cast("_FakeStreamContent", _InterruptedStreamContent([tail]))
+    return response
+
+
 async def test_download_resume_overflow_range_body_is_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
@@ -1985,6 +2007,50 @@ async def test_download_resume_overflow_interrupted_delivery_is_terminal(
         await manager.download_image("https://example.com/img.png", save_path)
 
     # 断流不遮蔽越界违约：异常当趟即终态失败，下一趟不落入完成态捷径持久化越界文件。
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    assert session._idx == 2
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_resume_unknown_total_segment_overflow_is_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """总长未知 206 交付越过声明分片属对端违约：终态失败，不补记总长伪完成。"""
+    manager = DownloadManager()
+    session = _FakeSession(
+        [_interrupted_unknown_total_attempt(), _segment_overflow_unknown_total_response()]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="响应体分片过大") as excinfo:
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    assert session._idx == 2
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_resume_unknown_total_segment_overflow_interrupted_is_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """分片越界叠加中途断流：异常趟落盘后复核越界按终态失败，断流不得遮蔽违约。"""
+    manager = DownloadManager()
+    session = _FakeSession(
+        [
+            _interrupted_unknown_total_attempt(),
+            _segment_overflow_unknown_total_response(interrupted=True),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="响应体分片过大") as excinfo:
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 断流不遮蔽分片越界：异常当趟即终态失败，下一趟不落入补记总长捷径。
     assert not isinstance(excinfo.value, RetryableDownloadError)
     assert session._idx == 2
     assert not save_path.exists()

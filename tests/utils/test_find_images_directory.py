@@ -28,7 +28,7 @@ from _lib.os_fakes import (
 )
 from _lib.scan_fakes import _scan_entry
 from seedream_mcp.utils.io.files import has_reparse_attribute
-from seedream_mcp.utils.io.path import ResolveResultCache, normcase_parts
+from seedream_mcp.utils.io.path import ResolveResultCache, is_within_any_nc_parts, normcase_parts
 from seedream_mcp.utils.io.scan import (
     ScanEntry,
     cached_find_images_in_directory,
@@ -44,7 +44,7 @@ def _scan_state(
     scan_limit: int,
     unreadable_dirs: list[Path] | None = None,
     scanner: Callable[..., Any] | None = None,
-    scope_signature: str = "",
+    read_scope: list[Path] | None = None,
 ) -> scan_module.ScanResult:
     """cached_find_images_in_directory 的完整返回形态，含扫描终点与不完整成因。
 
@@ -62,8 +62,8 @@ def _scan_state(
         kwargs["unreadable_dirs"] = unreadable_dirs
     if scanner is not None:
         kwargs["scanner"] = scanner
-    if scope_signature:
-        kwargs["scope_signature"] = scope_signature
+    if read_scope is not None:
+        kwargs["read_scope"] = read_scope
     return cached_find_images_in_directory(**kwargs)
 
 
@@ -1067,6 +1067,302 @@ def test_cached_find_directory_resolve_not_repeated_per_round(
     assert str(tmp_path) not in realpath_calls
 
 
+def test_scan_expansion_rounds_reuse_listing_without_rescan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """扩窗轮的目录枚举按懒登记复用：首访前缀物化、复访物化登记、三访起回放。
+
+    次轮起若照旧从零重列，多轮扩窗的枚举与排序代价按轮次几何放大；
+    沉淀指纹登记后末轮直接回放排序快照切片，产物逐位不变。
+    """
+    bad_names = ("0_bad1.png", "0_bad2.png", "0_bad3.png", "0_bad4.png")
+    for name in (*bad_names, "a.png", "b.png", "c.png", "d.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    # 回拨 mtime 使枚举指纹沉淀：未沉淀指纹不登记（粗粒度时间戳同槽变更不可辨）。
+    settled_ns = int((time.time() - 10.0) * 1e9)
+    os.utime(tmp_path, ns=(settled_ns, settled_ns))
+    scan_module.reset_directory_scan_cache()
+    _install_failing_resolve_for(monkeypatch, *bad_names)
+    scandir_counts: dict[str, int] = {}
+    original_scandir = os.scandir
+
+    def _counting_scandir(path: Any) -> Any:
+        key = str(Path(path))
+        scandir_counts[key] = scandir_counts.get(key, 0) + 1
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", _counting_scandir)
+
+    try:
+        result = _scan_state(tmp_path, recursive=False, max_depth=1, scan_limit=3)
+
+        # resolve 坏段驱动三轮扩窗（3→6→12），产物与既有特征化断言一致。
+        assert [entry.resolved_path.name for entry in result.images] == [
+            "a.png",
+            "b.png",
+            "c.png",
+            "d.png",
+        ]
+        # 首访与复访各枚举一次，末轮命中 memo 回放，不再重复 scandir 与排序。
+        assert scandir_counts == {str(tmp_path): 2}
+    finally:
+        scan_module.reset_directory_scan_cache()
+
+
+def test_scan_listing_memo_invalidated_by_mid_scan_mtime_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """懒登记下目录中途变更先于复访物化落地：次轮枚举新列表见新图。
+
+    若次轮回放过期窗口，两轮间落盘的新图在前缀内不可见，翻页漏图。
+    """
+    for name in ("0_bad1.png", "0_bad2.png", "a.png", "b.png", "c.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_module.reset_directory_scan_cache()
+    _install_failing_resolve_for(monkeypatch, "0_bad1.png", "0_bad2.png")
+    original_resolve_entries = scan_module._resolve_scan_entries
+    resolve_calls = {"count": 0}
+
+    def _resolve_then_insert(images: list[Path]) -> list[ScanEntry]:
+        entries = original_resolve_entries(images)
+        resolve_calls["count"] += 1
+        if resolve_calls["count"] == 1:
+            # 首轮 resolve 完成即写入新图并把目录 mtime 显式改为可区分值：恰落在
+            # 两轮扫描之间，且不依赖时间戳粒度必然区分两次相邻写入。
+            (tmp_path / "0_new.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            bumped_ns = int((time.time() - 10.0) * 1e9)
+            os.utime(tmp_path, ns=(bumped_ns, bumped_ns))
+        return entries
+
+    monkeypatch.setattr(scan_module, "_resolve_scan_entries", _resolve_then_insert)
+
+    try:
+        result = _scan_state(tmp_path, recursive=False, max_depth=1, scan_limit=3)
+
+        assert resolve_calls["count"] == 2
+        # 次轮重新枚举捕获 0_new：按新列表前缀取窗而非回放过期列表。
+        assert [entry.resolved_path.name for entry in result.images] == [
+            "0_new.png",
+            "a.png",
+            "b.png",
+            "c.png",
+        ]
+    finally:
+        scan_module.reset_directory_scan_cache()
+
+
+def test_scan_listing_memo_preserves_stall_semantics_across_rounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """memo 登记回放下跨轮扩窗不改判停语义：连续两轮零新增仍按 STALLED 早退，扩窗序列不变。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    bad_names = [f"z_bad{index:02d}.png" for index in range(12)]
+    for name in bad_names:
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    # 回拨 mtime 使枚举指纹沉淀：未沉淀指纹不登记（粗粒度时间戳同槽变更不可辨）。
+    settled_ns = int((time.time() - 10.0) * 1e9)
+    os.utime(tmp_path, ns=(settled_ns, settled_ns))
+    scan_module.reset_directory_scan_cache()
+    _install_failing_resolve_for(monkeypatch, *bad_names)
+    # 记录层取枚举核心而非扫描核心：memo 挂接按扫描核心导入期同一性判定，替换扫描
+    # 核心会使 memo 恒不挂接，本用例即退化为无 memo 的普通停滞测试。
+    prefixes: list[int] = []
+    seen_memos: list[scan_module._DirectoryListingMemo | None] = []
+    original_entries = scan_module._ordered_directory_entries
+
+    def _prefix_recording_entries(
+        path: Path,
+        *,
+        prefix_len: int,
+        unlimited: bool,
+        listing_memo: scan_module._DirectoryListingMemo | None,
+    ) -> list[os.DirEntry[str]]:
+        prefixes.append(prefix_len)
+        seen_memos.append(listing_memo)
+        return original_entries(
+            path, prefix_len=prefix_len, unlimited=unlimited, listing_memo=listing_memo
+        )
+
+    monkeypatch.setattr(scan_module, "_ordered_directory_entries", _prefix_recording_entries)
+
+    try:
+        result = _scan_state(tmp_path, recursive=False, max_depth=1, scan_limit=3)
+
+        # 前置防空转：memo 真实挂接且复访轮已登记，末轮经回放取窗。
+        memo = seen_memos[-1]
+        assert memo is not None
+        assert memo.lookup(tmp_path) is not None
+        # 三趟扩窗前缀（3→6→12）判停口径与成因外传逐字不变。
+        assert prefixes == [3, 6, 12]
+        assert [entry.resolved_path.name for entry in result.images] == ["a.png"]
+        assert result.complete is False
+        assert result.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
+        assert result.skipped_count == 11
+    finally:
+        scan_module.reset_directory_scan_cache()
+
+
+def test_scan_listing_memo_skips_oversized_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """条目数超扫描预算的目录复访不物化不登记：退回 nsmallest 前缀，内容与排序不变。
+
+    预算封顶本逻辑扫描的总消费量，巨目录余下条目永远消费不到，登记只占内存。
+    """
+    names = [f"{index:03d}.png" for index in range(12)]
+    for name in names:
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    # 回拨 mtime 使指纹沉淀，复访进入物化分支、真正行使预算中止。
+    settled_ns = int((time.time() - 10.0) * 1e9)
+    os.utime(tmp_path, ns=(settled_ns, settled_ns))
+    monkeypatch.setattr(scan_module, "_SCAN_ENTRY_BUDGET", 8)
+    memo = scan_module._DirectoryListingMemo()
+
+    first = scan_module._ordered_directory_entries(
+        tmp_path, prefix_len=4, unlimited=False, listing_memo=memo
+    )
+    second = scan_module._ordered_directory_entries(
+        tmp_path, prefix_len=4, unlimited=False, listing_memo=memo
+    )
+
+    assert [entry.name for entry in first] == names[:4]
+    assert [entry.name for entry in second] == names[:4]
+    assert memo.lookup(tmp_path) is None
+
+
+def test_scan_listing_memo_stores_only_settled_revisit(tmp_path: Path) -> None:
+    """复访物化仅沉淀指纹登记：未沉淀 mtime 防不住同槽变更，不登记。"""
+    for name in ("a.png", "b.png", "c.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    settled_ns = int((time.time() - 10.0) * 1e9)
+    os.utime(tmp_path, ns=(settled_ns, settled_ns))
+    settled_memo = scan_module._DirectoryListingMemo()
+
+    scan_module._ordered_directory_entries(
+        tmp_path, prefix_len=2, unlimited=False, listing_memo=settled_memo
+    )
+    assert settled_memo.lookup(tmp_path) is None
+    scan_module._ordered_directory_entries(
+        tmp_path, prefix_len=2, unlimited=False, listing_memo=settled_memo
+    )
+    assert settled_memo.lookup(tmp_path) is not None
+
+    fresh_dir = tmp_path / "fresh"
+    fresh_dir.mkdir()
+    (fresh_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    fresh_memo = scan_module._DirectoryListingMemo()
+    for _ in range(2):
+        scan_module._ordered_directory_entries(
+            fresh_dir, prefix_len=2, unlimited=False, listing_memo=fresh_memo
+        )
+    assert fresh_memo.lookup(fresh_dir) is None
+
+
+def test_scan_listing_memo_cumulative_registration_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """memo 累计登记量以扫描预算封顶：超限目录不登记并标记不可登记，此后复访直取前缀物化。"""
+    dirs = []
+    for name in ("a", "b"):
+        sub = tmp_path / name
+        sub.mkdir()
+        for index in range(6):
+            (sub / f"{index}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        settled_ns = int((time.time() - 10.0) * 1e9)
+        os.utime(sub, ns=(settled_ns, settled_ns))
+        dirs.append(sub)
+    monkeypatch.setattr(scan_module, "_SCAN_ENTRY_BUDGET", 8)
+    memo = scan_module._DirectoryListingMemo()
+
+    for _ in range(3):
+        for sub in dirs:
+            scan_module._ordered_directory_entries(
+                sub, prefix_len=3, unlimited=False, listing_memo=memo
+            )
+
+    assert memo.lookup(dirs[0]) is not None
+    assert memo.lookup(dirs[1]) is None
+    assert memo.barred(dirs[1]) is True
+
+
+def test_scan_listing_memo_refunds_budget_on_mtime_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lookup 失配删除登记时同步退还预算：同目录重登记不被累计量二次计费误拒。
+
+    失配删除不退还会使 mtime 变化后的重登记按累计量二次计费并误标 barred，
+    memo 在本可复用的场景被静默禁用，逐轮退回全量 scandir+nsmallest。
+    """
+    for index in range(4):
+        (tmp_path / f"{index}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    settled_ns = int((time.time() - 10.0) * 1e9)
+    os.utime(tmp_path, ns=(settled_ns, settled_ns))
+    # NTFS 以 100ns 粒度落盘，指纹取 stat 回读值而非写入值。
+    stored_ns = scan_module._get_directory_mtime_ns(tmp_path)
+    assert stored_ns is not None
+    with os.scandir(tmp_path) as it:
+        listing = sorted(it, key=scan_module._entry_sort_key)
+    # 预算取两倍登记量减一：退还缺失时重登记必超限。
+    monkeypatch.setattr(scan_module, "_SCAN_ENTRY_BUDGET", 2 * len(listing) - 1)
+    memo = scan_module._DirectoryListingMemo()
+
+    memo.store(tmp_path, stored_ns, listing)
+    assert memo.lookup(tmp_path) is listing
+
+    bumped_ns = stored_ns + 5_000_000_000
+    os.utime(tmp_path, ns=(bumped_ns, bumped_ns))
+    assert memo.lookup(tmp_path) is None
+
+    memo.store(tmp_path, bumped_ns, listing)
+    assert memo.barred(tmp_path) is False
+    assert memo.lookup(tmp_path) is listing
+
+
+def test_cached_find_default_path_spares_replaced_core_strict_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """运行期替换模块核心的严格签名替身不收 listing_memo 扩展参数。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_module.reset_directory_scan_cache()
+    original_core = scan_module._scan_resolved_directory
+
+    def _strict_signature_core(
+        directory: str,
+        *,
+        recursive: bool,
+        max_depth: int,
+        extensions: list[str] | None,
+        limit: int | None,
+        unreadable_dirs: list[Path] | None,
+        truncated: list[bool] | None,
+    ) -> list[Path]:
+        return original_core(
+            directory,
+            recursive=recursive,
+            max_depth=max_depth,
+            extensions=extensions,
+            limit=limit,
+            unreadable_dirs=unreadable_dirs,
+            truncated=truncated,
+        )
+
+    monkeypatch.setattr(scan_module, "_scan_resolved_directory", _strict_signature_core)
+
+    try:
+        result = _scan_state(tmp_path, recursive=False, max_depth=1, scan_limit=5)
+    finally:
+        scan_module.reset_directory_scan_cache()
+
+    assert [entry.resolved_path.name for entry in result.images] == ["a.png"]
+
+
 def test_cached_find_directory_arg_str_transparent_to_scanner(tmp_path: Path) -> None:
     """注入扫描器收到的目录参数为普通 str（值即 str(resolved_dir)），可原样转交公共入口。"""
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -1847,31 +2143,30 @@ def test_cached_find_skipped_count_matches_window_and_replays(
         scan_module.reset_directory_scan_cache()
 
 
-def test_cached_find_include_without_scope_signature_rejected(tmp_path: Path) -> None:
-    """include 非 None 而 scope_signature 缺省空串直接拒绝，防谓词派生信号跨读范围回放。"""
+def test_cached_find_empty_read_scope_rejected(tmp_path: Path) -> None:
+    """空读范围列表直接拒绝：派生空签名与无谓词调用共用缓存键，命中回放错的包含判定。"""
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     scan_module.reset_directory_scan_cache()
 
     try:
-        with pytest.raises(ValueError, match="scope_signature"):
+        with pytest.raises(ValueError, match="read_scope"):
             scan_module.cached_find_images_in_directory(
                 resolved_dir=tmp_path,
                 recursive=False,
                 max_depth=1,
                 format_filter=None,
                 scan_limit=5,
-                include=lambda entry: True,
+                read_scope=[],
             )
 
-        # 双传与双不传不受影响。
+        # None 与非空读范围不受影响。
         paired_result = scan_module.cached_find_images_in_directory(
             resolved_dir=tmp_path,
             recursive=False,
             max_depth=1,
             format_filter=None,
             scan_limit=5,
-            include=lambda entry: True,
-            scope_signature="scope-a",
+            read_scope=[tmp_path],
         )
         assert [entry.resolved_path.name for entry in paired_result.images] == ["a.png"]
         plain = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=5)
@@ -1880,18 +2175,24 @@ def test_cached_find_include_without_scope_signature_rejected(tmp_path: Path) ->
         scan_module.reset_directory_scan_cache()
 
 
-def test_cached_find_include_predicate_drives_window_expansion(
+def test_cached_find_read_scope_predicate_drives_window_expansion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """include 谓词剔除的条目驱动扫描层端到端扩窗：跨过界外前缀取足配额。
+    """读范围派生的包含谓词剔除条目时扫描层端到端扩窗：跨过界外前缀取足配额。
 
     配额填充若留在调用方逐轮叠加，谓词剔除使每轮重入扫描层并从零重列目录，
     增长策略乘性叠加；谓词入扫描层后单次调用内部倍增扩窗取足。
-    缓存条目存未过滤窗口，跨谓词共享，后续无谓词调用直接命中取回全量前缀。
+    缓存条目存未过滤窗口与包含下标，同读范围命中直接按下标回放。
     """
-    for name in ("0_out1.png", "0_out2.png", "a.png", "b.png", "c.png", "d.png"):
-        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = tmp_path / "0_out"
+    in_dir = tmp_path / "in"
+    out_dir.mkdir()
+    in_dir.mkdir()
+    for name in ("0_out1.png", "0_out2.png"):
+        (out_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    for name in ("a.png", "b.png", "c.png", "d.png"):
+        (in_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
     scan_module.reset_directory_scan_cache()
     limits: list[int] = []
     original_scan = find_images_in_directory
@@ -1900,19 +2201,15 @@ def test_cached_find_include_predicate_drives_window_expansion(
         limits.append(kwargs["limit"])
         return original_scan(**kwargs)
 
-    def _drop_out_prefix(entry: ScanEntry) -> bool:
-        return not entry.resolved_path.name.startswith("0_out")
-
     try:
         result = scan_module.cached_find_images_in_directory(
             resolved_dir=tmp_path,
-            recursive=False,
-            max_depth=1,
+            recursive=True,
+            max_depth=2,
             format_filter=None,
             scan_limit=3,
             scanner=_limit_recording_scan,
-            include=_drop_out_prefix,
-            scope_signature="scope-a",
+            read_scope=[in_dir],
         )
         # 首窗 3 条被谓词剔除 2 条，倍增扩窗一轮跨过界外前缀取足配额。
         assert [entry.resolved_path.name for entry in result.images] == [
@@ -1925,22 +2222,23 @@ def test_cached_find_include_predicate_drives_window_expansion(
         assert result.incomplete_cause is None
         assert limits == [3, 6]
 
-        # 缓存条目存未过滤的 resolved 窗口：同读范围的无谓词小窗口请求直接命中取回全量。
-        unfiltered = _scan_state(
-            tmp_path,
-            recursive=False,
-            max_depth=1,
+        # 同读范围的小窗口请求直接命中按下标回放，不再进入扫描层。
+        replayed = scan_module.cached_find_images_in_directory(
+            resolved_dir=tmp_path,
+            recursive=True,
+            max_depth=2,
+            format_filter=None,
             scan_limit=2,
             scanner=_limit_recording_scan,
-            scope_signature="scope-a",
+            read_scope=[in_dir],
         )
-        assert len(unfiltered.images) == 6
+        assert [entry.resolved_path.name for entry in replayed.images] == ["a.png", "b.png"]
         assert limits == [3, 6]
     finally:
         scan_module.reset_directory_scan_cache()
 
 
-def test_cached_find_include_predicate_stall_zero_progress(
+def test_cached_find_read_scope_predicate_stall_zero_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1954,6 +2252,8 @@ def test_cached_find_include_predicate_stall_zero_progress(
     for index in range(12):
         (tmp_path / f"img_{index:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     scan_module.reset_directory_scan_cache()
+    # 读范围取窗口条目的并列子目录：条目全部越界，等价于谓词剔除一切。
+    elsewhere = tmp_path / "elsewhere_scope"
     limits: list[int] = []
     original_scan = find_images_in_directory
 
@@ -1969,8 +2269,7 @@ def test_cached_find_include_predicate_stall_zero_progress(
             format_filter=None,
             scan_limit=3,
             scanner=_limit_recording_scan,
-            include=lambda entry: False,
-            scope_signature="scope-a",
+            read_scope=[elsewhere],
         )
         assert first.images == []
         assert first.complete is False
@@ -1986,8 +2285,7 @@ def test_cached_find_include_predicate_stall_zero_progress(
             format_filter=None,
             scan_limit=3,
             scanner=_limit_recording_scan,
-            include=lambda entry: False,
-            scope_signature="scope-a",
+            read_scope=[elsewhere],
         )
         assert second.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
         assert second.stall_permanent is True
@@ -1996,16 +2294,20 @@ def test_cached_find_include_predicate_stall_zero_progress(
         scan_module.reset_directory_scan_cache()
 
 
-def test_cached_find_scope_signature_isolates_stalled_cause_replay(tmp_path: Path) -> None:
-    """不同读范围签名隔离扫描缓存条目，命中不得回放他方记录的 STALLED 成因。
+def test_cached_find_read_scope_isolates_stalled_cause_replay(tmp_path: Path) -> None:
+    """不同读范围隔离扫描缓存条目，命中不得回放他方记录的 STALLED 成因。
 
     停滞成因按谓词满足量判停，属读范围派生信号，共享条目会使他方读范围错报
-    不完整成因并抑制分页；同签名命中照常回放，同读范围共享语义不变。
+    不完整成因并抑制分页；同读范围命中照常回放，共享语义不变。
     """
-    (tmp_path / "a_in.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    (tmp_path / "b_in.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    in_dir = tmp_path / "in"
+    out_dir = tmp_path / "z_out"
+    in_dir.mkdir()
+    out_dir.mkdir()
+    (in_dir / "a_in.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (in_dir / "b_in.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     for index in range(10):
-        (tmp_path / f"z_out{index:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (out_dir / f"z_out{index:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     scan_module.reset_directory_scan_cache()
     limits: list[int] = []
     original_scan = find_images_in_directory
@@ -2014,51 +2316,45 @@ def test_cached_find_scope_signature_isolates_stalled_cause_replay(tmp_path: Pat
         limits.append(kwargs["limit"])
         return original_scan(**kwargs)
 
-    def _within_scope_a(entry: ScanEntry) -> bool:
-        return not entry.resolved_path.name.startswith("z_out")
-
     try:
-        # 读范围 A 界内仅 2 张、不足配额 3，扩窗两轮零新增判停，STALLED 记入签名 A。
+        # 读范围 A（仅 in）界内 2 张、不足配额 3，扩窗两轮零新增判停，STALLED 记入 A。
         stalled = scan_module.cached_find_images_in_directory(
             resolved_dir=tmp_path,
-            recursive=False,
-            max_depth=1,
+            recursive=True,
+            max_depth=2,
             format_filter=None,
             scan_limit=3,
             scanner=_limit_recording_scan,
-            include=_within_scope_a,
-            scope_signature="scope-a",
+            read_scope=[in_dir],
         )
         assert [entry.resolved_path.name for entry in stalled.images] == ["a_in.png", "b_in.png"]
         assert stalled.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
         assert limits == [3, 6, 12]
 
-        # 读范围 B 小配额请求同目录：不命中 A 的条目，按 B 的谓词自扫自判成因。
+        # 读范围 B（全目录）小配额请求同目录：不命中 A 的条目，按 B 的谓词自扫自判成因。
         other = scan_module.cached_find_images_in_directory(
             resolved_dir=tmp_path,
-            recursive=False,
-            max_depth=1,
+            recursive=True,
+            max_depth=2,
             format_filter=None,
             scan_limit=2,
             scanner=_limit_recording_scan,
-            include=lambda entry: True,
-            scope_signature="scope-b",
+            read_scope=[tmp_path],
         )
         assert [entry.resolved_path.name for entry in other.images] == ["a_in.png", "b_in.png"]
         assert other.complete is False
         assert other.incomplete_cause is None
         assert limits == [3, 6, 12, 2]
 
-        # 同签名重复请求直接命中回放，隔离不改变同读范围的共享语义。
+        # 同读范围重复请求直接命中回放，隔离不改变同读范围的共享语义。
         hit = scan_module.cached_find_images_in_directory(
             resolved_dir=tmp_path,
-            recursive=False,
-            max_depth=1,
+            recursive=True,
+            max_depth=2,
             format_filter=None,
             scan_limit=2,
             scanner=_limit_recording_scan,
-            include=_within_scope_a,
-            scope_signature="scope-a",
+            read_scope=[in_dir],
         )
         assert hit.incomplete_cause is scan_module.ScanIncompleteCause.STALLED
         assert limits == [3, 6, 12, 2]
@@ -2066,58 +2362,58 @@ def test_cached_find_scope_signature_isolates_stalled_cause_replay(tmp_path: Pat
         scan_module.reset_directory_scan_cache()
 
 
-def test_cached_find_hit_predicate_stops_at_quota(tmp_path: Path) -> None:
-    """命中回放的谓词求值凑满 scan_limit 条即停，不再考查整个缓存窗口。"""
-    for i in range(12):
-        (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+def test_cached_find_zero_or_negative_limit_returns_empty_even_on_hit(tmp_path: Path) -> None:
+    """非正配额在入口早退：命中路径不外传全窗，与扫描核心 limit<=0 同口径。"""
+    for name in ("a.png", "b.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
     scan_module.reset_directory_scan_cache()
+    try:
+        seed = _scan_state(tmp_path, recursive=False, max_depth=1, scan_limit=5)
+        assert len(seed.images) == 2
 
-    # 种子扫描无谓词，扫到目录末尾按同读范围签名缓存完整窗口。
-    seed = _scan_state(
-        tmp_path, recursive=False, max_depth=1, scan_limit=20, scope_signature="scope-a"
-    )
-    assert seed.complete is True
-    assert len(seed.images) == 12
+        zero = _scan_state(tmp_path, recursive=False, max_depth=1, scan_limit=0)
+        assert zero.images == []
+        assert zero.complete is True
+        assert zero.excluded_count == 0
 
-    examined: list[str] = []
+        negative = _scan_state(tmp_path, recursive=False, max_depth=1, scan_limit=-1)
+        assert negative.images == []
+        assert negative.complete is True
 
-    def _counting_include(entry: ScanEntry) -> bool:
-        examined.append(entry.resolved_path.name)
-        return True
-
-    hit = scan_module.cached_find_images_in_directory(
-        resolved_dir=tmp_path,
-        recursive=False,
-        max_depth=1,
-        format_filter=None,
-        scan_limit=3,
-        include=_counting_include,
-        scope_signature="scope-a",
-    )
-
-    assert examined == [f"img_{i:02d}.png" for i in range(3)]
-    assert [entry.resolved_path.name for entry in hit.images] == examined
-    assert hit.complete is True
-    assert hit.excluded_count == 0
+        zero_scope = scan_module.cached_find_images_in_directory(
+            resolved_dir=tmp_path,
+            recursive=False,
+            max_depth=1,
+            format_filter=None,
+            scan_limit=0,
+            read_scope=[tmp_path],
+        )
+        assert zero_scope.images == []
+        assert zero_scope.complete is True
+        assert zero_scope.excluded_count == 0
+    finally:
+        scan_module.reset_directory_scan_cache()
 
 
 def test_cached_find_reports_excluded_count_final_round(tmp_path: Path) -> None:
     """excluded_count 按最终轮窗口算术计：扩窗各轮重叠经前轮超集性质去重。"""
-    for name in ("0_out1.png", "0_out2.png", "a.png", "b.png", "c.png", "d.png"):
-        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = tmp_path / "0_out"
+    in_dir = tmp_path / "in"
+    out_dir.mkdir()
+    in_dir.mkdir()
+    for name in ("0_out1.png", "0_out2.png"):
+        (out_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    for name in ("a.png", "b.png", "c.png", "d.png"):
+        (in_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
     scan_module.reset_directory_scan_cache()
-
-    def _drop_out_prefix(entry: ScanEntry) -> bool:
-        return not entry.resolved_path.name.startswith("0_out")
 
     result = scan_module.cached_find_images_in_directory(
         resolved_dir=tmp_path,
-        recursive=False,
-        max_depth=1,
+        recursive=True,
+        max_depth=2,
         format_filter=None,
         scan_limit=3,
-        include=_drop_out_prefix,
-        scope_signature="scope-a",
+        read_scope=[in_dir],
     )
 
     # 首窗 3 条剔除 2 条触发扩窗，末轮全窗 6 条剔除 2 条：按调用次数计会是 4。
@@ -2132,12 +2428,11 @@ def test_cached_find_reports_excluded_count_final_round(tmp_path: Path) -> None:
     # 命中回放凑满配额即停：考查前缀内的越界条目计入，窗口尾部不再考查。
     hit = scan_module.cached_find_images_in_directory(
         resolved_dir=tmp_path,
-        recursive=False,
-        max_depth=1,
+        recursive=True,
+        max_depth=2,
         format_filter=None,
         scan_limit=2,
-        include=_drop_out_prefix,
-        scope_signature="scope-a",
+        read_scope=[in_dir],
     )
     assert [entry.resolved_path.name for entry in hit.images] == ["a.png", "b.png"]
     assert hit.excluded_count == 2
@@ -2145,29 +2440,139 @@ def test_cached_find_reports_excluded_count_final_round(tmp_path: Path) -> None:
 
 def test_cached_find_hit_excluded_count_counts_examined_prefix(tmp_path: Path) -> None:
     """命中回放的剔除数按考查前缀计，封顶之后的窗口尾部越界不计入。"""
-    for name in ("a.png", "b.png", "c.png", "d.png", "z_out1.png", "z_out2.png"):
-        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    in_dir = tmp_path / "in"
+    out_dir = tmp_path / "z_out"
+    in_dir.mkdir()
+    out_dir.mkdir()
+    for name in ("a.png", "b.png", "c.png", "d.png"):
+        (in_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    for name in ("z_out1.png", "z_out2.png"):
+        (out_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
     scan_module.reset_directory_scan_cache()
 
-    # 无谓词种子按同读范围签名缓存完整窗口，越界条目位于窗口尾部。
-    seed = _scan_state(
-        tmp_path, recursive=False, max_depth=1, scan_limit=10, scope_signature="scope-a"
+    # 携带读范围的种子缓存完整窗口与包含下标，越界条目位于窗口尾部。
+    seed = scan_module.cached_find_images_in_directory(
+        resolved_dir=tmp_path,
+        recursive=True,
+        max_depth=2,
+        format_filter=None,
+        scan_limit=10,
+        read_scope=[in_dir],
     )
-    assert len(seed.images) == 6
+    assert len(seed.images) == 4
 
     hit = scan_module.cached_find_images_in_directory(
         resolved_dir=tmp_path,
-        recursive=False,
-        max_depth=1,
+        recursive=True,
+        max_depth=2,
         format_filter=None,
         scan_limit=2,
-        include=lambda entry: not entry.resolved_path.name.startswith("z_out"),
-        scope_signature="scope-a",
+        read_scope=[in_dir],
     )
 
     assert [entry.resolved_path.name for entry in hit.images] == ["a.png", "b.png"]
-    # 凑满 2 条即停于 d.png 之前，尾部两条越界未考查：全窗口口径会得到 2。
+    # 凑满 2 条即停于 c.png 之前，尾部两条越界未考查：全窗口口径会得到 2。
     assert hit.excluded_count == 0
+
+
+def test_replay_included_examined_prefix_boundaries() -> None:
+    """包含下标回放的考查前缀算术：凑满止于末个包含条目，不足额与空下标全窗考查。"""
+    window = [_scan_entry(Path(f"dir/{name}.png")) for name in ("a", "b", "c", "d")]
+
+    # 凑满配额：考查止于末个包含条目，其后条目不计入剔除。
+    filled, filled_excluded = scan_module._replay_included(window, (0, 2), 2)
+    assert [entry.resolved_path.name for entry in filled] == ["a.png", "c.png"]
+    assert filled_excluded == 1
+
+    # 下标少于配额：全窗考查，剔除数为窗口量减包含量。
+    short, short_excluded = scan_module._replay_included(window, (1,), 3)
+    assert [entry.resolved_path.name for entry in short] == ["b.png"]
+    assert short_excluded == 3
+
+    # 空下标（全窗剔除）：零条目回放，剔除数即窗口量。
+    empty, empty_excluded = scan_module._replay_included(window, (), 2)
+    assert empty == []
+    assert empty_excluded == 4
+
+
+def test_cached_find_hit_replays_stored_included_indices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """携带读范围的存储随附包含下标：同读范围命中直接按下标回放，不再逐条重估谓词。
+
+    命中若每次重估，深翻页打热缓存每请求白付窗口规模的谓词比较；
+    回放的切片与剔除数须与逐条过滤逐位一致（凑满即停、按考查前缀计）。
+    """
+    out_dir = tmp_path / "0_out"
+    in_dir = tmp_path / "in"
+    out_dir.mkdir()
+    in_dir.mkdir()
+    for name in ("0_out1.png", "0_out2.png"):
+        (out_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    for name in ("a.png", "b.png", "c.png", "d.png"):
+        (in_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_module.reset_directory_scan_cache()
+
+    try:
+        seeded = scan_module.cached_find_images_in_directory(
+            resolved_dir=tmp_path,
+            recursive=True,
+            max_depth=2,
+            format_filter=None,
+            scan_limit=3,
+            read_scope=[in_dir],
+        )
+        assert [entry.resolved_path.name for entry in seeded.images] == [
+            "a.png",
+            "b.png",
+            "c.png",
+            "d.png",
+        ]
+        entry = next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
+        assert entry.included_indices == (2, 3, 4, 5)
+
+        # 计数包含判定的底层原语：命中回放不得逐条重估谓词。
+        real_within = is_within_any_nc_parts
+        examined: list[tuple[str, ...]] = []
+
+        def _counting_within(path_parts: tuple[str, ...], bases_parts: Any) -> bool:
+            examined.append(path_parts)
+            return real_within(path_parts, bases_parts)
+
+        monkeypatch.setattr(scan_module, "is_within_any_nc_parts", _counting_within)
+
+        # 小配额命中：前 2 个包含下标切片，考查前缀内剔除 2 条。
+        hit = scan_module.cached_find_images_in_directory(
+            resolved_dir=tmp_path,
+            recursive=True,
+            max_depth=2,
+            format_filter=None,
+            scan_limit=2,
+            read_scope=[in_dir],
+        )
+        assert [entry.resolved_path.name for entry in hit.images] == ["a.png", "b.png"]
+        assert hit.excluded_count == 2
+
+        # 配额恰等包含量：全量下标切片，窗口内剔除总数仍为 2。
+        full_hit = scan_module.cached_find_images_in_directory(
+            resolved_dir=tmp_path,
+            recursive=True,
+            max_depth=2,
+            format_filter=None,
+            scan_limit=4,
+            read_scope=[in_dir],
+        )
+        assert [entry.resolved_path.name for entry in full_hit.images] == [
+            "a.png",
+            "b.png",
+            "c.png",
+            "d.png",
+        ]
+        assert full_hit.excluded_count == 2
+        assert examined == [], "同读范围命中须按下标回放，不得逐条重估谓词"
+    finally:
+        scan_module.reset_directory_scan_cache()
 
 
 def test_cached_find_hit_extension_base_derives_raw_scan_count(

@@ -35,14 +35,15 @@ from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools import BrowseImagesInput
 from seedream_mcp.tools.handlers import browse_images as browse_core_module
 from seedream_mcp.tools.handlers import browse_images as browse_images_module
-from seedream_mcp.tools.handlers.browse_images import handle_browse_images
-from seedream_mcp.utils.core.errors import SeedreamConfigError
-from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR, is_within_any_nc_parts
-from seedream_mcp.utils.io.scan import (
-    ScanEntry,
-    ScanIncompleteCause,
-    ScanResult,
+from seedream_mcp.tools.handlers.browse_images import (
+    _BrowseRequestState,
+    _build_browse_error,
+    handle_browse_images,
 )
+from seedream_mcp.utils.core.errors import SeedreamConfigError
+from seedream_mcp.utils.io import scan as io_scan
+from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR, is_within_any_nc_parts
+from seedream_mcp.utils.io.scan import ScanIncompleteCause, ScanResult
 
 
 def _seed_images_root(ws: Path) -> Path:
@@ -88,10 +89,10 @@ def _fake_cached_find(
     windows: list[tuple[list[Path], bool, ScanIncompleteCause | None]],
     scan_limits: list[int],
 ) -> Callable[..., ScanResult]:
-    """cached_find_images_in_directory 的替身工厂：按序弹出窗口并套用调用方谓词。
+    """cached_find_images_in_directory 的替身工厂：按序弹出窗口并套用读范围包含判定。
 
-    windows 逐项声明 (条目, 终点, 成因) 三元组，替身返回前以调用方 include 谓词过滤，
-    忠实镜像扫描层契约；scan_limits 记录每次调用收到的配额。
+    windows 逐项声明 (条目, 终点, 成因) 三元组，替身返回前以 read_scope 派生的
+    包含谓词过滤，忠实镜像扫描层契约；scan_limits 记录每次调用收到的配额。
     替身签名或 ScanResult 再增字段时仅此一份须同步。
     """
 
@@ -100,8 +101,9 @@ def _fake_cached_find(
         scan_limits.append(cast(int, kwargs["scan_limit"]))
         window, complete, incomplete_cause = windows.pop(0)
         entries = [_scan_entry(path) for path in window]
-        include = cast("Callable[[ScanEntry], bool] | None", kwargs.get("include"))
-        if include is not None:
+        read_scope = cast("list[Path] | None", kwargs.get("read_scope"))
+        if read_scope is not None:
+            include = io_scan._read_scope_filter(read_scope)
             entries = [entry for entry in entries if include(entry)]
         return ScanResult(
             images=entries,
@@ -458,20 +460,21 @@ async def test_browse_images_hit_path_pages_without_rescan(
     assert scan_calls == [8]
 
 
-async def test_browse_images_hit_path_predicate_bounded_by_quota(
+async def test_browse_images_hit_replay_skips_scope_predicate(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """命中回放的读权限复核凑满当页配额即停，考查成本不随缓存窗口规模放大。
+    """命中回放按缓存条目随存的包含下标切片，读权限复核零考查。
 
-    全窗过滤会使每页请求对整个缓存窗口逐条跑越界判定；
-    以计数替身锁定考查条数等于 offset+limit+1，分页结果仍按窗口事实判定。
+    包含谓词在扫描层内从 read_scope 派生、原语经 scan 模块绑定解析，计数
+    须装在该绑定才可证伪扫描层回放重估；browse 侧绑定另防本地逐条复核回潮。
+    逐条重估会使每页请求对整个缓存窗口跑越界判定；分页结果仍按窗口事实判定。
     """
     images_root = _seed_images_root(workspace_root)
     for i in range(12):
         (images_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    # 种子请求扫到目录末尾，缓存完整窗口。
+    # 种子请求扫到目录末尾，携带包含下标缓存完整窗口。
     seed = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=12, offset=0)
     )
@@ -487,6 +490,7 @@ async def test_browse_images_hit_path_predicate_bounded_by_quota(
             entry_checks["count"] += 1
         return real_within_parts(path_parts, bases_parts)
 
+    monkeypatch.setattr(io_scan, "is_within_any_nc_parts", _counting_within_parts)
     monkeypatch.setattr(browse_core_module, "is_within_any_nc_parts", _counting_within_parts)
 
     result = await handle_browse_images(
@@ -498,8 +502,8 @@ async def test_browse_images_hit_path_predicate_bounded_by_quota(
     assert sc["count"] == 2
     assert sc["has_more"] is True
     assert sc["next_offset"] == 2
-    # 谓词考查条数 = offset+limit+1 = 3，而非整个 12 条缓存窗口。
-    assert entry_checks["count"] == 3
+    # 同读范围命中直接按下标回放，包含判定零调用。
+    assert entry_checks["count"] == 0
 
 
 async def test_browse_images_hit_replay_containment_skips_normcase_recompute(
@@ -1227,6 +1231,33 @@ async def test_browse_images_surrogate_filename_does_not_break_serialization(
     result.model_dump_json().encode("utf-8")
 
 
+async def test_browse_images_zero_width_filename_echoes_verbatim_both_channels(
+    workspace_root: Path,
+) -> None:
+    """零宽与软连字符文件名在文本与结构化两通道一致回显，按文本路径回流可命中。
+
+    NTFS 等文件系统允许零宽字符入名；文本摘要若剥零宽，与 structuredContent.path
+    分叉，模型按文本路径取文件即 file-not-found。
+    """
+    soft_hyphen = chr(0x00AD)
+    zwsp = chr(0x200B)
+    name = f"ima{soft_hyphen}d{zwsp}ge.png"
+    image = _seed_images_root(workspace_root) / name
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
+
+    assert result.is_error is False
+    expected = image.resolve().as_posix()
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["images"][0]["path"] == expected
+    summary = cast(TextContent, result.content[0]).text
+    assert f"1. {expected}" in summary.splitlines()
+    # 文本路径直取磁盘文件可命中，回流语义不受净化改写破坏。
+    assert Path(expected).is_file()
+
+
 async def test_browse_images_directory_outside_images_root_lists_absolute_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1294,6 +1325,38 @@ async def test_browse_images_invalid_directory_error_sanitized_and_truncated(
     assert isinstance(result.structured_content, dict)
     structured_message = result.structured_content["error"]["message"]
     assert "secret" not in structured_message
+
+
+async def test_browse_error_boundary_sanitizes_both_channels() -> None:
+    """错误边界兜底净化：构造点遗漏净化时 CRLF 注入不进入两通道。
+
+    键值掩码对掩码产物幂等，已掩码片段与后续文案在重放下原样保留。
+    """
+    state = _BrowseRequestState(
+        workspace_roots=[],
+        directory=".",
+        resolved_directories=[],
+        recursive=False,
+        max_depth=1,
+        limit=10,
+        offset=0,
+        show_details=False,
+        format_filter=None,
+    )
+    dirty = "目录扫描中断: ../../etc\r\nFAKE-LINE: 伪造摘要行"
+    result = await _build_browse_error(state=state, message=dirty)
+
+    summary = cast(TextContent, result.content[0]).text
+    assert isinstance(result.structured_content, dict)
+    structured_message = result.structured_content["error"]["message"]
+    # 控制字符压平为空格：伪造行不成立，文本与结构化两通道同源。
+    assert summary == "目录扫描中断: ../../etc  FAKE-LINE: 伪造摘要行"
+    assert structured_message == summary
+
+    long_message_with_mask = "目录不可读: api_key=*** 后续指引文案保持完整，请检查目录权限"
+    long_result = await _build_browse_error(state=state, message=long_message_with_mask)
+    assert isinstance(long_result.structured_content, dict)
+    assert long_result.structured_content["error"]["message"] == long_message_with_mask
 
 
 async def test_browse_images_unsupported_format_message_sanitized(
@@ -2063,7 +2126,7 @@ async def test_browse_single_scan_call_fills_quota_with_predicate(
 ) -> None:
     """配额填充由扫描层经谓词完成后 browse 单次调用取回足量窗口，分页按事实判定。
 
-    替身窗口含界外前缀条目，经 include 谓词过滤后仍满足配额；
+    替身窗口含界外前缀条目，经读范围包含判定过滤后仍满足配额；
     分页元数据按窗口事实取值，完备页不误标结果不完整。
     """
     outside_names = [f"out_{i}" for i in range(6)]
@@ -2179,14 +2242,15 @@ async def test_browse_images_out_of_scope_warning_survives_scan_exception(
     assert [w for w in warnings if "越界图片路径" in w] == []
 
 
-def test_scan_and_filter_directory_passes_include_and_quota(
+def test_scan_and_filter_directory_passes_read_scope_and_quota(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_scan_and_filter_directory 单次进入扫描层：配额与读权限谓词经参数下发。
+    """_scan_and_filter_directory 单次进入扫描层：配额与读范围经参数下发。
 
-    配额填充与越界剔除收敛扫描层后，本函数只组装配额（remaining）与 include
-    谓词并透传结果信号；扫描层不接受谓词或配额时扩窗契约在此暴露。
+    配额填充与越界剔除收敛扫描层后，本函数只组装配额（remaining）并原样下发
+    读范围，包含谓词由扫描层从 read_scope 同源派生；扫描层不接受读范围或
+    配额时扩窗契约在此暴露。
     """
     seeding = _seed_rescan_layout(
         tmp_path, monkeypatch, outside_names=["out_0", "out_1"], workspace_names=["a", "b"]
@@ -2214,17 +2278,13 @@ def test_scan_and_filter_directory_passes_include_and_quota(
     )
 
     assert captured["scan_limit"] == 7
-    from seedream_mcp.utils.io import scan as io_scan
-
     # scanner 取 browse 作用域的同名属性，外部替换该属性即可替换底层扫描。
     assert captured["scanner"] is io_scan._scan_resolved_directory
-    # scope_signature 与 include 同为接线层下发参数：删除传参的回归在此当场暴露。
-    assert captured["scope_signature"] == io_scan.read_scope_signature(
-        [seeding.workspace.resolve()]
-    )
-    include = cast("Callable[[ScanEntry], bool]", captured["include"])
-    assert include(_scan_entry(seeding.images["a"])) is True
-    assert include(_scan_entry(seeding.images["out_0"])) is False
+    # read_scope 由接线层原样下发，谓词与签名在扫描层从其派生：删除传参的回归
+    # 在此当场暴露。
+    assert captured["read_scope"] == [seeding.workspace.resolve()]
+    assert "include" not in captured
+    assert "scope_signature" not in captured
     assert result.images == [_scan_entry(seeding.images["a"])]
     assert result.complete is True
     assert result.incomplete_cause is None

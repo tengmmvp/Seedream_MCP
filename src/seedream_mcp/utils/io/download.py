@@ -1134,7 +1134,7 @@ class DownloadManager:
 
         Raises:
             DownloadError: Content-Length 与 Content-Range 总长预检、流式累计上限、
-                字节签名校验失败，或交付越过声明总长。
+                字节签名校验失败，或交付越过声明总长（总长未知时为分片长）。
             RetryableDownloadError: 响应体流收尾正常但未达声明总长或声明分片，或撕裂尾截断
                 与落盘写入遭瞬时持锁。
         """
@@ -1244,12 +1244,23 @@ class DownloadManager:
                 await _flush_received()
 
         def _raise_if_overshoot() -> None:
-            # 交付越过声明总长属对端违约，尾部字节不可信：与虚高总长同口径按终态
-            # 超限失败，断流与干净收流共用同一判定，恒定超长源不得每次重试
-            # 全量重下耗尽预算。
+            # 交付越过声明总长或（总长未知时的）分片长属对端违约，尾部字节不可信：
+            # 与虚高总长同口径按终态超限失败，断流与干净收流共用同一判定，
+            # 恒定超长源不得每次重试全量重下耗尽预算。
             if expected_total is not None and resume.offset > expected_total:
                 raise DownloadError(
                     format_file_too_large_bytes(resume.offset, expected_total, label="响应体")
+                )
+            if (
+                expected_total is None
+                and segment_expected is not None
+                and resume.offset - base_offset > segment_expected
+            ):
+                # 总长未知时分片长是唯一声明基准：越界交付同口径终态失败。
+                raise DownloadError(
+                    format_file_too_large_bytes(
+                        resume.offset - base_offset, segment_expected, label="响应体分片"
+                    )
                 )
 
         try:

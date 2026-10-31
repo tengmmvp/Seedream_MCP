@@ -1,6 +1,6 @@
 """图片浏览工具处理器。
 
-读权限求值（工作区 ∪ 图片目录）、请求目录解析、经 include 谓词下沉扫描层的越界
+读权限求值（工作区 ∪ 图片目录）、请求目录解析、经读范围下沉扫描层的越界
 过滤与配额填充、分页与 structuredContent 装配，外加薄壳入口 ``handle_browse_images``
 的异常兜底降级；不经 ``execute_generation_handler`` 生成流水线，字段规则与校验由
 ``BrowseImagesInput`` 单一定义。
@@ -21,6 +21,7 @@ from ...definitions.conventions import BROWSE_FAILED_ERROR_TYPE, BROWSE_IMAGES_T
 from ...utils.core.errors import format_error_for_user
 from ...utils.core.sanitizers import (
     CONTROL_CHARS_PATTERN,
+    ERROR_TEXT_SEGMENT_JOINER,
     sanitize_data_text,
     sanitize_error_text,
 )
@@ -42,7 +43,6 @@ from ...utils.io.scan import (
     ScanResult,
     _scan_resolved_directory,
     cached_find_images_in_directory,
-    read_scope_signature,
 )
 from ..pipeline._failures import log_tiered_failure
 from ..pipeline._progress import (
@@ -53,6 +53,7 @@ from ..pipeline._progress import (
 from ..outputs import (
     BrowseImagesStructuredOutput,
     build_error_dict,
+    build_error_tool_result,
     build_structured_tool_result,
 )
 from ..schemas import BrowseImagesInput
@@ -274,7 +275,8 @@ async def _build_browse_error(
 
     统一 is_error=True 语义与请求状态回显；模型可自纠的参数错误经 error_type 传
     validation_error，与输入模型构造失败口径一致，其余分支保持 browse_failed；
-    message 同时作为可见文本与结构化错误原因。
+    错误消息经 build_error_dict 净化一次压平为单段，
+    同时作为可见文本与结构化错误原因，免换行伪造输出行。
 
     Args:
         state: 单次浏览请求的状态快照，供回显字段取值。
@@ -284,13 +286,14 @@ async def _build_browse_error(
     Returns:
         is_error=True 的工具结果。
     """
+    error = build_error_dict(error_type, message)
     structured = _build_browse_structured_result(
         state,
         status="failed",
         success=False,
-        error=build_error_dict(error_type, message),
+        error=error,
     )
-    return await build_structured_tool_result(message, structured, is_error=True)
+    return await build_error_tool_result(structured)
 
 
 def _scan_and_filter_directory(
@@ -306,13 +309,12 @@ def _scan_and_filter_directory(
     """扫描单个目录并按读权限过滤，返回扫描层的完整结果信号。
 
     同步执行，由调用方经 ``asyncio.to_thread`` 在线程内调用。图片的 resolve 结果由
-    扫描缓存共享；越界复核不随缓存固化，经 include 谓词传入扫描层、每次按
-    当前读权限重新执行，读范围签名随调用并入缓存键，谓词派生信号不跨读范围
-    回放。包含判定按预计算分量执行：条目分量随扫描条目携带，读范围分量每次
-    调用预计算一次。配额填充与扩窗由扫描层端到端承担，
-    本函数不叠加补扫循环，增长与停滞语义单层收拢。越界剔除数由扫描层经
-    excluded_count 回传（扩窗轮次间不重复计数，命中回放按考查前缀计），
-    本函数按计数落单条聚合告警，防大目录翻页时越界项逐条刷屏；
+    扫描缓存共享；越界复核不随缓存固化：包含谓词由扫描层从 read_scope 同源
+    派生并按当前读权限执行扫描趟，命中回放跳过谓词、权限口径由读范围签名
+    并入缓存键保证，谓词派生信号不跨读范围回放。配额填充与扩窗由扫描层
+    端到端承担，本函数不叠加补扫循环，增长与停滞语义单层收拢。
+    越界剔除数由扫描层经 excluded_count 回传（扩窗轮次间不重复计数，命中回放
+    按考查前缀计），本函数按计数落单条聚合告警，防大目录翻页时越界项逐条刷屏；
     扫描中途异常时结果不可得，改落无计数告警。
     读范围为空（替代界整界剔除）时条目必然全剔，免注定停滞的扫描直接
     返回按永久态计的空停滞窗；全窗条目均解析在范围外的确定性停滞由扫描层
@@ -339,13 +341,6 @@ def _scan_and_filter_directory(
             incomplete_cause=ScanIncompleteCause.STALLED,
         ).as_permanent()
 
-    # 读范围分量随调用预计算一次，条目按分量原语直判，免逐条目重建范围分量。
-    scope_parts = [normcase_parts(base) for base in read_scope]
-
-    def _within_read_scope(entry: ScanEntry) -> bool:
-        # 条目分量已随扫描条目预计算，包含判定仅做分量比较、不触发文件系统解析。
-        return is_within_any_nc_parts(entry.resolved_nc_parts, scope_parts)
-
     try:
         # 扫描核心 _scan_resolved_directory 经本模块作用域注入，外部替换本模块同名属性即可生效。
         scan_result = cached_find_images_in_directory(
@@ -356,8 +351,7 @@ def _scan_and_filter_directory(
             scan_limit=remaining,
             scanner=_scan_resolved_directory,
             unreadable_dirs=unreadable_dirs,
-            include=_within_read_scope,
-            scope_signature=read_scope_signature(read_scope),
+            read_scope=read_scope,
         )
     except BaseException:
         logger.warning("扫描中途异常，越界图片剔除计数不可得")
@@ -469,7 +463,7 @@ async def build_browse_fallback_result(
             resolved_directories=resolved_directories,
             format_filter=fallback_filter,
         ),
-        message=f"浏览图片失败：{user_message}；请确认目录路径有效且位于工作区内。",
+        message=f"浏览图片失败：{user_message}{ERROR_TEXT_SEGMENT_JOINER}请确认目录路径有效且位于工作区内。",
     )
 
 
@@ -534,9 +528,9 @@ async def _scan_browse_entries(
     format_filter_exhausted: bool,
 ) -> tuple[list[ScanEntry], list[Path], ScanResult | None]:
     """扫描阶段：扫描请求目录收集越界过滤后的条目，上报扫描进度并回传扫描信号。"""
-    # scan_limit 多取一张用于判定 has_more；越界剔除经 include 谓词由扫描层端到端
-    # 承担，见 _scan_and_filter_directory。format_filter_exhausted 时跳过扫描与
-    # 进度上报，由空结果分支统一返回。
+    # scan_limit 多取一张用于判定 has_more；越界剔除经读范围包含谓词由扫描层
+    # 端到端承担，见 _scan_and_filter_directory。format_filter_exhausted 时跳过扫描
+    # 与进度上报，由空结果分支统一返回。
     scan_limit = state.offset + state.limit + 1
     image_entries: list[ScanEntry] = []
     unreadable_dirs: list[Path] = []
@@ -698,7 +692,7 @@ async def _build_empty_browse_result(
         message = "未找到图片文件，请确认目录或过滤条件。"
     hint_text, marker_text = _continue_tail_texts(page, scan_result)
     if hint_text is not None:
-        message = f"{message}；{hint_text}"
+        message = f"{message}{ERROR_TEXT_SEGMENT_JOINER}{hint_text}"
     if marker_text is not None:
         message = f"{message}{marker_text}"
     structured = _build_browse_structured_result(

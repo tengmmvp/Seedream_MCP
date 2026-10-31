@@ -17,13 +17,15 @@ resolve 失败剔除不折损早停事实，不完整成因（截断/停滞/剔�
 停滞条目量变化从 1 重计，谱系达阈值按永久处理并以 stall_permanent 外传；全窗条目均
 被谓词剔除且无 resolve 失败的停滞为确定性重试复现，首答即升永久并随缓存条目持久化；
 重探间隔内扫描范围不超冻结窗覆盖量的命中直接回放冻结窗，免注定原地复现的扩窗重扫；
-前缀扩展的基数同样取原始扫描量，持续 resolve 失败缩短的缓存列表不使扩展停摆。
-调用方 include 谓词的条目剔除与 resolve 剔除同口径进入配额与扩窗判定，
+前缀扩展的基数同样取原始扫描量，持续 resolve 失败缩短的缓存列表不使扩展停摆；
+扩窗轮的目录枚举经单次逻辑扫描内的枚举 memo（以目录 mtime 为指纹）懒登记复用，
+登记后各轮免重复 scandir 与排序，memo 不跨请求。
+读范围包含谓词的条目剔除与 resolve 剔除同口径进入配额与扩窗判定，
 配额按满足谓词的可解析条目计、增长与停滞语义由本层单点拥有；
-缓存条目存未过滤的 resolved 窗口，键并入调用方读范围签名，
-停滞成因等谓词派生信号不跨读范围回放，同读范围命中按当次谓词过滤后返回，
-凑满配额即停，谓词剔除数经 excluded_count 随结果回传；
-携带 include 的调用必须配对非空读范围签名，失配拒绝。
+缓存条目存未过滤的 resolved 窗口，携带读范围时随附包含下标，
+键并入读范围签名，停滞成因等谓词派生信号不跨读范围回放，
+同读范围命中按随存的包含下标直接回放（谓词与签名由 read_scope 在本模块内同源
+派生），凑满配额即停，谓词剔除数经 excluded_count 随结果回传。
 非递归扫描以目录 mtime 失效，捕获时已沉淀超 FAT 时间戳粒度窗口的条目
 mtime 未变即新鲜，未沉淀条目叠加 TTL 上界兜底粗粒度时间戳；递归扫描改用
 TTL 失效，接受短时陈旧换取翻页性能。组内依赖 scan → path、scan →
@@ -40,20 +42,28 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from itertools import chain
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
 from .files import has_reparse_attribute
-from .path import ResolveResultCache, fold_case, is_unc_path, normcase_parts
+from .path import (
+    ResolveResultCache,
+    fold_case,
+    is_unc_path,
+    is_within_any_nc_parts,
+    normcase_parts,
+)
 
 logger = get_logger()
 
 # 目录扫描的物化条目预算：单次 find_images_in_directory 调用物化的条目（含非
 # 图片，重扫趟只计新增物化段）累计超过该值即停止遍历，约束递归广度与前缀物化量；
-# heapq.nsmallest 选前缀须消费整个目录迭代器，单目录单趟枚举不在此预算内，由
-# 扫描缓存的 mtime+TTL 缓解重复扫描。
+# 排序取前缀须消费整个目录迭代器，单目录单趟枚举不在此预算内；枚举 memo 仅对
+# 复访目录物化完整列表且单目录以本预算为上限，重复扫描另由扫描缓存的 mtime+TTL
+# 缓解。
 _SCAN_ENTRY_BUDGET = 20000
 
 
@@ -122,8 +132,8 @@ class ScanEntry(NamedTuple):
 
     Attributes:
         resolved_path: resolve 后路径，展示与包含判定均以其为准。
-        resolved_nc_parts: resolved 路径各分量的 normcase 形式，缓存命中回放的
-            包含判定免逐条重算。
+        resolved_nc_parts: resolved 路径各分量的 normcase 形式，读范围包含
+            谓词直接消费、免逐条重算。
     """
 
     resolved_path: Path
@@ -141,7 +151,7 @@ class ScanResult:
             陈述窗口内有条目被剔除，不预设扫尽事实，可与 complete 并存。
         skipped_count: 产出 images 的最近一次扫描窗口内被 resolve 失败
             或负缓存剔除的条目数，供调用方推导可见条目与目录实际条目的差额。
-        excluded_count: 同一窗口内被 include 谓词剔除的条目数；扩窗各轮窗口为
+        excluded_count: 同一窗口内被读范围包含谓词剔除的条目数；扩窗各轮窗口为
             前轮超集，最终轮计数即全程去重总量，命中回放按考查前缀计。
         stall_streak: 同一缓存谱系内连续零进展停滞的累计次数：
             相邻两次停滞的配额口径条目量相同即递增，条目量变化则从 1 重计，非停滞出口
@@ -216,6 +226,9 @@ class _DirectoryScanCacheEntry:
             缓存命中时同样透传给调用方。
         stalled_included_count: 最近一次停滞结果的配额口径条目量，非停滞出口为
             None；跨调用零进展判定以它为对照基线，接续 result.stall_streak。
+        included_indices: 存储时生效的读范围包含谓词在 result.images 中的满足下标，
+            位序递增；存储调用未携带读范围时为 None，同读范围命中直接按下标回放，
+            免逐条重估谓词。
     """
 
     mtime_ns: int | None
@@ -224,6 +237,7 @@ class _DirectoryScanCacheEntry:
     result: ScanResult
     unreadable_dirs: list[Path]
     stalled_included_count: int | None = None
+    included_indices: tuple[int, ...] | None = None
 
 
 def reset_directory_scan_cache() -> None:
@@ -243,6 +257,13 @@ def _get_directory_mtime_ns(path: Path) -> int | None:
         return path.stat().st_mtime_ns
     except OSError:
         return None
+
+
+def _directory_mtime_settled(mtime_ns: int | None) -> bool:
+    """mtime 是否已静止超 FAT 时间戳粒度窗口：此后变更必落新值，等值即可判未变更。"""
+    return mtime_ns is not None and (
+        time.time() - mtime_ns / 1_000_000_000 >= _FAT_TIMESTAMP_GRANULARITY_SECONDS
+    )
 
 
 def _is_scan_entry_fresh(
@@ -320,6 +341,7 @@ def _store_scan_entry(
     unreadable_dirs: list[Path],
     result: ScanResult,
     stalled_included_count: int | None,
+    included_indices: tuple[int, ...] | None,
 ) -> None:
     """写入扫描缓存，覆写已存在键时刷新 LRU 位，条目数超限时驱逐最近最少使用条目。"""
     if len(result.images) > _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN:
@@ -350,40 +372,61 @@ def _store_scan_entry(
         result=result,
         unreadable_dirs=unreadable_dirs,
         stalled_included_count=stalled_included_count,
+        included_indices=included_indices,
     )
 
 
-def _filter_included(
-    entries: list[ScanEntry],
-    include: Callable[[ScanEntry], bool] | None,
-    limit: int | None = None,
-) -> tuple[list[ScanEntry], int]:
-    """按谓词过滤扫描条目，返回 (结果列表, 谓词剔除数)。
+def _partition_included(
+    entries: list[ScanEntry], include: Callable[[ScanEntry], bool] | None
+) -> tuple[list[ScanEntry], tuple[int, ...] | None, int]:
+    """全窗包含分划，返回 (满足谓词条目, 其下标序列, 谓词剔除数)。
 
-    limit 非 None 时凑满即停止考查，谓词求值成本随配额而非缓存窗口规模放大，
-    剔除数按考查前缀计；None 时全窗考查。无谓词时维持全量浅拷贝的翻页共享契约
-    （limit 失效），剔除数恒 0，返回列表独立于缓存条目，外传不被原地修改篡改。
+    下标随缓存条目存储供命中回放；无谓词时下标为 None、条目为全量浅拷贝，
+    维持翻页共享契约。
     """
     if include is None:
-        return entries[:], 0
+        return entries[:], None, 0
     collected: list[ScanEntry] = []
+    indices: list[int] = []
     excluded = 0
-    for entry in entries:
+    for index, entry in enumerate(entries):
         if include(entry):
             collected.append(entry)
-            if limit is not None and len(collected) >= limit:
-                break
+            indices.append(index)
         else:
             excluded += 1
-    return collected, excluded
+    return collected, tuple(indices), excluded
 
 
-def read_scope_signature(read_scope: list[Path]) -> str:
-    """已 resolve 读范围集合的规范化签名，供调用方并入扫描缓存键。
+def _replay_included(
+    window: list[ScanEntry], indices: tuple[int, ...], limit: int
+) -> tuple[list[ScanEntry], int]:
+    """按缓存条目随存的包含下标回放命中过滤：凑满 limit 即切片，剔除数按考查前缀计。"""
+    taken = indices[:limit]
+    # 凑满时考查前缀止于末个包含条目（limit≥1 入口早退保证非空），不足额时全窗考查；
+    # 剔除数恒为考查量减包含量。
+    examined = taken[-1] + 1 if len(taken) == limit else len(window)
+    return [window[index] for index in taken], examined - len(taken)
+
+
+def _read_scope_signature(read_scope: list[Path]) -> str:
+    """已 resolve 读范围集合的规范化签名，供扫描层并入缓存键。
 
     排序与去重消除根集合的次序与重复差异；NUL 不出现在合法路径内，作无歧义分隔。
     """
     return "\x00".join(sorted({path.as_posix() for path in read_scope}))
+
+
+def _read_scope_filter(read_scope: list[Path]) -> Callable[[ScanEntry], bool]:
+    """从读范围派生包含谓词：按预计算 normcase 分量判定，条目分量随扫描条目携带，
+    读范围分量每次调用预计算一次。
+    """
+    scope_parts = [normcase_parts(base) for base in read_scope]
+
+    def _within_read_scope(entry: ScanEntry) -> bool:
+        return is_within_any_nc_parts(entry.resolved_nc_parts, scope_parts)
+
+    return _within_read_scope
 
 
 def cached_find_images_in_directory(
@@ -395,15 +438,14 @@ def cached_find_images_in_directory(
     scan_limit: int,
     scanner: Callable[..., list[Path]] | None = None,
     unreadable_dirs: list[Path] | None = None,
-    include: Callable[[ScanEntry], bool] | None = None,
-    scope_signature: str = "",
+    read_scope: list[Path] | None = None,
 ) -> ScanResult:
     """扫描目录图片并经进程级缓存翻页共享有序结果，支持前缀增量扩展。
 
     缓存键不含 scan_limit，同目录同配置的不同翻页共享一份有序列表；键并入 scanner
     身份与调用方读范围签名，注入不同扫描实现或携带不同读范围的调用不共享条目，
     停滞成因等谓词派生信号不跨读范围回放。命中且条目完整或前缀不少于 scan_limit
-    时返回浅拷贝，谓词求值凑满 scan_limit 条即停；命中但前缀不足时按几何倍率扩展
+    时返回浅拷贝；命中但前缀不足时按几何倍率扩展
     scan_limit 重扫并扩展缓存，扩展基数取最近扫描原始扫描量的推导值（images 与
     skipped_count 之和），持续 resolve 失败缩短的缓存前缀不使扩展停摆；
     resolve 剔除使可解析条目短于请求量时同倍率扩窗重扫跨过坏段，扩窗有进展时
@@ -414,12 +456,16 @@ def cached_find_images_in_directory(
     不付注定原地复现的扩窗重扫，间隔届满或请求范围更大时落回扩窗重扫并照常接续谱系；
     扫描到目录末尾即标记 complete，后续任意 scan_limit 均不再扫描。
     条目预算截断的扫描未到目录末尾，不按 complete 缓存，后续更大扫描可重新尝试。
-    scanner 可注入，缺省直调本模块的 _scan_resolved_directory 核心。两个出口均返回
-    独立副本，调用方原地修改不会篡改缓存；不可读目录随条目缓存并经收集列表去重透传。
-    include 谓词与 resolve 剔除同口径由本层端到端承担配额填充：
+    scanner 可注入，缺省直调本模块的 _scan_resolved_directory 核心；
+    缺省或显式注入本核心时挂单次逻辑扫描内的枚举 memo（懒登记：首访仅前缀物化，
+    复访物化完整列表并登记、此后各轮回放），扩窗轮免重复 scandir 与排序。
+    两个出口均返回独立副本，调用方原地修改不会篡改缓存；不可读目录随条目缓存
+    并经收集列表去重透传。
+    读范围包含谓词与 resolve 剔除同口径由本层端到端承担配额填充：
     足量契约与停滞判定按满足谓词的可解析条目计，扩窗在循环内部完成；
     缓存条目恒存未过滤的 resolved 窗口，同读范围签名内共享，
-    命中时按当次谓词过滤后返回。
+    携带读范围的存储随附包含下标，命中直接按下标回放（谓词与签名由
+    read_scope 同源派生使下标恒在）。
 
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
@@ -432,12 +478,9 @@ def cached_find_images_in_directory(
             resolve 目录的字符串）；None 时使用默认实现。
         unreadable_dirs: 可选收集列表，扫描中无法读取的目录追加至此；缓存命中时
             回放条目内记录的不可读目录。
-        include: 可选扫描条目的保留谓词，resolve 后过滤返回条目；None 表示不过滤；
-            非 None 时必须配对传入非空 scope_signature。
-        scope_signature: 调用方读范围的规范化签名，经 read_scope_signature 从实际
-            读范围派生后传入，并入缓存键；不同读范围的调用不共享条目，谓词派生
-            信号不跨读范围回放。缺省空串为不分读范围调用的共享键，携带 include
-            时不得缺省。
+        read_scope: 可选读范围（已 resolve 的基目录列表），
+            非空时包含谓词与缓存键签名均由其在模块内同源派生，resolve 后越界
+            条目过滤后返回；None 表示不过滤。空列表拒绝。
 
     Returns:
         ScanResult；images 为缓存或本次扫描产出的有序前缀或全量
@@ -455,16 +498,30 @@ def cached_find_images_in_directory(
         消费方直接读取、不重推阈值；rescan_futile 由截断且零跳过派生，同样直接读取。
 
     Raises:
-        ValueError: include 非 None 而 scope_signature 为缺省空串，谓词派生
-            信号必须按读范围隔离，失配拒绝。
+        ValueError: read_scope 为空列表（派生空签名与无谓词调用共用缓存键，
+            命中会回放错误的包含判定）。
         OSError: 底层扫描函数抛出时原样透传，缓存层不吞不包装。
     """
-    if include is not None and not scope_signature:
-        raise ValueError("include 谓词必须配对传入非空 scope_signature，谓词派生信号须按读范围隔离")
+    if read_scope is not None and not read_scope:
+        raise ValueError(
+            "read_scope 须为 None 或非空列表：空读范围派生空签名，与无谓词调用共用缓存键"
+        )
+    if read_scope is None:
+        include: Callable[[ScanEntry], bool] | None = None
+        scope_signature = ""
+    else:
+        include = _read_scope_filter(read_scope)
+        scope_signature = _read_scope_signature(read_scope)
+    if scan_limit < 1:
+        # 非正配额与扫描核心 limit<=0 的空结果同口径，命中路径不外传全窗。
+        return ScanResult(images=[], complete=True, incomplete_cause=None)
     if scanner is not None:
         scan = scanner
     else:
         scan = _scan_resolved_directory
+    # 跨轮枚举 memo 仅挂接本模块核心：注入的其他扫描器与运行期替换的模块属性
+    # 包装器均不认 listing_memo 扩展参数。
+    listing_memo = _DirectoryListingMemo() if scan is _LISTING_MEMO_ELIGIBLE_SCAN else None
     cache_key = (
         str(resolved_dir),
         recursive,
@@ -488,10 +545,16 @@ def cached_find_images_in_directory(
             _DIRECTORY_SCAN_CACHE.move_to_end(cache_key)
         except KeyError:
             pass
-        # 缓存条目存未过滤的 resolved 窗口，按当次谓词过滤后判足量与返回；谓词求值
-        # 凑满 scan_limit 条即停，成本随配额而非缓存窗口规模放大，无谓词时
-        # 全量浅拷贝维持翻页共享契约。
-        hit_window, hit_excluded = _filter_included(cached.result.images, include, scan_limit)
+        # 缓存条目存未过滤的 resolved 窗口：携带读范围的命中按随存的包含下标直接
+        # 回放切片；无读范围时全量浅拷贝维持翻页共享契约。
+        # 谓词与签名同源派生使携带读范围的命中恒有随存下标，断言显式锁定。
+        if include is None:
+            hit_window, hit_excluded = cached.result.images[:], 0
+        else:
+            assert cached.included_indices is not None
+            hit_window, hit_excluded = _replay_included(
+                cached.result.images, cached.included_indices, scan_limit
+            )
         # 基数取推导的原始扫描量：images 与 skipped_count 之和还原 resolve 剔除前的扫描量，
         # 按缩短后的 images 扩展过不了坏段。
         raw_count = len(cached.result.images) + cached.result.skipped_count
@@ -522,9 +585,7 @@ def cached_find_images_in_directory(
     # 而 images 未含，命中时持续返回陈旧列表。递归扫描不依赖 mtime 失效，跳过捕获。
     base_mtime = None if recursive else _get_directory_mtime_ns(resolved_dir)
     # 沉淀判定依据见 _FAT_TIMESTAMP_GRANULARITY_SECONDS 注释。
-    settled = base_mtime is not None and (
-        time.time() - base_mtime / 1_000_000_000 >= _FAT_TIMESTAMP_GRANULARITY_SECONDS
-    )
+    settled = _directory_mtime_settled(base_mtime)
     scan_unreadable: list[Path] = []
     stalled = False
     zero_progress_rounds = 0
@@ -533,21 +594,26 @@ def cached_find_images_in_directory(
         # 缓存条目不携带重复项。
         round_unreadable: list[Path] = []
         round_truncated: list[bool] = []
-        scanned_images = scan(
-            directory=directory_arg,
-            recursive=recursive,
-            max_depth=max_depth,
-            extensions=format_filter,
-            limit=scan_limit,
-            unreadable_dirs=round_unreadable,
-            truncated=round_truncated,
-        )
+        scan_kwargs: dict[str, Any] = {
+            "directory": directory_arg,
+            "recursive": recursive,
+            "max_depth": max_depth,
+            "extensions": format_filter,
+            "limit": scan_limit,
+            "unreadable_dirs": round_unreadable,
+            "truncated": round_truncated,
+        }
+        if listing_memo is not None:
+            scan_kwargs["listing_memo"] = listing_memo
+        scanned_images = scan(**scan_kwargs)
         _extend_unique(scan_unreadable, round_unreadable)
         scan_truncated = any(round_truncated)
         # complete 按扫描器原始扫描量判定：resolve 失败与谓词剔除不影响目录
         # 已枚举完毕的事实；条目预算截断的扫描未到目录末尾，不得按 complete 缓存。
         resolved_entries = _resolve_scan_entries(scanned_images)
-        included_entries, excluded_count = _filter_included(resolved_entries, include)
+        included_entries, included_indices, excluded_count = _partition_included(
+            resolved_entries, include
+        )
         complete = len(scanned_images) < scan_limit and not scan_truncated
         if complete or len(included_entries) >= requested_limit or scan_truncated:
             break
@@ -592,7 +658,8 @@ def cached_find_images_in_directory(
         # 扩窗重扫，不等谱系三次 latch。
         scan_result = scan_result.as_permanent()
     # 递归扫描靠 TTL 失效故总是缓存，mtime 字段留空且不沉淀；非递归仅在 stat 成功
-    # 时缓存；条目恒存未过滤的 resolved 窗口，同读范围签名内共享。
+    # 时缓存；条目恒存未过滤的 resolved 窗口，携带读范围时随附包含下标，
+    # 同读范围签名内共享。
     if recursive or base_mtime is not None:
         _store_scan_entry(
             cache_key,
@@ -601,6 +668,7 @@ def cached_find_images_in_directory(
             unreadable_dirs=list(scan_unreadable),
             result=scan_result,
             stalled_included_count=stalled_included_count,
+            included_indices=included_indices,
         )
     if unreadable_dirs is not None:
         _extend_unique(unreadable_dirs, scan_unreadable)
@@ -670,6 +738,121 @@ def find_images_in_directory(
     )
 
 
+class _DirectoryListingMemo:
+    """单次逻辑扫描的枚举 memo：键为目录路径，条目以枚举前捕获的 mtime 指纹校验。
+
+    懒登记：首访仅标记已访（单次到访目录即绝大多数热路径，维持前缀物化），
+    扩展轮复访才物化完整排序列表并登记，此后各轮回放免重复 scandir 与排序；
+    仅沉淀指纹登记——粗粒度时间戳的同槽变更对 mtime 不可见，未沉淀指纹防不住
+    扫描中途变更；不回写父目录 mtime 的文件系统（部分 NFS/SMB 映射盘）上，
+    扫描中途的子文件增删不改变指纹、扩窗轮回放过期列表，属与跨调用缓存
+    settled-only mtime 策略同口径的已知接受面。累计登记量以 _SCAN_ENTRY_BUDGET
+    封顶，巨目录与超限目录标记不可登记、后续复访直取前缀物化。随一次
+    cached_find_images_in_directory 调用生灭，不跨请求泄漏。
+    """
+
+    def __init__(self) -> None:
+        self._listings: dict[str, tuple[int, list[os.DirEntry[str]]]] = {}
+        self._visited: set[str] = set()
+        self._barred: set[str] = set()
+        self._stored_entries = 0
+
+    def lookup(self, path: Path) -> list[os.DirEntry[str]] | None:
+        """返回未变更目录的排序列表，目录缺失或 mtime 指纹失配时返回 None。"""
+        key = str(path)
+        listing = self._listings.get(key)
+        if listing is None:
+            return None
+        mtime_ns, entries = listing
+        if _get_directory_mtime_ns(path) != mtime_ns:
+            del self._listings[key]
+            # 失配删除同步退还预算，同目录重登记不被累计量二次计费误拒。
+            self._stored_entries -= len(entries)
+            return None
+        return entries
+
+    def mark_first_visit(self, path: Path) -> bool:
+        """首访返回 True 并记录，复访返回 False。"""
+        key = str(path)
+        if key in self._visited:
+            return False
+        self._visited.add(key)
+        return True
+
+    def mark_barred(self, path: Path) -> None:
+        """标记目录不可登记：后续复访免付注定被拒的物化与排序。"""
+        self._barred.add(str(path))
+
+    def barred(self, path: Path) -> bool:
+        """目录是否已标记不可登记。"""
+        return str(path) in self._barred
+
+    def store(self, path: Path, mtime_ns: int, entries: list[os.DirEntry[str]]) -> None:
+        """记录目录的排序列表与枚举前捕获的 mtime 指纹；累计超预算拒绝并标记不可登记。"""
+        if self._stored_entries + len(entries) > _SCAN_ENTRY_BUDGET:
+            self._barred.add(str(path))
+            return
+        self._stored_entries += len(entries)
+        self._listings[str(path)] = (mtime_ns, entries)
+
+
+def _entry_sort_key(entry: "os.DirEntry[str]") -> str:
+    """目录条目的排序键：fold_case 全路径，nsmallest 与 sorted 前缀同序。"""
+    return fold_case(entry.path)
+
+
+def _register_revisit_listing(
+    path: Path, prefix_len: int, listing_memo: _DirectoryListingMemo
+) -> list["os.DirEntry[str]"] | None:
+    """复访目录物化完整排序清单并登记，不可登记（已标记或指纹未沉淀）返回 None。
+
+    mtime 先于枚举捕获：枚举期间的并发变更使指纹失配，后续轮不复用过期列表。
+    巨目录条目数超预算时标记后流式取前缀；store 累计超限拒绝时本轮物化结果
+    照常返回，仅失去后续复用。枚举的 OSError 原样上抛，由调用方收集降级。
+    """
+    mtime_ns = _get_directory_mtime_ns(path)
+    if listing_memo.barred(path) or mtime_ns is None or not _directory_mtime_settled(mtime_ns):
+        return None
+    with os.scandir(path) as it:
+        collected: list[os.DirEntry[str]] = []
+        for entry in it:
+            collected.append(entry)
+            if len(collected) > _SCAN_ENTRY_BUDGET:
+                # 巨目录：余下条目本扫描消费不到，标记后流式取前缀。
+                listing_memo.mark_barred(path)
+                return heapq.nsmallest(prefix_len, chain(collected, it), key=_entry_sort_key)
+        listing = sorted(collected, key=_entry_sort_key)
+    listing_memo.store(path, mtime_ns, listing)
+    return listing[:prefix_len]
+
+
+def _ordered_directory_entries(
+    path: Path,
+    *,
+    prefix_len: int,
+    unlimited: bool,
+    listing_memo: _DirectoryListingMemo | None,
+) -> list[os.DirEntry[str]]:
+    """目录条目的 fold_case 有序枚举：无 memo 或首访按需前缀物化、无上限全量排序，复访回放排序快照。
+
+    memo 懒登记：首访与前缀物化同路径（单次到访目录不付全量排序与整表驻留）；
+    复访且可登记时经 _register_revisit_listing 物化登记，不可登记返回 None
+    免付整目录物化，仍走前缀物化。
+    """
+    if listing_memo is not None and not unlimited:
+        listing = listing_memo.lookup(path)
+        if listing is not None:
+            return listing[:prefix_len]
+        if not listing_memo.mark_first_visit(path):
+            registered = _register_revisit_listing(path, prefix_len, listing_memo)
+            if registered is not None:
+                return registered
+    with os.scandir(path) as it:
+        if unlimited:
+            return sorted(it, key=_entry_sort_key)
+        return heapq.nsmallest(prefix_len, it, key=_entry_sort_key)
+
+
 def _scan_resolved_directory(
     directory: str,
     *,
@@ -679,11 +862,13 @@ def _scan_resolved_directory(
     limit: int | None,
     unreadable_dirs: list[Path] | None,
     truncated: list[bool] | None,
+    listing_memo: _DirectoryListingMemo | None = None,
 ) -> list[Path]:
     """扫描已 resolve 目录内的图片，遍历与降级口径见 find_images_in_directory。
 
     信任前置：入参已 resolve 且经 UNC 拒绝（cached 包装层与公共入口的委托契约），
-    本函数不重复预检。
+    本函数不重复预检。listing_memo 为 cached 包装层扩窗轮的枚举复用扩展参数，
+    缺省不复用；排序与物化策略见 _ordered_directory_entries。
     """
     images: list[Path] = []
 
@@ -715,21 +900,16 @@ def _scan_resolved_directory(
         if current_depth > max_depth:
             return False
 
-        # 排序前缀按需扩展：heapq.nsmallest 与 sorted 前缀同序，物化量与前缀长度
-        # 成正比而非目录全量；无 limit 时一次全量排序。
         prefix_len = target_count
         processed: set[str] = set()
         while True:
             try:
-                with os.scandir(path) as it:
-                    if target_count >= 0:
-                        entries = heapq.nsmallest(
-                            prefix_len,
-                            it,
-                            key=lambda entry: fold_case(entry.path),
-                        )
-                    else:
-                        entries = sorted(it, key=lambda entry: fold_case(entry.path))
+                entries = _ordered_directory_entries(
+                    path,
+                    prefix_len=prefix_len,
+                    unlimited=target_count < 0,
+                    listing_memo=listing_memo,
+                )
             except OSError as e:
                 logger.warning("无法访问目录 {}: {}", path, e)
                 if unreadable_dirs is not None:
@@ -797,6 +977,11 @@ def _scan_resolved_directory(
     scan_directory(dir_path)
 
     return images
+
+
+# 枚举 memo 挂接判定的锚点：以导入期捕获的核心引用做同一性比较，运行期替换
+# 模块属性（测试替身、包装器）即不再挂接，免其收到 listing_memo 扩展参数。
+_LISTING_MEMO_ELIGIBLE_SCAN = _scan_resolved_directory
 
 
 def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None) -> list[str]:
