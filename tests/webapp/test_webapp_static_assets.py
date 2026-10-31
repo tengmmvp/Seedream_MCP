@@ -231,20 +231,25 @@ def test_api_js_post_json_raw_contract() -> None:
 
     与共享消费骨架的差别在不套消费语义：失败不逐档展示、载荷不套工具信封，
     网络、非 2xx 与载荷异常一律上抛交调用方 catch 分档；401 仍经请求层弹令牌门。
-    body 缺省时发无体请求，预检投影只携带查询参数；非 ok 弃体与严格解析收敛
-    于 consumeJsonOrThrow 共享响应尾。
+    body 缺省时发无体请求，预检投影只携带查询参数；调用方取消信号与内部超时
+    经 mergeAbortSignals 单源汇流（与 postJson 共用），取消在预检窗口即时生效；
+    非 ok 弃体与严格解析收敛于 consumeJsonOrThrow 共享响应尾。
     """
     source = read_js_module_source("api.js")
     body = function_body(source, r"export async function postJsonRaw\(.*?^}")
-    assert "postJsonRaw(path, timeoutMs, body)" in body, "body 须为可缺省尾参"
+    assert "postJsonRaw(path, timeoutMs, body, signal)" in body, "body 与 signal 须为可缺省尾参"
     for literal in (
         "withTimeoutSignal(timeoutMs,",
+        "mergeAbortSignals(signal, timeoutSignal)",
         "await apiFetch(path,",
         "if (body !== undefined)",
         "options.body = JSON.stringify(body);",
         "return consumeJsonOrThrow(response);",
     ):
         assert literal in body, f"原始 JSON-POST 缺要素: {literal}"
+    # 汇流原语单源：AbortSignal.any 只在 helper，请求骨架不各自内联。
+    merger = function_body(source, r"function mergeAbortSignals\(.*?^}")
+    assert "AbortSignal.any([signal, timeoutSignal])" in merger, "汇流助手缺 AbortSignal.any"
     tail = function_body(source, r"async function consumeJsonOrThrow\(.*?^}")
     for literal in (
         "await discardBodyQuietly(response);",
@@ -559,15 +564,34 @@ def test_gallery_lightbox_budget_scales_with_content_length() -> None:
     assert re.search(r"finally\s*\{\s*disarm\(\);\s*\}", body), "计时器未在 finally 撤销"
 
 
+def test_gallery_caption_keeps_zero_byte_size() -> None:
+    """图库 caption 的尺寸判定按 Number.isFinite：零字节文件的 0.0 照常渲染。
+
+    真值判定把合法 0.0（扫描对支持扩展名文件无大小下限）当 falsy 丢弃，与
+    stat 失败的 null 不可区分；灯箱体读取预算语义不同（零字节无需放大预算），
+    保持 sizeMb > 0 判定。
+    """
+    gallery_js = read_js_module_source("gallery.js")
+    render = function_body(gallery_js, r"async function refreshGalleryForSeq\(.*?^}")
+    assert (
+        'Number.isFinite(item.size_mb) ? `${item.size_mb.toFixed(2)}MB` : ""' in render
+    ), "caption 尺寸判定回退真值形态，零字节 0.0 被误隐"
+    budget = function_body(gallery_js, r"function lightboxBodyBudgetMs\(.*?^}")
+    assert "sizeMb > 0" in budget, "灯箱预算的有效尺寸语义漂移"
+
+
 def test_lightbox_reference_eviction_is_unconditional() -> None:
     """灯箱回填的满档腾挪无条件执行，槽位操作收敛 refs.js。
 
     腾挪仅存在于文生图切换分支时，图生图唯一槽位已占（含切工具自动恢复的
     占位）与多图融合满档下同一动作被数量上限拒绝，成败取决于先前所在工具；
-    让位项回暂存不丢，腾挪后列表即时重渲染。
+    让位项回暂存不丢，腾挪后列表即时重渲染。让位循环单源于 parkRefsBeyond：
+    腾挪传 max - 1（addReference 随后入列并在 >= max 再拒，须留一席），
+    工具收缩传 max（让位到数量上限本身），双副本手工循环不复存在。
     """
     gallery_js = read_js_module_source("gallery.js")
     refs_js = read_js_module_source("refs.js")
+    generate_js = read_js_module_source("generate.js")
     use = function_body(gallery_js, r"export async function useLightboxAsReference\(.*?^}")
     code = _js_code_without_comments(use)
     switch_block, _ = _balanced_brace_block(
@@ -578,11 +602,21 @@ def test_lightbox_reference_eviction_is_unconditional() -> None:
     assert use.count("ensureRefCapacity();") == 1, "回填前缺无条件腾挪"
     assert use.index("ensureRefCapacity();") < use.index('addReference("data_uri"'), "腾挪晚于入列"
     evictor = function_body(refs_js, r"export function ensureRefCapacity\(.*?^}")
-    assert "state.parkedRefs.push(state.refs.pop());" in evictor, "让位项未回暂存不丢"
+    assert "parkRefsBeyond(config.max - 1)" in evictor, "腾挪未为随后入列留一席"
+    parker = function_body(refs_js, r"export function parkRefsBeyond\(.*?^}")
+    assert "state.parkedRefs.push(state.refs.pop());" in parker, "让位项未回暂存不丢"
     assert re.search(
-        r"state\.refs\.length > 0\s*&&\s*state\.refs\.length >= config\.max", evictor
-    ), "腾挪循环缺终止防御或满档判定"
+        r"state\.refs\.length > 0\s*&&\s*state\.refs\.length > limit", parker
+    ), "让位循环缺终止防御或越限判定"
     assert "renderReferences();" in evictor, "腾挪后未重渲染参考图列表"
+    assert re.search(
+        r'import \{[^}]*parkRefsBeyond[^}]*\} from "\./refs\.js";', generate_js
+    ), "工具形态未引入统一让位 helper"
+    apply = function_body(generate_js, r"export function applyToolUI\(.*?^}")
+    assert "parkRefsBeyond(config.max);" in apply, "工具收缩让位未走统一 helper"
+    assert (
+        "state.parkedRefs.push(state.refs.pop());" not in generate_js
+    ), "generate.js 残留手工让位副本"
 
 
 def test_gallery_advance_guards_missing_next_offset() -> None:
@@ -646,7 +680,7 @@ def test_generate_submit_full_path_wrapped_by_restore_finally() -> None:
     for anchor in (
         'setStatus("running", "生成中，请稍候");',
         "const body = buildRequestBody();",
-        "await preflightTimeoutMs(tool, body);",
+        "await preflightTimeoutMs(tool, body, cancelController.signal);",
         "await postJson(",
         "await renderResults(payload);",
     ):
@@ -666,7 +700,8 @@ def test_generate_submit_inflight_button_cancels_request() -> None:
     """生成等待期主按钮转「取消」：再次提交即中止在途请求并收场已取消提示。
 
     取消只中止客户端等待，服务端是否继续执行不受影响；取消分流以取消信号
-    区分于超时兜底，超时文案路径保持原状。
+    区分于超时兜底，超时文案路径保持原状。取消信号同样透传预检——预检窗口
+    内的取消即时中止连接，不再等预检自身的超时档。
     """
     generate_js = read_js_module_source("generate.js")
     api_js = read_js_module_source("api.js")
@@ -682,8 +717,11 @@ def test_generate_submit_inflight_button_cancels_request() -> None:
         r"isAbortError\(error\) && cancelController\.signal\.aborted", submit
     ), "取消与超时未按取消信号分流"
     assert "cancelController.signal," in submit, "生成请求未携带取消信号"
+    assert (
+        "preflightTimeoutMs(tool, body, cancelController.signal)" in submit
+    ), "取消信号未透传预检，取消在预检窗口无效"
     skeleton = function_body(api_js, r"export async function postJson\(.*?^}")
-    assert "AbortSignal.any(" in skeleton, "postJson 未汇流调用方取消与内部超时"
+    assert "mergeAbortSignals(" in skeleton, "postJson 未汇流调用方取消与内部超时"
 
 
 def test_generate_submit_binding_has_fallback_catch() -> None:

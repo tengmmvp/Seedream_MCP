@@ -1,7 +1,7 @@
 """Web 操作台各域 handler 共享的响应辅助与错误码映射。
 
 本模块只放跨域复用的纯辅助：统一错误 JSON 形态与结构化错误响应原语、
-生成与图库入口的序言脚手架、图片目录解析契约、
+错误载荷的出端投影查表、生成与图库入口的序言脚手架、图片目录解析契约、
 错误类型到 HTTP 状态码的单源映射、文件端点的缓存头与 no-follow 文件响应形态。
 域内专有逻辑不落此处，避免演化为杂物箱。
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import IO, Any, NamedTuple, TypeVar
 
@@ -21,7 +21,11 @@ from starlette.responses import FileResponse, JSONResponse, MalformedRangeHeader
 from starlette.types import Message, Receive, Scope, Send
 
 # as 同名形态为显式再导出，供 webapp 测试经本模块替换序列化原语。
-from ..definitions.conventions import BROWSE_FAILED_ERROR_TYPE, MODEL_INFO_FAILED_ERROR_TYPE
+from ..definitions.conventions import (
+    BROWSE_FAILED_ERROR_TYPE,
+    BROWSE_IMAGES_TOOL_NAME,
+    MODEL_INFO_FAILED_ERROR_TYPE,
+)
 from ..tools.outputs import (
     build_error_dict,
     build_error_structured,
@@ -39,7 +43,11 @@ from ..utils.core.executors import (
     should_offload_to_cpu_pool,
 )
 from ..utils.core.logs import get_logger
-from ..utils.core.sanitizers import utf8_value_leaf_length
+from ..utils.core.sanitizers import (
+    ERROR_TEXT_SEGMENT_JOINER,
+    sanitize_assembled_text,
+    utf8_value_leaf_length,
+)
 from ..utils.io.path import (
     READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
     images_root_relative,
@@ -143,9 +151,9 @@ ERROR_TYPE_STATUS: dict[str, int] = _merge_error_type_status(
 
 
 def flat_error_json(error: WebErrorInfo) -> JSONResponse:
-    """扁平错误信封响应，形态与传输层中间件一致，状态码随错误定义携带。"""
+    """扁平错误信封响应，形态与传输层中间件一致，message 经幂等净化。"""
     return JSONResponse(
-        {"error": error.type, "error_description": error.message},
+        {"error": error.type, "error_description": sanitize_assembled_text(error.message)},
         status_code=error.http_status,
         headers=WEB_JSON_HEADERS,
     )
@@ -194,7 +202,10 @@ def images_root_unavailable_error(exc: Exception) -> WebErrorInfo:
     """图片目录解析失败的 WebErrorInfo，携带配置指引，生成、图库与文件端点共用。"""
     message = getattr(exc, "message", None) or str(exc)
     return IMAGES_ROOT_UNAVAILABLE_INFO._replace(
-        message=f"{IMAGES_ROOT_UNAVAILABLE_INFO.message}: {message}；可配置 {READ_SCOPE_AUTH_ENV_HINT}"
+        message=(
+            f"{IMAGES_ROOT_UNAVAILABLE_INFO.message}: {message}"
+            f"{ERROR_TEXT_SEGMENT_JOINER}可配置 {READ_SCOPE_AUTH_ENV_HINT}"
+        )
     )
 
 
@@ -210,7 +221,9 @@ _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 
 async def entry_preamble(
-    request: Request, tool_name: str, model_cls: type[_ModelT]
+    request: Request,
+    tool_name: str,
+    model_cls: type[_ModelT],
 ) -> tuple[_ModelT, Path] | Response:
     """生成与图库入口的序言脚手架：请求体解析、输入模型校验与图片目录解析。
 
@@ -299,9 +312,51 @@ async def respond_structured_json(structured: dict[str, object], status: int) ->
     )
 
 
+# Web 浏览端全部 JSON 响应的显式字段投影：白名单外字段（含未来新增的输出字段）
+# 不出端点，成功、失败与早期失败载荷同口径。
+_WEB_PROJECTION_KEYS = frozenset(
+    {
+        "tool",
+        "success",
+        "status",
+        "error",
+        "directory",
+        "count",
+        "total_count",
+        "offset",
+        "has_more",
+        "next_offset",
+        "stall_permanent",
+        "rescan_futile",
+        "skipped_count",
+        "images",
+        "recursive",
+        "max_depth",
+        "limit",
+        "format_filter",
+        "show_details",
+    }
+)
+
+
+def project_browse_payload(structured: dict[str, Any]) -> None:
+    """按投影白名单裁剪字段。"""
+    for key in structured.keys() - _WEB_PROJECTION_KEYS:
+        del structured[key]
+
+
+# 错误载荷的出端投影按 tool_name 查表：未登记工具全字段输出，generate 端点有意不投影。
+_WEB_PROJECTIONS: Mapping[str, Callable[[dict[str, Any]], None]] = {
+    BROWSE_IMAGES_TOOL_NAME: project_browse_payload,
+}
+
+
 async def respond_structured_error(tool_name: str, error_type: str, message: str) -> Response:
     """经输出族映射构造失败结构化结果并回 JSON 响应，状态码按状态表查得。"""
     structured = build_error_structured(tool_name, error_type, message)
+    projection = _WEB_PROJECTIONS.get(tool_name)
+    if projection is not None:
+        projection(structured)
     return await respond_structured_json(structured, _error_status(error_type))
 
 
@@ -370,10 +425,11 @@ class _DupAtOpenFd:
 class _NoFollowFileResponse(FileResponse):
     """以预开 no-follow 句柄为读源的 FileResponse，读取与应答语义单源于上游。
 
-    分叉仅四处：chunk_size 加大、pathsend 禁用、倒置区间加严 400、多区间读源
-    截断改断连。读取走上游 open 时刻才生产的复制品 fd，其开关归上游发送循环的
-    async with，正常与异常路径均由其 finally 关闭；原句柄为响应独占，__call__
-    收尾同步兜底关闭，句柄对象自身的 closed 幂等簿记使关闭无双重释放与号码误回收。
+    分叉仅五处：chunk_size 加大、pathsend 禁用、倒置区间加严 400、多区间读源
+    截断改断连、错误状态剥离 Range。读取走上游 open 时刻才生产的复制品 fd，
+    其开关归上游发送循环的 async with，正常与异常路径均由其 finally 关闭；
+    原句柄为响应独占，__call__ 收尾同步兜底关闭，句柄对象自身的 closed 幂等
+    簿记使关闭无双重释放与号码误回收。
     """
 
     chunk_size = 512 * 1024
@@ -405,6 +461,12 @@ class _NoFollowFileResponse(FileResponse):
         return ranges
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # RFC 9110 §14.2：Range 仅适用于成功表示；错误状态页剥离 Range 头，整体按原状态应答。
+        if self.status_code >= 400:
+            headers = scope.get("headers", [])
+            stripped = [pair for pair in headers if pair[0] != b"range"]
+            if len(stripped) != len(headers):
+                scope = {**scope, "headers": stripped}
         try:
             await super().__call__(scope, receive, send)
         finally:

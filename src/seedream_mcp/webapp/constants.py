@@ -1,4 +1,4 @@
-"""Web 操作台常量：路由路径、鉴权豁免表与静态资源目录。
+"""Web 操作台常量与路径判定谓词：路由路径、鉴权豁免表、静态资源目录与前缀子树判定。
 
 本模块仅依赖标准库，供 transport 在装配 Bearer 豁免路径时懒导入，避免传输层
 反向依赖 webapp 的 starlette 消息面。
@@ -20,6 +20,15 @@ WEB_STATIC_URL_PREFIX = "/web/static/"
 
 # Web API 统一前缀，前缀下全部端点要求 Bearer 令牌，不做任何豁免。
 WEB_API_PREFIX = "/web/api"
+
+
+def path_in_prefix_subtree(path: str, prefix: str) -> bool:
+    """判定路径是否为前缀本身或其子树成员；仅字面前缀重合的路径（如 /web/api-v2）不误判。
+
+    Origin 守卫与 404 兜底分流共用，防 API 范围两处口径漂移。
+    """
+    return path == prefix or path.startswith(prefix + "/")
+
 
 # Bearer 中间件的静态页面豁免表：index 页与根路径重定向精确匹配、静态资源前缀
 # 匹配；重定向响应本身无数据，豁免后令牌部署下浏览器敲根路径可直接落页。

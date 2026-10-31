@@ -219,8 +219,9 @@ async function refreshGalleryForSeq(seq) {
     img.addEventListener("load", () => img.classList.add("loaded"));
     figure.appendChild(img);
     const caption = document.createElement("figcaption");
+    // size_mb 为 0（零字节文件）照常渲染，仅文件信息不可用的 null 省略。
     const detail = [
-      item.size_mb ? `${item.size_mb.toFixed(2)}MB` : "",
+      Number.isFinite(item.size_mb) ? `${item.size_mb.toFixed(2)}MB` : "",
       item.modified || "",
     ]
       .filter(Boolean)

@@ -20,6 +20,7 @@ from _lib.web_fixtures import (
     drive_asgi_messages,
     make_images_root_unresolvable,
     make_png_bytes,
+    prepare_static_dir,
     web_asgi_client,
     web_get,
     write_workspace_config,
@@ -1055,6 +1056,33 @@ async def test_image_range_error_responses_close_handle(
     assert response.status_code == expected_status
     assert spy.read_calls == []
     assert spy.closed
+
+
+@pytest.mark.parametrize(
+    "range_header",
+    ["bytes=0-9", "bytes=abc", "bytes=999999-"],
+    ids=["satisfiable", "malformed", "unsatisfiable"],
+)
+async def test_not_found_page_range_header_returns_full_404(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+    range_header: str,
+) -> None:
+    """404 静态页对任意 Range 头回整体 404：Range 仅适用于成功表示，错误页不落 206/400/416 分叉。"""
+    static_dir = prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+    page = (static_dir / "404.html").read_bytes()
+
+    async with web_asgi_client(app) as client:
+        response = await client.get("/random/nowhere", headers={"Range": range_header})
+
+    assert response.status_code == 404
+    assert response.content == page
+    assert response.headers["content-length"] == str(len(page))
+    assert "content-range" not in response.headers
 
 
 async def test_image_if_range_matching_validator_honors_range(

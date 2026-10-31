@@ -28,7 +28,14 @@ async def _post_browse(app: Any, body: dict[str, Any]) -> httpx.Response:
 async def test_browse_lists_images_with_relative_paths(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """图片目录内图片以相对路径返回，不出现盘符绝对路径，边界回显字段被剥除。"""
+    """图片目录内图片以相对路径返回，响应字段集与投影白名单精确一致。
+
+    成功负载不含 error 键（模型 dump 时排除，仅失败负载携带），白名单其余字段
+    逐一出现；模型新增字段未登记投影的失配守护见
+    test_browse_projection_whitelist_matches_output_model。
+    """
+    from seedream_mcp.webapp._responses import _WEB_PROJECTION_KEYS
+
     images_root = write_workspace_config(tmp_path)
     day_dir = images_root / "2026-08-20" / "text_to_image"
     day_dir.mkdir(parents=True)
@@ -44,8 +51,19 @@ async def test_browse_lists_images_with_relative_paths(
     paths = [item["path"] for item in payload["images"]]
     assert "2026-08-20/text_to_image/a.png" in paths
     assert all(":" not in path for path in paths)
-    assert "workspace_roots" not in payload
-    assert "resolved_directories" not in payload
+    assert set(payload) == set(_WEB_PROJECTION_KEYS) - {"error"}
+
+
+def test_browse_projection_whitelist_matches_output_model() -> None:
+    """投影白名单与输出模型字段集联动：模型新增字段未登记投影即在此失配。"""
+    from seedream_mcp.tools.outputs import BrowseImagesStructuredOutput
+
+    from seedream_mcp.webapp._responses import _WEB_PROJECTION_KEYS
+
+    assert set(_WEB_PROJECTION_KEYS) == set(BrowseImagesStructuredOutput.model_fields) - {
+        "workspace_roots",
+        "resolved_directories",
+    }
 
 
 async def test_browse_paginates_with_limit(
@@ -90,6 +108,27 @@ async def test_browse_invalid_json_returns_400_structured(
     response = await web_post_raw(app, "/web/api/browse", b"not-json")
 
     _assert_structured_failure(response, "browse_images", "invalid_json", status=400)
+
+
+async def test_browse_error_payloads_respect_projection(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """错误载荷同受投影白名单约束：早期失败与端点自有错误均不出白名单外字段。"""
+    from seedream_mcp.webapp._responses import _WEB_PROJECTION_KEYS
+
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    # 早期失败（序言解析失败）与端点自有错误（目录越界）各验一路。
+    raw_response = await web_post_raw(app, "/web/api/browse", b"not-json")
+    invalid_response = await _post_browse(app, {"directory": "../outside"})
+
+    for response in (raw_response, invalid_response):
+        assert response.status_code == 400
+        payload = response.json()
+        assert "workspace_roots" not in payload
+        assert "resolved_directories" not in payload
+        assert set(payload) == set(_WEB_PROJECTION_KEYS)
 
 
 async def test_browse_web_entry_does_not_assemble_mirror(
@@ -373,7 +412,7 @@ async def test_browse_images_root_unavailable_returns_400(
 
 
 def test_converge_for_web_rewrites_paths_without_dropping(tmp_path: Path) -> None:
-    """条目 path 改写为图片目录相对形态；越界剔除在扫描源头完成，此处不删条目。"""
+    """条目 path 改写为图片目录相对形态；白名单外字段（含未来新增）裁剪，条目不删。"""
     from seedream_mcp.webapp.gallery import _converge_for_web
 
     images_root = tmp_path / "images"
@@ -386,12 +425,13 @@ def test_converge_for_web_rewrites_paths_without_dropping(tmp_path: Path) -> Non
             {"path": str(images_root / "a.png")},
             {"path": str(tmp_path / "outside.png")},
         ],
+        # 携带服务器绝对路径，裁剪后不外泄。
+        "future_absolute_field": str(images_root),
     }
 
     _converge_for_web(structured, images_root)
 
-    assert "workspace_roots" not in structured
-    assert "resolved_directories" not in structured
+    assert set(structured) == {"count", "total_count", "images"}
     assert structured["count"] == 2
     assert len(structured["images"]) == 2
     assert structured["images"][0]["web_path"] == "a.png"

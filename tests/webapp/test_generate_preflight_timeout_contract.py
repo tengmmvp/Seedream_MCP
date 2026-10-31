@@ -138,7 +138,7 @@ def test_generate_preflight_submit_snapshot_and_wire_contract() -> None:
     assert re.search(
         r"const tool = state\.tool;\s*"
         r"const body = buildRequestBody\(\);\s*"
-        r"const timeoutMs = await preflightTimeoutMs\(tool, body\);",
+        r"const timeoutMs = await preflightTimeoutMs\(tool, body, cancelController\.signal\);",
         generate_js,
     ), "提交路径未先快照请求体与工具再预检"
     assert (
@@ -152,9 +152,10 @@ def test_generate_preflight_submit_snapshot_and_wire_contract() -> None:
     assert "return generateFallbackTimeoutMs();" in generate_js, "预检失败未回退等待预算兜底"
     preflight = _preflight_js_body()
     assert re.search(
-        r"postJsonRaw\(\s*`/web/api/generate/\$\{tool}\?\$\{params}`,\s*PREFLIGHT_TIMEOUT_MS,\s*\)",
+        r"postJsonRaw\(\s*`/web/api/generate/\$\{tool}\?\$\{params}`,\s*"
+        r"PREFLIGHT_TIMEOUT_MS,\s*undefined,\s*signal,?\s*\)",
         preflight,
-    ), "预检未打到快照工具的生成端点或调用仍携带请求体参数"
+    ), "预检未打到快照工具的生成端点、仍携带请求体或未转发取消信号"
     for name in _JS_MODULES:
         source = read_js_module_source(name)
         for field in (

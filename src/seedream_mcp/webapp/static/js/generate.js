@@ -26,7 +26,12 @@ import {
   TOOL_TEXT_TO_IMAGE,
   withTimeoutSignal,
 } from "./api.js";
-import { renderReferences, toolConfig, withinUploadBudget } from "./refs.js";
+import {
+  parkRefsBeyond,
+  renderReferences,
+  toolConfig,
+  withinUploadBudget,
+} from "./refs.js";
 import { openLightbox, resetGalleryPaging } from "./gallery.js";
 
 /**
@@ -244,9 +249,7 @@ export function applyToolUI() {
   }
   // 上限收缩时参考图暂存而非丢弃，切回支持的工具按上限自动恢复原顺序；
   // 恢复与入列同受 data URI 累计上限约束，超限项留在暂存不丢。
-  while (state.refs.length > config.max) {
-    state.parkedRefs.push(state.refs.pop());
-  }
+  parkRefsBeyond(config.max);
   while (state.parkedRefs.length > 0 && state.refs.length < config.max) {
     const next = state.parkedRefs[state.parkedRefs.length - 1];
     if (next.kind === "data_uri" && !withinUploadBudget(next.value.length)) {
@@ -468,9 +471,10 @@ const preflightCache = new Map();
  *
  * @param {string} tool - 提交时刻快照的工具标识。
  * @param {Object} body - 提交时刻快照的请求体。
+ * @param {AbortSignal} [signal] - 提交取消信号，取消在预检窗口即时生效。
  * @returns {Promise<number>} 等待预算毫秒数。
  */
-async function preflightTimeoutMs(tool, body) {
+async function preflightTimeoutMs(tool, body, signal) {
   const params = new URLSearchParams({ preflight: "1" });
   if (Number.isFinite(body.request_count) && body.request_count > 0) {
     params.set("request_count", String(body.request_count));
@@ -495,6 +499,8 @@ async function preflightTimeoutMs(tool, body) {
     const payload = await postJsonRaw(
       `/web/api/generate/${tool}?${params}`,
       PREFLIGHT_TIMEOUT_MS,
+      undefined,
+      signal,
     );
     if (payload.success === true && Number.isFinite(payload.timeout_ms)) {
       // 仅成功推导入缓存：回退上限不入，瞬时失败下次提交重试预检。
@@ -566,7 +572,7 @@ export async function submitGenerate(event) {
     // 预算推导与真实请求共用同一快照，不随窗口内的编辑漂移。
     const tool = state.tool;
     const body = buildRequestBody();
-    const timeoutMs = await preflightTimeoutMs(tool, body);
+    const timeoutMs = await preflightTimeoutMs(tool, body, cancelController.signal);
     try {
       // 非 ok 与载荷缺陷经共享骨架就地展示，体读取失败上抛走网络档
       // ——2xx 意味着服务端已生成，断连误劝重试会重复生成。

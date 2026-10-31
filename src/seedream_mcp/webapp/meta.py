@@ -31,7 +31,12 @@ from ..utils.model.capabilities import (
 )
 from . import _responses, constants
 from ._responses import _NoFollowFileResponse
-from .constants import PAGE_SECURITY_HEADERS, WEB_API_PREFIX, WEB_INDEX_PATH
+from .constants import (
+    PAGE_SECURITY_HEADERS,
+    WEB_API_PREFIX,
+    WEB_INDEX_PATH,
+    path_in_prefix_subtree,
+)
 from .generate import generate_fallback_timeout_ms
 
 logger = get_logger()
@@ -213,7 +218,7 @@ async def web_not_found(request: Request) -> Response:
                 char if ord(char) < 128 else quote(char, encoding="utf-8") for char in target
             )
             return RedirectResponse(location, status_code=307)
-    if path == WEB_API_PREFIX or path.startswith(WEB_API_PREFIX + "/"):
+    if path_in_prefix_subtree(path, WEB_API_PREFIX):
         return _responses.flat_error_json(_responses.API_NOT_FOUND_INFO)
     # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
     page = constants.STATIC_DIR / "404.html"

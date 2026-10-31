@@ -140,17 +140,28 @@ function clearRefError() {
 }
 
 /**
+ * 把超出保留上限的参考图自末位让位、回暂存不丢。
+ *
+ * @param {number} limit - 保留上限。
+ * @returns {boolean} 是否有让位。
+ */
+export function parkRefsBeyond(limit) {
+  let parked = false;
+  // length > 0 兼作 limit < 0 工具（文生图）的循环终止防御。
+  while (state.refs.length > 0 && state.refs.length > limit) {
+    state.parkedRefs.push(state.refs.pop());
+    parked = true;
+  }
+  return parked;
+}
+
+/**
  * 为一张待入列的参考图腾出槽位：满档时既有参考图自末位让位、回暂存不丢。
  */
 export function ensureRefCapacity() {
   const config = toolConfig(state.tool);
-  let evicted = false;
-  // length > 0 兼作 max=0 工具（文生图）的循环终止防御。
-  while (state.refs.length > 0 && state.refs.length >= config.max) {
-    state.parkedRefs.push(state.refs.pop());
-    evicted = true;
-  }
-  if (evicted) renderReferences();
+  // addReference 随后入列并在 >= max 再拒，腾挪须留一席（max - 1）。
+  if (parkRefsBeyond(config.max - 1)) renderReferences();
 }
 
 /**

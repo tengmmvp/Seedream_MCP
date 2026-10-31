@@ -246,6 +246,11 @@ export async function withTimeoutSignal(ms, fn) {
   }
 }
 
+/** 汇流外部中止与内部超时信号。 */
+function mergeAbortSignals(signal, timeoutSignal) {
+  return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+}
+
 /** 401 哨兵异常判定，各捕获点共用。 */
 export function isUnauthorizedError(error) {
   return error.message === UNAUTHORIZED_MESSAGE;
@@ -462,17 +467,14 @@ export async function parseJsonRequired(response) {
  * @param {function(Error): void} handlers.onNetworkError - 非中止类请求异常展示。
  * @param {function(Object): void} handlers.onEndpointError - 非 ok 归一化错误展示。
  * @param {function(Error): void} handlers.onPayloadError - ok 载荷缺陷展示。
- * @param {AbortSignal} [signal] - 调用方中止信号，与内部超时信号合并随请求发送。
+ * @param {AbortSignal} [signal] - 调用方中止信号，与内部超时信号汇流随请求发送。
  * @returns {Promise<Object|null>} 解析出的载荷对象，失败已消费时为 null。
  * @throws {DOMException|Error} 中止类异常为 DOMException；另含体读取失败
  * （TypeError 类）。
  */
 export async function postJson(path, body, timeoutMs, handlers, signal) {
   return withTimeoutSignal(timeoutMs, async (timeoutSignal) => {
-    // 外部取消与内部超时经 AbortSignal.any 汇流，中止类照常上抛交调用方分档。
-    const requestSignal = signal
-      ? AbortSignal.any([signal, timeoutSignal])
-      : timeoutSignal;
+    const requestSignal = mergeAbortSignals(signal, timeoutSignal);
     let response;
     try {
       response = await apiFetch(path, {
@@ -542,13 +544,15 @@ async function consumeJsonOrThrow(response, statusMessage) {
  * @param {string} path - 端点路径。
  * @param {number} timeoutMs - 超时毫秒数。
  * @param {Object} [body] - JSON 请求体，缺省不发。
+ * @param {AbortSignal} [signal] - 调用方中止信号，与内部超时信号汇流随请求发送。
  * @returns {Promise<Object>} 解析出的载荷对象。
  * @throws {DOMException|Error} 中止类为 DOMException，另含网络失败、非 2xx
  *   与载荷缺陷。
  */
-export async function postJsonRaw(path, timeoutMs, body) {
-  return withTimeoutSignal(timeoutMs, async (signal) => {
-    const options = { method: "POST", signal };
+export async function postJsonRaw(path, timeoutMs, body, signal) {
+  return withTimeoutSignal(timeoutMs, async (timeoutSignal) => {
+    const requestSignal = mergeAbortSignals(signal, timeoutSignal);
+    const options = { method: "POST", signal: requestSignal };
     if (body !== undefined) {
       options.headers = { "Content-Type": "application/json" };
       options.body = JSON.stringify(body);

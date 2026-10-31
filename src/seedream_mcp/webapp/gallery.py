@@ -3,9 +3,7 @@
 与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务图片目录内文件，图库
 浏览同样以图片目录为界，请求目录经 resolve_against_base 与 browse 核心共用同一
 解析组合，越出图片目录在端点拒绝，解析结果透传 browse 复用，免同请求重复解析。
-browse 条目为绝对路径，Web 层改写为图片目录相对形态供前端直接拼接为图片端点
-参数；workspace_roots 与 resolved_directories 回显字段 Web 前端不消费，返回浏览
-器前剥除。
+browse 条目为绝对路径，Web 层改写为图片目录相对形态供前端直接拼接为图片端点参数。
 """
 
 from __future__ import annotations
@@ -26,18 +24,14 @@ from . import _responses
 
 logger = get_logger()
 
-# browse 工具为 MCP 客户端回显的边界字段，Web 前端不消费，不出 Web 端点。
-_ROOTS_ECHO_KEYS = ("workspace_roots", "resolved_directories")
-
 
 def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
-    """剥除 Web 前端不消费的边界字段，条目 path 改写为图片目录相对形态。
+    """投影白名单裁剪后，条目 path 改写为图片目录相对形态。
 
     越界条目已在扫描源头经 bounds_scope 剔除。改写经 _responses.converge_path_entry
     与 generate 端单点维护。
     """
-    for key in _ROOTS_ECHO_KEYS:
-        structured.pop(key, None)
+    _responses.project_browse_payload(structured)
     images = structured.get("images")
     if not isinstance(images, list):
         return
@@ -62,7 +56,7 @@ async def _resolve_request_directory(directory: str, images_root: Path) -> Bound
 
 
 async def _structured_error(error: _responses.WebErrorInfo) -> Response:
-    """图库端点错误分支的结构化响应，错误载荷经输出族映射绑定浏览族模型。"""
+    """图库端点错误分支的结构化响应。"""
     return await error.as_response(BROWSE_IMAGES_TOOL_NAME)
 
 
