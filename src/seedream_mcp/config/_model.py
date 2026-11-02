@@ -13,26 +13,36 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .host_syntax import (
+    DEFAULT_SCHEME_PORTS,
     _bracket_ipv6_literal,
     _decompose_allowed_host_entry,
+    _decompose_netloc,
+    _host_port_invalid_reason,
     _ipv6_host_literal_forms,
     _is_valid_url_hostname,
 )
 from .sources import (
-    _REQUEST_STATE_KEYGEN_COMMAND,
     _REQUEST_STATE_KEY_MIN_BYTES,
+    _REQUEST_STATE_KEY_TOO_SHORT_SEGMENT,
+    _config_error,
     _ensure_field_utf8_encodable,
     _env_field,
     _env_var_suffix,
     _http_auth_token_invalid_reason,
+    _request_state_key_rule_error,
     normalize_model_selector,
 )
-from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
-from ..utils.core.sanitizers import (
-    ERROR_TEXT_SEGMENT_JOINER,
-    is_printable_ascii,
-    is_sensitive_key,
+from ..utils.core.errors import (
+    ErrorText,
+    SeedreamConfigError,
+    SeedreamValidationError,
+    as_detail,
+    as_plain,
+    as_plain_list,
+    as_text,
+    assemble_error_segments,
 )
+from ..utils.core.sanitizers import is_printable_ascii, is_sensitive_key
 from ..definitions.defaults import (
     DEFAULT_CLEANUP_DAYS,
     DEFAULT_DATE_FOLDER,
@@ -73,16 +83,29 @@ _B64_WORST_CASE_NUMERATOR = 4
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
 
 
-def _validate_ipv6_host_literal(literal: str, entry: str, label: str, env_key: str) -> None:
+def _validate_ipv6_host_literal(literal: str, entry: str, label: str, field_name: str) -> None:
     """非法或既非压缩规范形也非 IPv4 映射 dotted 形的 IPv6 字面量抛配置错误。"""
     forms = _ipv6_host_literal_forms(literal)
     if forms is None:
-        raise SeedreamConfigError(f"{label}须为合法 IPv6 字面量: {entry}{_env_var_suffix(env_key)}")
+        raise SeedreamConfigError(
+            _config_error(
+                "{label}须为合法 IPv6 字面量: {entry}{suffix}",
+                field_name,
+                label=as_plain(label),
+                entry=as_text(entry),
+            )
+        )
     accepted_literals, suggested_literal = forms
     if literal not in accepted_literals:
         raise SeedreamConfigError(
-            f"{label}须为压缩规范形或 IPv4 映射 dotted 形，"
-            f"应写 [{suggested_literal}] 而非 {entry}{_env_var_suffix(env_key)}"
+            _config_error(
+                "{label}须为压缩规范形或 IPv4 映射 dotted 形，"
+                "应写 [{suggested}] 而非 {entry}{suffix}",
+                field_name,
+                label=as_plain(label),
+                suggested=as_text(suggested_literal),
+                entry=as_text(entry),
+            )
         )
 
 
@@ -263,21 +286,25 @@ class SeedreamConfig:
         stripped = (self.api_key or "").strip()
         object.__setattr__(self, "api_key", stripped)
         if not self.api_key:
-            raise SeedreamConfigError(f"API密钥不能为空{_env_var_suffix('api_key')}")
+            raise SeedreamConfigError(_config_error("API密钥不能为空{suffix}", "api_key"))
         _ensure_field_utf8_encodable(self.api_key, "api_key")
         # 密钥含控制字符、空白或非 ASCII 字符必为无效输入，留到请求期只以头值
         # 非法或编码失败等晦涩错误暴露。
         if not is_printable_ascii(self.api_key):
-            raise SeedreamConfigError(f"API密钥须为可打印ASCII字符{_env_var_suffix('api_key')}")
+            raise SeedreamConfigError(
+                _config_error("API密钥须为可打印ASCII字符{suffix}", "api_key")
+            )
         if self.api_key == "your_api_key_here":
             raise SeedreamConfigError(
-                f"请设置有效的API密钥，不能使用默认占位符{_env_var_suffix('api_key')}"
+                _config_error("请设置有效的API密钥，不能使用默认占位符{suffix}", "api_key")
             )
 
     def _validate_api_endpoint(self) -> None:
         """校验 base_url 的 scheme、主机名、userinfo 与 http 明文豁免。"""
         # RFC 3986 规定 scheme 大小写不敏感，HTTPS:// 等大写形态经 urlparse 取小写后判定。
-        invalid_url_message = f"base_url必须是有效的HTTP/HTTPS URL{_env_var_suffix('base_url')}"
+        invalid_url_message = _config_error(
+            "base_url必须是有效的HTTP/HTTPS URL{suffix}", "base_url"
+        )
         try:
             parsed_base_url = urlparse(self.base_url)
         except ValueError as exc:
@@ -291,36 +318,46 @@ class SeedreamConfig:
         # 运行期才以网络错误档失败；空端口形态主机名非空，不受影响。
         base_url_hostname = parsed_base_url.hostname or ""
         if not base_url_hostname.strip():
-            raise SeedreamConfigError(f"base_url缺少主机名{_env_var_suffix('base_url')}")
+            raise SeedreamConfigError(_config_error("base_url缺少主机名{suffix}", "base_url"))
         # 字符集非法的主机名（空格、控制字符、非 ASCII、乱码百分号等）同样延到
         # 运行期才失败，与缺失同口径在构造期拒绝。
         if not _is_valid_url_hostname(base_url_hostname):
             raise SeedreamConfigError(
-                f"base_url主机名含非法字符: {base_url_hostname}{_env_var_suffix('base_url')}"
+                _config_error(
+                    "base_url主机名含非法字符: {hostname}{suffix}",
+                    "base_url",
+                    hostname=as_text(base_url_hostname),
+                )
             )
         # 非数字或越界端口在 .port 求值即抛 ValueError，归拢到配置构建期拒绝。
         try:
             base_url_port = parsed_base_url.port
         except ValueError as exc:
             raise SeedreamConfigError(
-                f"base_url端口无效: {exc}{_env_var_suffix('base_url')}"
+                _config_error(
+                    "base_url端口无效: {reason}{suffix}",
+                    "base_url",
+                    reason=as_detail(exc),
+                )
             ) from exc
         if base_url_port == 0:
-            raise SeedreamConfigError(f"base_url端口不得为 0{_env_var_suffix('base_url')}")
+            raise SeedreamConfigError(_config_error("base_url端口不得为 0{suffix}", "base_url"))
         if parsed_base_url.query or parsed_base_url.fragment:
             raise SeedreamConfigError(
-                f"base_url不能包含查询参数或片段{_env_var_suffix('base_url')}"
+                _config_error("base_url不能包含查询参数或片段{suffix}", "base_url")
             )
         # userinfo 会被 httpx 转为 URL Basic 认证并静默覆盖 Bearer 密钥头。
         if parsed_base_url.username is not None or parsed_base_url.password is not None:
             raise SeedreamConfigError(
-                f"base_url不能包含用户名密码等 userinfo{_env_var_suffix('base_url')}"
+                _config_error("base_url不能包含用户名密码等 userinfo{suffix}", "base_url")
             )
         if base_url_scheme == "http":
             if not self.allow_http_base_url:
                 raise SeedreamConfigError(
-                    "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝"
-                    f"{ERROR_TEXT_SEGMENT_JOINER}仅自建可信内网端点可设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免"
+                    assemble_error_segments(
+                        "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝",
+                        "仅自建可信内网端点可设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免",
+                    )
                 )
             self._build_warnings.append(
                 (
@@ -333,7 +370,7 @@ class SeedreamConfig:
     def _validate_model_selection(self) -> None:
         """校验 model_id 并展开别名为完整 Model ID。"""
         if not self.model_id or self.model_id.strip() == "":
-            raise SeedreamConfigError(f"model_id不能为空{_env_var_suffix('model_id')}")
+            raise SeedreamConfigError(_config_error("model_id不能为空{suffix}", "model_id"))
         _ensure_field_utf8_encodable(self.model_id, "model_id")
         # 展开后统一为小写，下线 token 子串检查随之为大小写不敏感。
         object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
@@ -341,16 +378,24 @@ class SeedreamConfig:
             aliases = "/".join(MODEL_ALIASES)
             deprecated = "/".join(sorted(DEPRECATED_MODEL_TOKENS))
             raise SeedreamConfigError(
-                f"已不支持的模型: {self.model_id}（{deprecated} 已下线），"
-                f"请使用 {aliases} 或对应 Endpoint ID{_env_var_suffix('model_id')}"
+                _config_error(
+                    "已不支持的模型: {model}（{deprecated} 已下线），"
+                    "请使用 {aliases} 或对应 Endpoint ID{suffix}",
+                    "model_id",
+                    model=as_text(self.model_id),
+                    deprecated=as_plain(deprecated),
+                    aliases=as_plain(aliases),
+                )
             )
 
     def _validate_default_size(self) -> None:
         """校验 default_size 为非空字符串并按模型能力标准化。"""
         if not isinstance(self.default_size, str):
-            raise SeedreamConfigError(f"default_size必须为字符串{_env_var_suffix('default_size')}")
+            raise SeedreamConfigError(
+                _config_error("default_size必须为字符串{suffix}", "default_size")
+            )
         if not self.default_size.strip():
-            raise SeedreamConfigError(f"default_size不能为空{_env_var_suffix('default_size')}")
+            raise SeedreamConfigError(_config_error("default_size不能为空{suffix}", "default_size"))
 
         normalized_default_size = self.default_size.strip()
         try:
@@ -361,7 +406,11 @@ class SeedreamConfig:
             )
         except SeedreamValidationError as exc:
             raise SeedreamConfigError(
-                f"default_size无效: {exc.message}{_env_var_suffix('default_size')}"
+                _config_error(
+                    "default_size无效: {reason}{suffix}",
+                    "default_size",
+                    reason=as_text(exc.message),
+                )
             ) from exc
 
     def _validate_client_timeouts(self) -> None:
@@ -369,67 +418,86 @@ class SeedreamConfig:
         for field_name in ("timeout", "api_timeout"):
             value = getattr(self, field_name)
             if value <= 0:
-                raise SeedreamConfigError(f"{field_name}必须大于0{_env_var_suffix(field_name)}")
+                raise SeedreamConfigError(
+                    _config_error(
+                        "{field_name}必须大于0{suffix}",
+                        field_name,
+                        field_name=as_plain(field_name),
+                    )
+                )
             try:
                 float(value)
             except OverflowError as exc:
                 # 原值回显会触发 int 字符串转换位数上限，仅报字段名。
                 raise SeedreamConfigError(
-                    f"{field_name}超出 float 可表示范围{_env_var_suffix(field_name)}"
+                    _config_error(
+                        "{field_name}超出 float 可表示范围{suffix}",
+                        field_name,
+                        field_name=as_plain(field_name),
+                    )
                 ) from exc
         if self.generate_concurrency < 1:
             raise SeedreamConfigError(
-                f"generate_concurrency必须不小于1{_env_var_suffix('generate_concurrency')}"
+                _config_error("generate_concurrency必须不小于1{suffix}", "generate_concurrency")
             )
         if self.max_retries < 0:
-            raise SeedreamConfigError(f"max_retries不能为负数{_env_var_suffix('max_retries')}")
+            raise SeedreamConfigError(_config_error("max_retries不能为负数{suffix}", "max_retries"))
 
     def _validate_log_settings(self) -> None:
         """校验日志三项：级别合法并规范化为大写，轮转与保留为正数。"""
         if self.log_level.upper() not in LEGAL_LOG_LEVELS:
             raise SeedreamConfigError(
-                f"log_level必须是以下值之一: {list(LEGAL_LOG_LEVELS)}"
-                f"{_env_var_suffix('log_level')}"
+                _config_error(
+                    "log_level必须是以下值之一: {legal}{suffix}",
+                    "log_level",
+                    legal=as_plain_list(list(LEGAL_LOG_LEVELS)),
+                )
             )
         object.__setattr__(self, "log_level", self.log_level.upper())
         if self.log_rotation_size <= 0:
             raise SeedreamConfigError(
-                f"log_rotation_size必须大于0{_env_var_suffix('log_rotation_size')}"
+                _config_error("log_rotation_size必须大于0{suffix}", "log_rotation_size")
             )
         if self.log_retention_days <= 0:
             raise SeedreamConfigError(
-                f"log_retention_days必须大于0{_env_var_suffix('log_retention_days')}"
+                _config_error("log_retention_days必须大于0{suffix}", "log_retention_days")
             )
 
     def _validate_auto_save_bounds(self) -> None:
         """校验自动保存各数值字段的下界与下载停滞超时的上界，总量上限显式 0 归一为 None。"""
         if self.auto_save_download_timeout <= 0:
             raise SeedreamConfigError(
-                "auto_save_download_timeout必须大于0"
-                f"{_env_var_suffix('auto_save_download_timeout')}"
+                _config_error(
+                    "auto_save_download_timeout必须大于0{suffix}", "auto_save_download_timeout"
+                )
             )
         if self.auto_save_download_timeout > _AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS:
             raise SeedreamConfigError(
-                f"auto_save_download_timeout不能大于{_AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS}"
-                "（会使下载总预算超过 .part 临时文件清扫宽限 24 小时，"
-                "在途慢下载的临时文件会被并发清扫）"
-                f"{_env_var_suffix('auto_save_download_timeout')}"
+                _config_error(
+                    "auto_save_download_timeout不能大于{max_seconds}"
+                    "（会使下载总预算超过 .part 临时文件清扫宽限 24 小时，"
+                    "在途慢下载的临时文件会被并发清扫）{suffix}",
+                    "auto_save_download_timeout",
+                    max_seconds=as_plain(_AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS),
+                )
             )
         if self.auto_save_max_retries < 0:
             raise SeedreamConfigError(
-                f"auto_save_max_retries不能小于0{_env_var_suffix('auto_save_max_retries')}"
+                _config_error("auto_save_max_retries不能小于0{suffix}", "auto_save_max_retries")
             )
         if self.auto_save_max_file_size <= 0:
             raise SeedreamConfigError(
-                "auto_save_max_file_size必须大于0" f"{_env_var_suffix('auto_save_max_file_size')}"
+                _config_error("auto_save_max_file_size必须大于0{suffix}", "auto_save_max_file_size")
             )
         if self.auto_save_max_concurrent <= 0:
             raise SeedreamConfigError(
-                "auto_save_max_concurrent必须大于0" f"{_env_var_suffix('auto_save_max_concurrent')}"
+                _config_error(
+                    "auto_save_max_concurrent必须大于0{suffix}", "auto_save_max_concurrent"
+                )
             )
         if self.auto_save_cleanup_days < 0:
             raise SeedreamConfigError(
-                f"auto_save_cleanup_days不能小于0{_env_var_suffix('auto_save_cleanup_days')}"
+                _config_error("auto_save_cleanup_days不能小于0{suffix}", "auto_save_cleanup_days")
             )
         if self.auto_save_max_total_bytes == 0 and not isinstance(
             self.auto_save_max_total_bytes, bool
@@ -437,27 +505,31 @@ class SeedreamConfig:
             object.__setattr__(self, "auto_save_max_total_bytes", None)
         if self.auto_save_max_total_bytes is not None and self.auto_save_max_total_bytes <= 0:
             raise SeedreamConfigError(
-                "auto_save_max_total_bytes必须大于0"
-                f"{_env_var_suffix('auto_save_max_total_bytes')}"
+                _config_error(
+                    "auto_save_max_total_bytes必须大于0{suffix}", "auto_save_max_total_bytes"
+                )
             )
 
     def _validate_streaming_bounds(self) -> None:
         """校验流式缓冲与响应体读取上限。"""
         if self.stream_buffer_max_size <= 0:
             raise SeedreamConfigError(
-                f"stream_buffer_max_size必须大于0{_env_var_suffix('stream_buffer_max_size')}"
+                _config_error("stream_buffer_max_size必须大于0{suffix}", "stream_buffer_max_size")
             )
         if (
             self.sse_event_max_size is not None
             and self.sse_event_max_size < self.derived_sse_event_max_size()
         ):
             raise SeedreamConfigError(
-                "sse_event_max_size不能低于单图 base64 最坏展开推导值，过小会截断合法图片事件"
-                f"{_env_var_suffix('sse_event_max_size')}"
+                _config_error(
+                    "sse_event_max_size不能低于单图 base64 最坏展开推导值，"
+                    "过小会截断合法图片事件{suffix}",
+                    "sse_event_max_size",
+                )
             )
         if self.response_body_limit is not None and self.response_body_limit <= 0:
             raise SeedreamConfigError(
-                f"response_body_limit必须大于0{_env_var_suffix('response_body_limit')}"
+                _config_error("response_body_limit必须大于0{suffix}", "response_body_limit")
             )
 
     def derived_sse_event_max_size(self) -> int:
@@ -475,17 +547,18 @@ class SeedreamConfig:
         """校验图像预处理并发与预处理缓存容量下界。"""
         if self.image_prepare_concurrency <= 0:
             raise SeedreamConfigError(
-                "image_prepare_concurrency必须大于0"
-                f"{_env_var_suffix('image_prepare_concurrency')}"
+                _config_error(
+                    "image_prepare_concurrency必须大于0{suffix}", "image_prepare_concurrency"
+                )
             )
 
         if self.prepare_cache_max < 1:
             raise SeedreamConfigError(
-                f"prepare_cache_max不能小于1{_env_var_suffix('prepare_cache_max')}"
+                _config_error("prepare_cache_max不能小于1{suffix}", "prepare_cache_max")
             )
         if self.prepare_cache_max_bytes < 1:
             raise SeedreamConfigError(
-                f"prepare_cache_max_bytes不能小于1{_env_var_suffix('prepare_cache_max_bytes')}"
+                _config_error("prepare_cache_max_bytes不能小于1{suffix}", "prepare_cache_max_bytes")
             )
 
     def _validate_dir_fields(self) -> None:
@@ -516,26 +589,34 @@ class SeedreamConfig:
         )
         if invalid_reason == "length":
             raise SeedreamConfigError(
-                f"http_auth_token 长度不得少于 {HTTP_AUTH_TOKEN_MIN_LENGTH} 字符"
-                f"{_env_var_suffix('http_auth_token')}"
+                _config_error(
+                    "http_auth_token 长度不得少于 {min_length} 字符{suffix}",
+                    "http_auth_token",
+                    min_length=as_plain(HTTP_AUTH_TOKEN_MIN_LENGTH),
+                )
             )
         if invalid_reason == "charset":
             raise SeedreamConfigError(
-                "http_auth_token 须为可打印ASCII字符" f"{_env_var_suffix('http_auth_token')}"
+                _config_error("http_auth_token 须为可打印ASCII字符{suffix}", "http_auth_token")
             )
         if self.http_max_body_size < _HTTP_MAX_BODY_SIZE_FLOOR:
             raise SeedreamConfigError(
-                f"http_max_body_size 不能低于 1MB（{_HTTP_MAX_BODY_SIZE_FLOOR} 字节）"
-                f"{_env_var_suffix('http_max_body_size')}"
+                _config_error(
+                    "http_max_body_size 不能低于 1MB（{floor} 字节）{suffix}",
+                    "http_max_body_size",
+                    floor=as_plain(_HTTP_MAX_BODY_SIZE_FLOOR),
+                )
             )
         if self.body_read_timeout <= 0:
             raise SeedreamConfigError(
-                f"body_read_timeout必须大于0{_env_var_suffix('body_read_timeout')}"
+                _config_error("body_read_timeout必须大于0{suffix}", "body_read_timeout")
             )
         if self.large_body_admission_concurrency < 1:
             raise SeedreamConfigError(
-                "large_body_admission_concurrency必须不小于1"
-                f"{_env_var_suffix('large_body_admission_concurrency')}"
+                _config_error(
+                    "large_body_admission_concurrency必须不小于1{suffix}",
+                    "large_body_admission_concurrency",
+                )
             )
         self._validate_http_allowed_hosts()
         self._validate_http_allowed_origins()
@@ -557,27 +638,40 @@ class SeedreamConfig:
             # Host 头值不含 scheme 与路径，条目写出这两者即配置错误。
             if "://" in entry or "/" in entry:
                 raise SeedreamConfigError(
-                    f"http_allowed_hosts 条目不得包含 scheme 或斜杠: {entry}"
-                    f"{_env_var_suffix('http_allowed_hosts')}"
+                    _config_error(
+                        "http_allowed_hosts 条目不得包含 scheme 或斜杠: {entry}{suffix}",
+                        "http_allowed_hosts",
+                        entry=as_text(entry),
+                    )
                 )
             # Host 头按 RFC 为 ASCII，IDN 主机以 punycode 传输，非 ASCII 条目永不
             # 匹配真实 Host 头。
             if not entry.isascii():
                 raise SeedreamConfigError(
-                    f"http_allowed_hosts 条目须为 ASCII 字符: {entry}"
-                    f"{_env_var_suffix('http_allowed_hosts')}"
+                    _config_error(
+                        "http_allowed_hosts 条目须为 ASCII 字符: {entry}{suffix}",
+                        "http_allowed_hosts",
+                        entry=as_text(entry),
+                    )
                 )
             # Host 头传输恒为小写，SDK 校验为字节级精确比较，大写条目永不匹配。
             if entry != entry.lower():
                 raise SeedreamConfigError(
-                    f"http_allowed_hosts 条目须全小写: {entry}"
-                    f"{_env_var_suffix('http_allowed_hosts')}"
+                    _config_error(
+                        "http_allowed_hosts 条目须全小写: {entry}{suffix}",
+                        "http_allowed_hosts",
+                        entry=as_text(entry),
+                    )
                 )
             decomposed = _decompose_allowed_host_entry(entry)
             if decomposed is None:
                 raise SeedreamConfigError(
-                    f"http_allowed_hosts 条目仅支持 host、host:port、host:* 形态: {entry}"
-                    f"{_env_var_suffix('http_allowed_hosts')}"
+                    _config_error(
+                        "http_allowed_hosts 条目仅支持 host、host:port、host:* 形态: "
+                        "{entry}{suffix}",
+                        "http_allowed_hosts",
+                        entry=as_text(entry),
+                    )
                 )
             host_part, port_part = decomposed
             # 方括号条目按 IPv6 字面量校验，畸形内容运行期永不匹配真实 Host 头。
@@ -586,8 +680,11 @@ class SeedreamConfig:
                 # Host 头按 RFC 6874 须以 %25 编码 zone-id，裸 % 条目永不匹配。
                 if "%" in literal:
                     raise SeedreamConfigError(
-                        f"http_allowed_hosts 方括号条目不得携带 zone-id: {entry}"
-                        f"{_env_var_suffix('http_allowed_hosts')}"
+                        _config_error(
+                            "http_allowed_hosts 方括号条目不得携带 zone-id: {entry}{suffix}",
+                            "http_allowed_hosts",
+                            entry=as_text(entry),
+                        )
                     )
                 _validate_ipv6_host_literal(
                     literal,
@@ -627,14 +724,21 @@ class SeedreamConfig:
         for entry in origins:
             if not entry.startswith(("http://", "https://")):
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目须以 http:// 或 https:// 开头: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目须以 http:// 或 https:// 开头: "
+                        "{entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             # Origin 头无路径成分，写出路径即配置错误。
             if "/" in entry.split("://", 1)[1]:
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目不得包含路径: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目不得包含路径: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             # 匹配为字面精确比较，死配置构建期拒绝：空主机、空标签、百分号编码、
             # 通配、query、fragment、userinfo、尾点与非压缩 IPv6 主机都永不匹配
@@ -644,32 +748,49 @@ class SeedreamConfig:
             except ValueError as exc:
                 # 括号畸形 IPv6 等形态使 urlparse 抛 ValueError，统一归为配置错误。
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目 URL 形态无效: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目 URL 形态无效: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 ) from exc
             # 空 userinfo（user@ 清理残留）的 username 为空串，按 is not None 判定。
             if parsed.query or parsed.fragment or parsed.username is not None:
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目不得包含 query、fragment 或 userinfo: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目不得包含 query、fragment 或 userinfo: "
+                        "{entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             hostname = parsed.hostname or ""
             if not hostname or hostname != hostname.rstrip("."):
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目主机为空或带尾点: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目主机为空或带尾点: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             # 前导点与连续点构成空标签主机，不是任何 Origin 头的合法序列化形态。
             if hostname.startswith(".") or ".." in hostname:
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目主机不得包含前导点或连续点: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目主机不得包含前导点或连续点: " "{entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             # 浏览器把百分号编码主机解码后发送，含 % 的条目永不匹配真实 Origin 头。
             if "%" in hostname:
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目主机不得包含百分号编码或 zone-id: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目主机不得包含百分号编码或 zone-id: "
+                        "{entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             # 方括号 IPv6 主机与 hosts 侧同口径，浏览器 Origin 序列化恒为压缩规范形。
             if ":" in hostname:
@@ -682,60 +803,91 @@ class SeedreamConfig:
             # 反斜杠不是任何 Origin 头的合法字符。
             if "\\" in entry:
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目不得包含反斜杠: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目不得包含反斜杠: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             # 空端口（尾随冒号被 urlparse 归一为 None）永不匹配真实 Origin 头。
             if parsed.netloc.endswith(":"):
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目端口为空: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目端口为空: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             if "*" in entry:
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目不支持通配，请写出精确 origin: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目不支持通配，请写出精确 origin: "
+                        "{entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             # CORS 与 SDK 内层为大小写敏感比较，浏览器 Origin 恒为小写，大写条目
             # 在部分层永不命中，构建期拒绝。
             if entry != entry.lower():
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目须全小写: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目须全小写: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             # 浏览器把非 ASCII 主机序列化为 ASCII 形态发送，非 ASCII 条目永不匹配
             # 真实 Origin 头。
             if not entry.isascii():
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目须为 ASCII 字符: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目须为 ASCII 字符: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             try:
                 port = parsed.port
             except ValueError:
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目端口须为数字: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
-                )
-            if port == 0:
-                raise SeedreamConfigError(
-                    f"http_allowed_origins 条目端口不得为 0: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目端口须为数字: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
             # 浏览器 Origin 序列化省略默认端口，默认端口与前导零端口条目永不
-            # 匹配真实头。
-            host_part = parsed.netloc.rsplit("]", 1)[-1]
-            port_text = host_part.rsplit(":", 1)[-1] if ":" in host_part else ""
-            if port_text and port_text != str(port):
+            # 匹配真实头；为零与前导零的拒绝口径与 hosts 侧共用同一端口谓词。
+            netloc_parts = _decompose_netloc(parsed.netloc)
+            if netloc_parts is None:
+                # 不可分解 netloc 与传输侧守卫同口径拒绝，不回退跳过端口校验。
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目端口不得含前导零: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目 URL 形态无效: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
+                )
+            port_text = netloc_parts.port_text
+            port_reason = _host_port_invalid_reason(port_text) if port_text else None
+            if port_reason is not None:
+                raise SeedreamConfigError(
+                    _config_error(
+                        "http_allowed_origins 条目{reason}: {entry}{suffix}",
+                        "http_allowed_origins",
+                        reason=as_plain(port_reason),
+                        entry=as_text(entry),
+                    )
                 )
             scheme = parsed.scheme.lower()
-            if (scheme, port) in (("https", 443), ("http", 80)):
+            if DEFAULT_SCHEME_PORTS.get(scheme) == port:
                 raise SeedreamConfigError(
-                    f"http_allowed_origins 条目不得写出默认端口，请省略: {entry}"
-                    f"{_env_var_suffix('http_allowed_origins')}"
+                    _config_error(
+                        "http_allowed_origins 条目不得写出默认端口，请省略: {entry}{suffix}",
+                        "http_allowed_origins",
+                        entry=as_text(entry),
+                    )
                 )
 
     def _validate_request_state_keys(self) -> None:
@@ -760,13 +912,24 @@ class SeedreamConfig:
             dir_path = Path(value).expanduser()
             if dir_path.exists() and not dir_path.is_dir():
                 raise SeedreamConfigError(
-                    f"{field_name}不是有效目录: {value}{_env_var_suffix(field_name)}"
+                    _config_error(
+                        "{field_name}不是有效目录: {value}{suffix}",
+                        field_name,
+                        field_name=as_plain(field_name),
+                        value=as_text(value),
+                    )
                 )
         except SeedreamConfigError:
             raise
         except Exception as exc:
             raise SeedreamConfigError(
-                f"{field_name}路径无效: {value} -> {exc}{_env_var_suffix(field_name)}"
+                _config_error(
+                    "{field_name}路径无效: {value} -> {reason}{suffix}",
+                    field_name,
+                    field_name=as_plain(field_name),
+                    value=as_text(value),
+                    reason=as_detail(exc),
+                )
             ) from exc
 
     @classmethod
@@ -805,7 +968,7 @@ class SeedreamConfig:
 
 def _first_invalid_request_state_key_message(
     keys: tuple[bytes, ...],
-) -> str | None:
+) -> ErrorText | None:
     """返回密钥环内首个不合规键的报错消息，全部合规时为 None。
 
     同键既短又重复时按短键计；导入期预检共用本判定，环规则单源维护。
@@ -813,17 +976,17 @@ def _first_invalid_request_state_key_message(
     seen: set[bytes] = set()
     for index, key in enumerate(keys, start=1):
         if len(key) < _REQUEST_STATE_KEY_MIN_BYTES:
-            return (
-                f"request_state_secret_keys 第 {index} 个密钥解码后仅 {len(key)} 字节，"
-                f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串"
-                f"{ERROR_TEXT_SEGMENT_JOINER}生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
-                f"{_env_var_suffix('request_state_secret_keys')}"
+            return _request_state_key_rule_error(
+                _REQUEST_STATE_KEY_TOO_SHORT_SEGMENT,
+                index=as_plain(index),
+                length=as_plain(len(key)),
             )
         if key in seen:
-            return (
-                f"request_state_secret_keys 第 {index} 个密钥与在先密钥重复，"
-                f"轮换环内同一密钥只需登记一次"
-                f"{_env_var_suffix('request_state_secret_keys')}"
+            return _config_error(
+                "request_state_secret_keys 第 {index} 个密钥与在先密钥重复，"
+                "轮换环内同一密钥只需登记一次{suffix}",
+                "request_state_secret_keys",
+                index=as_plain(index),
             )
         seen.add(key)
     return None

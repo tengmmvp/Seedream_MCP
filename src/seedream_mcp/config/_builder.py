@@ -11,10 +11,14 @@ import os
 import threading
 from typing import Any, Callable, Mapping
 
-from ..utils.core.errors import SeedreamConfigError
+from ..utils.core.errors import (
+    SeedreamConfigError,
+    as_text,
+    assemble_error_segments,
+    error_text,
+)
 from ..utils.core.executors import register_cpu_offload_depth_provider
 from ..utils.core.logs import get_logger
-from ..utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 from ..utils.io.path import (
     clear_resolved_env_root_cache,
     register_data_root_provider,
@@ -23,11 +27,14 @@ from ..utils.io.path import (
 from ._model import SeedreamConfig, _first_invalid_request_state_key_message
 from .sources import (
     _BUILD_WARNINGS,
+    _CWD_ENV_INJECTION_WARNING_TEMPLATE,
+    _CWD_ENV_OVERRIDE_WARNING_TEMPLATE,
     _FIELD_ENV_MAP,
     _FIELD_PICKERS,
     _FILE_SUPPLYING_LAYERS,
     _KNOWN_OVERRIDE_KEYS,
     _ROOT_DISPLACING_LAYERS,
+    _UNTRUSTED_CWD_ENV_GUIDANCE,
     _decode_request_state_key_entries,
     _normalize_field_name_overrides,
     _override_key_for_field,
@@ -127,10 +134,14 @@ def _build_config_unlocked_body(
         ):
             _BUILD_WARNINGS.append(
                 "ERROR",
-                f"当前工作目录 .env（{runtime_injection.env_path}）覆盖了项目根 .env"
-                f"（{runtime_injection.default_env_path}）的配置值"
-                f"{ERROR_TEXT_SEGMENT_JOINER}进程工作目录不受控时其中的 .env 可能注入非预期配置，"
-                "请确认启动目录可信",
+                assemble_error_segments(
+                    error_text(
+                        _CWD_ENV_OVERRIDE_WARNING_TEMPLATE,
+                        env_path=as_text(runtime_injection.env_path),
+                        default_env_path=as_text(runtime_injection.default_env_path),
+                    ),
+                    _UNTRUSTED_CWD_ENV_GUIDANCE,
+                ),
             )
         # 注入清单对独有键逐键反查取值链判定，仅实际由文件层供值的登记键计入。
         effective_keys = sorted(
@@ -141,10 +152,14 @@ def _build_config_unlocked_body(
         if effective_keys:
             _BUILD_WARNINGS.append(
                 "WARNING",
-                f"当前工作目录 .env（{runtime_injection.env_path}）注入了项目根 .env"
-                f"未包含的配置键（{', '.join(effective_keys)}）"
-                f"{ERROR_TEXT_SEGMENT_JOINER}进程工作目录不受控时其中的 .env 可能注入非预期配置，"
-                "请确认启动目录可信",
+                assemble_error_segments(
+                    error_text(
+                        _CWD_ENV_INJECTION_WARNING_TEMPLATE,
+                        env_path=as_text(runtime_injection.env_path),
+                        keys=as_text(", ".join(effective_keys)),
+                    ),
+                    _UNTRUSTED_CWD_ENV_GUIDANCE,
+                ),
             )
     config = SeedreamConfig(**config_kwargs)
     _BUILD_WARNINGS.extend(config._build_warnings)

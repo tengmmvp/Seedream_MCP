@@ -5,13 +5,24 @@ from __future__ import annotations
 import os
 from dataclasses import MISSING, field, fields
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, NamedTuple, Sequence
+from typing import Any, Callable, Literal, Mapping, NamedTuple, NoReturn, Sequence, TypeVar
 
 from dotenv import dotenv_values
 
-from ..utils.core.errors import SeedreamConfigError, has_message_value
+from ..utils.core.errors import (
+    ErrorText,
+    SeedreamConfigError,
+    _TextParam,
+    as_detail,
+    as_plain,
+    as_text,
+    assemble_error_segments,
+    error_text,
+    has_message_value,
+    raw_error_text,
+)
 from ..utils.core.logs import EarlyMessageBuffer
-from ..utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER, is_printable_ascii
+from ..utils.core.sanitizers import is_printable_ascii
 from ..utils.core.validators import INT_TEXT_PATTERN, parse_bool
 from ..utils.model.capabilities import MODEL_ALIASES
 
@@ -99,15 +110,34 @@ def override_key_for_env(env_key: str) -> str | None:
     return _ENV_OVERRIDE_KEY_MAP.get(env_key)
 
 
+def _env_hint_suffix(env_name: str) -> str:
+    """环境变量名提示后缀：字段名反查与 env_key 直供两条注入路径共用。"""
+    return f"（环境变量 {env_name}）"
+
+
 def _env_var_suffix(field_name: str) -> str:
     """反查字段对应的环境变量名，生成校验错误消息的变量名提示后缀。
 
-    无法反查的字段名返回空串。
+    未登记的字段名直接拒绝：拼错字段名静默丢失提示的缺陷在构造期暴露。
     """
     env_name = _FIELD_ENV_MAP.get(field_name) or _NON_METADATA_FIELD_ENV.get(field_name)
-    if not env_name:
-        return ""
-    return f"（环境变量 {env_name}）"
+    if env_name is None:
+        raise ValueError(
+            raw_error_text(
+                "_env_var_suffix 未登记字段: {field_name}", field_name=as_plain(field_name)
+            )
+        )
+    return _env_hint_suffix(env_name)
+
+
+def _config_error(template: str, field: str, **params: _TextParam) -> ErrorText:
+    """构造配置校验错误文本，自动注入 field 环境变量名提示的 {suffix} 参数。
+
+    形参名避开 field_name：以 {field_name} 为占位名的模板经同名关键字参数进入
+    params，不与形参撞名。模板须含 {suffix} 占位；未登记的字段名在
+    _env_var_suffix 直接拒绝。
+    """
+    return error_text(template, suffix=as_plain(_env_var_suffix(field)), **params)
 
 
 def _ensure_field_utf8_encodable(value: str, field_name: str) -> None:
@@ -116,7 +146,11 @@ def _ensure_field_utf8_encodable(value: str, field_name: str) -> None:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise SeedreamConfigError(
-            f"{field_name}包含无法编码的字符{_env_var_suffix(field_name)}"
+            _config_error(
+                "{field_name}包含无法编码的字符{suffix}",
+                field_name,
+                field_name=as_plain(field_name),
+            )
         ) from exc
 
 
@@ -158,30 +192,39 @@ def normalize_model_selector(value: object) -> str:
     return MODEL_ALIASES.get(normalized, normalized)
 
 
+# 整数解析失败文案的共用模板：拒绝值以分类参数进入，parse_int 各失败分支共享单一来源。
+_UNPARSEABLE_INT_TEMPLATE = "无法解析整数值: {value}"
+
+
 def parse_int(value: object) -> int:
     """将值解析为整数。
 
     Raises:
         SeedreamConfigError: 值为空、布尔或无法解析为整数。
     """
+
+    def _reject(cause: BaseException | None = None) -> NoReturn:
+        error = SeedreamConfigError(error_text(_UNPARSEABLE_INT_TEMPLATE, value=as_text(value)))
+        raise error from cause
+
     if isinstance(value, bool):
-        raise SeedreamConfigError(f"无法解析整数值: {value!r}")
+        _reject()
     if isinstance(value, int):
         return value
     if value is None:
-        raise SeedreamConfigError(f"无法解析整数值: {value}")
+        _reject()
 
     normalized = str(value).strip()
     if not normalized:
-        raise SeedreamConfigError(f"无法解析整数值: {value}")
+        _reject()
 
     if not INT_TEXT_PATTERN.fullmatch(normalized):
-        raise SeedreamConfigError(f"无法解析整数值: {value}")
+        _reject()
     try:
         return int(normalized)
     except ValueError as exc:
         # 超长数字串超出解释器转换上限时同样归一为配置错误。
-        raise SeedreamConfigError(f"无法解析整数值: {value}") from exc
+        _reject(exc)
 
 
 class _RuntimeEnvInjection(NamedTuple):
@@ -195,6 +238,20 @@ class _RuntimeEnvInjection(NamedTuple):
     default_env_path: Path
     overlapping_keys: frozenset[str]
     exclusive_keys: frozenset[str]
+
+
+# CWD .env 告警文案单源：覆盖、注入（_builder）与隐式加载（本模块）三类告警共用
+# 同一指引尾段，路径与键名经分类参数进入模板。
+_UNTRUSTED_CWD_ENV_GUIDANCE = (
+    "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信"
+)
+_CWD_ENV_OVERRIDE_WARNING_TEMPLATE = (
+    "当前工作目录 .env（{env_path}）覆盖了项目根 .env（{default_env_path}）的配置值"
+)
+_CWD_ENV_INJECTION_WARNING_TEMPLATE = (
+    "当前工作目录 .env（{env_path}）注入了项目根 .env未包含的配置键（{keys}）"
+)
+_CWD_ENV_IMPLICIT_LOAD_WARNING_TEMPLATE = "已加载当前工作目录 .env（{env_path}）"
 
 
 def _read_env_values(env_file: str | None) -> tuple[dict[str, str], _RuntimeEnvInjection | None]:
@@ -212,9 +269,21 @@ def _read_env_values(env_file: str | None) -> tuple[dict[str, str], _RuntimeEnvI
             values = dotenv_values(path, encoding="utf-8-sig")
         except OSError as exc:
             # 读取失败统一包装为含路径与原因的配置错误，经 cli_main 优雅错误路径输出。
-            raise SeedreamConfigError(f"配置文件不可读: {path} -> {exc}") from exc
+            raise SeedreamConfigError(
+                error_text(
+                    "配置文件不可读: {path} -> {reason}",
+                    path=as_text(path),
+                    reason=as_detail(exc),
+                )
+            ) from exc
         except UnicodeDecodeError as exc:
-            raise SeedreamConfigError(f"配置文件编码错误: {path} 需为 UTF-8 编码 -> {exc}") from exc
+            raise SeedreamConfigError(
+                error_text(
+                    "配置文件编码错误: {path} 需为 UTF-8 编码 -> {reason}",
+                    path=as_text(path),
+                    reason=as_detail(exc),
+                )
+            ) from exc
         return {k: str(v) for k, v in values.items() if v is not None}
 
     def _prepare_env_path(raw: str | Path) -> Path:
@@ -222,12 +291,18 @@ def _read_env_values(env_file: str | None) -> tuple[dict[str, str], _RuntimeEnvI
         try:
             return Path(raw).expanduser().resolve()
         except (OSError, RuntimeError) as exc:
-            raise SeedreamConfigError(f"配置文件不可读: {raw} -> {exc}") from exc
+            raise SeedreamConfigError(
+                error_text(
+                    "配置文件不可读: {path} -> {reason}",
+                    path=as_text(raw),
+                    reason=as_detail(exc),
+                )
+            ) from exc
 
     if isinstance(env_file, str) and _value_is_set(env_file):
         env_path = _prepare_env_path(env_file)
         if not env_path.is_file():
-            raise SeedreamConfigError(f"配置文件不存在: {env_path}")
+            raise SeedreamConfigError(error_text("配置文件不存在: {path}", path=as_text(env_path)))
         return _load_single_env_file(env_path), None
 
     default_values: dict[str, str] = {}
@@ -252,9 +327,12 @@ def _read_env_values(env_file: str | None) -> tuple[dict[str, str], _RuntimeEnvI
             # 项目根 .env 缺失或无有效键时 CWD .env 是唯一来源，属隐式加载。
             _BUILD_WARNINGS.append(
                 "WARNING",
-                f"已加载当前工作目录 .env（{runtime_env_path}）"
-                f"{ERROR_TEXT_SEGMENT_JOINER}进程工作目录不受控时其中的 .env 可能注入非预期配置，"
-                "请确认启动目录可信",
+                assemble_error_segments(
+                    error_text(
+                        _CWD_ENV_IMPLICIT_LOAD_WARNING_TEMPLATE, env_path=as_text(runtime_env_path)
+                    ),
+                    _UNTRUSTED_CWD_ENV_GUIDANCE,
+                ),
             )
 
     return {**default_values, **runtime_values}, injection
@@ -361,6 +439,35 @@ def _pick_optional_str_tuple(
     )
 
 
+# 密钥环报错段单源：解码失败与强度不足两类报错共用同一格式要求段与生成命令段
+# （_model 经导入引用），失败类别首段各异、以「，」衔接格式要求段。
+_REQUEST_STATE_KEY_HEX_RULE_SEGMENT = "每键须为解码后不少于 {min_bytes} 字节的十六进制串"
+_REQUEST_STATE_KEYGEN_HINT_SEGMENT = "生成命令: {command}{suffix}"
+_REQUEST_STATE_KEY_NON_HEX_SEGMENT = (
+    "request_state_secret_keys 第 {index} 个条目不是合法的十六进制密钥，"
+    + _REQUEST_STATE_KEY_HEX_RULE_SEGMENT
+)
+_REQUEST_STATE_KEY_TOO_SHORT_SEGMENT = (
+    "request_state_secret_keys 第 {index} 个密钥解码后仅 {length} 字节，"
+    + _REQUEST_STATE_KEY_HEX_RULE_SEGMENT
+)
+
+
+def _request_state_key_rule_error(first_segment: str, **params: _TextParam) -> ErrorText:
+    """拼装密钥环规则报错：生成命令段与 min_bytes、command、suffix 在此单点注入。
+
+    first_segment 携带失败类别与格式要求（见上方段常量），params 供 index、length
+    等失败类别参数进入。
+    """
+    return _config_error(
+        assemble_error_segments(first_segment, _REQUEST_STATE_KEYGEN_HINT_SEGMENT),
+        "request_state_secret_keys",
+        min_bytes=as_plain(_REQUEST_STATE_KEY_MIN_BYTES),
+        command=as_plain(_REQUEST_STATE_KEYGEN_COMMAND),
+        **params,
+    )
+
+
 def _decode_request_state_key_entries(
     entries: Sequence[str] | None,
 ) -> tuple[bytes, ...] | None:
@@ -380,10 +487,9 @@ def _decode_request_state_key_entries(
             material.append(bytes.fromhex(entry))
         except ValueError as exc:
             raise SeedreamConfigError(
-                f"request_state_secret_keys 第 {effective_index} 个条目不是合法的十六进制密钥，"
-                f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串"
-                f"{ERROR_TEXT_SEGMENT_JOINER}生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
-                f"{_env_var_suffix('request_state_secret_keys')}"
+                _request_state_key_rule_error(
+                    _REQUEST_STATE_KEY_NON_HEX_SEGMENT, index=as_plain(effective_index)
+                )
             ) from exc
     return tuple(material) or None
 
@@ -400,15 +506,29 @@ def _pick_request_state_key_bytes(
     )
 
 
-def _parse_int_with_env_hint(value: object, field_name: str) -> int:
-    """parse_int 的字段级包装，解析失败的消息附带该字段环境变量名提示。
+_ParseResultT = TypeVar("_ParseResultT")
 
-    parse_int 仅接收取值、不知字段来源，环境变量名提示统一在取值层补充。
+
+def _parse_with_env_hint(
+    parser: Callable[[object], _ParseResultT],
+    value: object,
+    env_key: str,
+) -> _ParseResultT:
+    """底层解析器的字段级包装，解析失败的消息附带该字段环境变量名提示。
+
+    取值辅助的 field_name 形参收到的是 override 别名键（watermark/web 等），
+    经字段名反查会落空，提示由 env_key 直供。
     """
     try:
-        return parse_int(value)
+        return parser(value)
     except SeedreamConfigError as exc:
-        raise SeedreamConfigError(f"{exc.message}{_env_var_suffix(field_name)}") from exc
+        raise SeedreamConfigError(
+            error_text(
+                "{message}{suffix}",
+                message=as_text(exc.message),
+                suffix=as_plain(_env_hint_suffix(env_key)),
+            )
+        ) from exc
 
 
 def _pick_int(
@@ -417,9 +537,10 @@ def _pick_int(
     env_key: str,
     env_values: Mapping[str, str],
 ) -> int:
-    return _parse_int_with_env_hint(
+    return _parse_with_env_hint(
+        parse_int,
         _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key]),
-        field_name,
+        env_key,
     )
 
 
@@ -432,15 +553,7 @@ def _pick_optional_int(
     raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     if raw is None or not str(raw).strip():
         return None
-    return _parse_int_with_env_hint(raw, field_name)
-
-
-def _parse_bool_with_env_hint(value: object, field_name: str) -> bool:
-    """parse_bool 的字段级包装，解析失败的消息附带该字段环境变量名提示。"""
-    try:
-        return parse_bool(value)
-    except SeedreamConfigError as exc:
-        raise SeedreamConfigError(f"{exc.message}{_env_var_suffix(field_name)}") from exc
+    return _parse_with_env_hint(parse_int, raw, env_key)
 
 
 def _pick_bool(
@@ -449,9 +562,10 @@ def _pick_bool(
     env_key: str,
     env_values: Mapping[str, str],
 ) -> bool:
-    return _parse_bool_with_env_hint(
+    return _parse_with_env_hint(
+        parse_bool,
         _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key]),
-        field_name,
+        env_key,
     )
 
 

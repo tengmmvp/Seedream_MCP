@@ -1,4 +1,4 @@
-"""Host 语法内核：允许列表条目分解与绑定地址合法性判定。
+"""Host 语法内核：Host 头 netloc 分解、允许列表条目分解与绑定地址合法性判定。
 
 中立语法模块，除 utils/core/sanitizers 的字符集判定与 utils/core/http_int 的
 整数解析外无项目内依赖，config 的构建期条目校验、transport 的中间件匹配与
@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import ipaddress
+from typing import NamedTuple
 
 from ..utils.core.http_int import strict_http_int
 from ..utils.core.sanitizers import is_printable_ascii
@@ -47,15 +48,68 @@ def _bracket_ipv6_literal(entry: str) -> str | None:
 _HOST_PART_FORBIDDEN_SYMBOLS = frozenset(":*[],#?@%")
 
 
+def _host_port_invalid_reason(port_text: str) -> str | None:
+    """端口文本的拒绝原因子句：非纯数字或超范围、为零、含前导零，合法返回 None。
+
+    数值解析委托 strict_http_int，超长数字串归 None，避免裸 int() 的 ValueError
+    逃逸破坏配置层错误契约；'+5'、' 5'、'1_0' 等裸 int() 可解析形态一律按非数字
+    归因。零档前置于前导零档，"00" 归"不得为 0"。
+    """
+    port = strict_http_int(port_text)
+    if port is None or port > 65535:
+        return "端口须为数字"
+    if port == 0:
+        return "端口不得为 0"
+    if port_text != str(port):
+        return "端口不得含前导零"
+    return None
+
+
 def _is_valid_host_port(port_text: str) -> bool:
     """Host 允许列表条目与 Host 头匹配共用的端口谓词：1-65535 且无前导零的纯 ASCII 数字。
 
     SDK 的 Host 校验为精确串比较，前导零端口虽数值合法但与客户端规范化形态不匹配，
-    按无效拒绝；数值解析委托 strict_http_int，超长数字串归 None，避免裸 int() 的
-    ValueError 逃逸破坏配置层错误契约。
+    按无效拒绝；拒绝口径与原因细分单源于 _host_port_invalid_reason。
     """
-    port = strict_http_int(port_text)
-    return port is not None and not port_text.startswith("0") and port <= 65535
+    return _host_port_invalid_reason(port_text) is None
+
+
+# URL 序列化省略的 scheme 默认端口：transport 同源比对的端口归一与 config
+# origins 条目的默认端口拒绝共用此单一表示。
+DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
+
+
+class _NetlocParts(NamedTuple):
+    """Host 头形态 netloc 的结构分解成分。
+
+    host 为主机段（方括号形态为括号内字面量，其余为末冒号前整段），port_text
+    为末冒号后端口文本（无端口与空端口同为空串），bracketed 标记方括号形态。
+    """
+
+    host: str
+    port_text: str
+    bracketed: bool
+
+
+def _decompose_netloc(netloc: str) -> _NetlocParts | None:
+    """分解 Host 头形态 netloc 的主机段与端口文本，无法分解的形态返回 None。
+
+    方括号形态按首个右括号定位主机字面量，未闭合或闭合后尾随非冒号内容的
+    形态返回 None；其余形态按末冒号切分。仅做结构分解，端口合法性、userinfo
+    与游离右括号等接受策略由各消费方自定。
+    """
+    if netloc.startswith("["):
+        end = netloc.find("]")
+        if end == -1:
+            return None
+        remainder = netloc[end + 1 :]
+        if remainder and not remainder.startswith(":"):
+            return None
+        return _NetlocParts(netloc[1:end], remainder[1:], True)
+    idx = netloc.rfind(":")
+    if idx == -1:
+        return _NetlocParts(netloc, "", False)
+    return _NetlocParts(netloc[:idx], netloc[idx + 1 :], False)
 
 
 def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:

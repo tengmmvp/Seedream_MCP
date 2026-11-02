@@ -6,11 +6,14 @@
 优雅错误路径输出；弃用模型错误提示从 DEPRECATED_MODEL_TOKENS 派生，新增下线模型
 自动同步；工作区根提供者在配置构建抛 OSError 时回退环境变量，不让异常沿
 provider 上抛；下载停滞超时超过 720 秒会使下载总预算反超 .part 清扫宽限，在
-构造期拒绝。
+构造期拒绝；环境变量名提示后缀经 _config_error 工厂单点注入，工厂调用处的
+字段字面量按登记表枚举守护，未登记字段由生产者在构造期直接拒绝，别名字段的
+提示经 env_key 直供。
 """
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 
@@ -18,6 +21,7 @@ import pytest
 
 from seedream_mcp.config import sources as config_sources
 from seedream_mcp.config import _builder as config_module
+from seedream_mcp.config import _model as config_model
 from seedream_mcp.config.sources import _read_env_values
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamConfigError
@@ -142,3 +146,75 @@ def test_auto_save_download_timeout_bound_aligns_with_part_sweep_grace() -> None
 
     assert "720" in excinfo.value.message
     assert "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT" in excinfo.value.message
+
+
+def test_config_error_factory_field_literals_are_registered_fields() -> None:
+    """_config_error 工厂调用处的字段字面量均落在字段环境登记表内。
+
+    未登记字段由生产者侧直接拒绝，运行期不再静默丢失提示；字面量仍在此静态
+    枚举，冷分支的拼写错误在测试期即暴露，不必等对应配置错误被实际触发，
+    变量转发形态由生产者侧拒绝兜底。
+    """
+    known_fields = set(config_sources._FIELD_ENV_MAP) | set(config_sources._NON_METADATA_FIELD_ENV)
+    offenders: list[str] = []
+    for module in (config_sources, config_model):
+        module_file = module.__file__
+        assert module_file is not None
+        tree = ast.parse(Path(module_file).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_config_error"
+            ):
+                continue
+            field_exprs = [
+                *node.args[1:2],
+                *(keyword.value for keyword in node.keywords if keyword.arg == "field"),
+            ]
+            offenders += [
+                f"{module.__name__}: 第 {expr.lineno} 行 {expr.value}"
+                for expr in field_exprs
+                if isinstance(expr, ast.Constant)
+                and isinstance(expr.value, str)
+                and expr.value not in known_fields
+            ]
+
+    assert offenders == [], f"_config_error 字段字面量未登记环境变量绑定: {offenders}"
+
+
+def test_env_var_suffix_registered_fields_render_env_hint() -> None:
+    """登记字段（含非 metadata 登记的 api_key）的环境变量提示后缀保持既有形态。"""
+    assert config_sources._env_var_suffix("timeout") == "（环境变量 SEEDREAM_TIMEOUT）"
+    assert config_sources._env_var_suffix("api_key") == "（环境变量 ARK_API_KEY）"
+
+
+def test_env_var_suffix_unregistered_field_raises() -> None:
+    """未登记字段名在 _env_var_suffix 构造期直接拒绝，不静默返回空后缀。"""
+    with pytest.raises(ValueError, match="timeouts"):
+        config_sources._env_var_suffix("timeouts")
+
+
+def test_config_error_unregistered_field_raises() -> None:
+    """_config_error 经字段名反查快败，不产出丢失提示的退化消息。"""
+    with pytest.raises(ValueError, match="timeouts"):
+        config_sources._config_error("无效值{suffix}", "timeouts")
+
+
+def test_forwarded_field_name_typo_raises_on_first_trigger() -> None:
+    """形参转发的拼错字段名（不在字面量枚举判定面）首次触发即 raise。"""
+    with pytest.raises(ValueError, match="base_urls"):
+        config_sources._ensure_field_utf8_encodable("\udcff", "base_urls")
+
+
+def test_alias_bool_parse_error_keeps_env_var_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """override 别名字段（web）的解析失败消息附带环境变量提示。
+
+    取值辅助收到的是别名键，经字段名反查落空会使提示静默丢失，提示经
+    env_key 直供后别名字段与其余字段同口径。
+    """
+    monkeypatch.setenv("ARK_API_KEY", "test_key")
+    monkeypatch.setenv("SEEDREAM_WEB_ENABLED", "not-a-bool")
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 SEEDREAM_WEB_ENABLED"):
+        config_module.build_config_from_sources()

@@ -975,6 +975,9 @@ def test_build_config_blank_http_allowed_origins_is_none(
         ("https://APP.example.com", "小写"),
         ("https://app.example.com:", "端口为空"),
         ("https://app.example.com:0", "不得为 0"),
+        ("https://app.example.com:00", "不得为 0"),
+        ("https://app.example.com:65536", "端口须为数字"),
+        ("https://app.example.com:+8443", "端口须为数字"),
         ("https://app.example.com\\evil", "反斜杠"),
         ("https://app.example.com:443", "默认端口"),
         ("http://app.example.com:80", "默认端口"),
@@ -2165,7 +2168,7 @@ def test_first_invalid_request_state_key_message_reports_first_violation(
     if expected_fragment is None:
         assert message is None
     else:
-        assert message is not None and expected_fragment in message
+        assert message is not None and expected_fragment in message.raw_text()
 
 
 def test_seedream_config_accepts_programmatic_request_state_key_ring() -> None:
