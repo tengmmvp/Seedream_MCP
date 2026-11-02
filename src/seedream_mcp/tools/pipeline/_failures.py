@@ -1,6 +1,6 @@
 """生成失败归一化与分级记录。
 
-错误消息提取脱敏、错误码分类、失败指引查表与分级日志；并行请求的失败原因
+错误消息提取脱敏、错误码分类、通用失败指引与分级日志；并行请求的失败原因
 提取复用同一归一化。
 """
 
@@ -46,16 +46,9 @@ def _classify_generation_error_type(exc: Exception) -> str:
     return resolve_error_profile(exc).error_code
 
 
-# 带 user_hint 的档案由 execute_generation_handler 错误分支直接采用 hint，查表仅覆盖无 hint 的档案。
-_FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
-    "config_error": "请检查服务端配置后重试。",
-}
+# 失败排查建议统一回退通用文案：定向指引归位错误档案 user_hint（config_error 等），
+# 由 format_error_for_user 拼接承担；无 hint 档案经 _execute 错误分支以本建议补充。
 _DEFAULT_FAILURE_GUIDANCE = "请根据错误信息排查后重试。"
-
-
-def _failure_guidance_for_code(error_code: str) -> str:
-    """按归约档案错误码选择失败排查建议，未命中回退通用建议。"""
-    return _FAILURE_GUIDANCE_BY_ERROR_CODE.get(error_code, _DEFAULT_FAILURE_GUIDANCE)
 
 
 def log_tiered_failure(
@@ -63,6 +56,7 @@ def log_tiered_failure(
     exc: Exception,
     failure_template: str,
     *template_args: Any,
+    user_facing: str | None = None,
     unexpected_template: str | None = None,
     unexpected_level: Literal["error", "warning"] = "error",
 ) -> None:
@@ -70,14 +64,17 @@ def log_tiered_failure(
 
     Args:
         logger: 记录日志的 logger。
-        exc: 待归类的异常。
+        exc: 待分级的异常；业务异常层缺省 user_facing 时经 format_error_for_user 渲染。
         failure_template: 业务异常层的消息模板，格式化错误文案以 ": {}" 追加在尾部。
         template_args: 消息模板的格式化参数。
+        user_facing: 调用方对同一异常单次计算的 format_error_for_user 产物，
+            业务异常层以 ": {}" 追加在消息尾部；缺省时业务分支对该异常自行渲染。
         unexpected_template: 非预期异常层的消息模板，缺省复用 failure_template。
         unexpected_level: 非预期异常的记录级别。
     """
     if isinstance(exc, SeedreamMCPError):
-        logger.warning(failure_template + ": {}", *template_args, format_error_for_user(exc))
+        rendered = user_facing if user_facing is not None else format_error_for_user(exc)
+        logger.warning(failure_template + ": {}", *template_args, rendered)
         return
     template = failure_template if unexpected_template is None else unexpected_template
     if unexpected_level == "warning":

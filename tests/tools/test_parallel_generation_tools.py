@@ -601,3 +601,97 @@ async def test_parallel_batch_aggregates_unexpected_exception() -> None:
     assert result["success"] is False
     assert any("非预期异常" in message for message in logger.warnings)
     assert any(kwargs.get("exception") is not None for kwargs in logger.opt_kwargs)
+
+
+# ==================== 分级失败日志契约 ====================
+
+
+def test_log_tiered_failure_business_branch_renders_user_facing_by_default() -> None:
+    """业务异常层缺省自行渲染用户文案：不传 user_facing 时尾部追加同一异常的净化产物。"""
+    from seedream_mcp.tools.pipeline import log_tiered_failure
+    from seedream_mcp.utils.core.errors import format_error_for_user
+    from _lib.log_fakes import RecordingLogger
+
+    exc = SeedreamAPIError("上游拒绝", status_code=429)
+    logger = RecordingLogger()
+
+    log_tiered_failure(cast(Any, logger), exc, "并行请求 {}/{} 失败", 2, 3)
+
+    assert logger.warnings == [f"并行请求 2/3 失败: {format_error_for_user(exc)}"]
+
+
+def test_log_tiered_failure_business_branch_consumes_provided_user_facing() -> None:
+    """显式传入的 user_facing 单次计算产物被原样消费，_execute/浏览/模型信息复用契约不漂移。"""
+    from seedream_mcp.tools.pipeline import log_tiered_failure
+    from _lib.log_fakes import RecordingLogger
+
+    exc = SeedreamValidationError("参数非法", field="prompt", value=None)
+    logger = RecordingLogger()
+
+    log_tiered_failure(cast(Any, logger), exc, "处理失败", user_facing="预计算用户文案")
+
+    assert logger.warnings == ["处理失败: 预计算用户文案"]
+
+
+def test_log_tiered_failure_unexpected_branch_skips_user_facing_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非预期异常层不渲染用户文案：该层不消费渲染产物，聚合出口对同一异常另行渲染。"""
+    import seedream_mcp.tools.pipeline._failures as failures_module
+    from seedream_mcp.tools.pipeline import log_tiered_failure
+    from seedream_mcp.utils.core.errors import format_error_for_user
+    from _lib.log_fakes import RecordingLogger
+
+    render_calls: list[Exception] = []
+    real_render = format_error_for_user
+
+    def _counting_render(error: Exception) -> str:
+        render_calls.append(error)
+        return real_render(error)
+
+    monkeypatch.setattr(failures_module, "format_error_for_user", _counting_render)
+    logger = RecordingLogger()
+
+    log_tiered_failure(
+        cast(Any, logger),
+        RuntimeError("boom"),
+        "并行请求 {}/{} 失败",
+        1,
+        2,
+        unexpected_template="并行请求 {}/{} 出现非预期异常",
+        unexpected_level="warning",
+    )
+
+    assert render_calls == []
+    assert any("非预期异常" in message for message in logger.warnings)
+
+
+async def test_parallel_request_business_failure_logs_rendered_user_facing() -> None:
+    """并行路径业务异常的日志由 log_tiered_failure 内部渲染，调用方不再急切计算。"""
+    import seedream_mcp.tools.pipeline.parallel as parallel_module
+    from seedream_mcp.tools.pipeline import build_generation_context
+    from _lib.log_fakes import RecordingLogger
+
+    async def _executor(client: Any, context: Any) -> dict[str, Any]:
+        del client, context
+        raise SeedreamAPIError("模拟失败", status_code=500)
+
+    context = build_generation_context(
+        TextToImageInput(prompt="test", request_count=1, parallelism=1), _build_config()
+    )
+    logger = RecordingLogger()
+
+    result = await parallel_module._execute_parallel_generation_requests(
+        client=cast(SeedreamClient, None),
+        context=context,
+        request_executor=_executor,
+        module_logger=cast(Any, logger),
+        ctx=None,
+    )
+
+    assert result["success"] is False
+    assert any(
+        "并行请求 1/1 失败" in message and "模拟失败" in message for message in logger.warnings
+    )
+    # 业务分支不带堆栈
+    assert logger.opt_kwargs == []

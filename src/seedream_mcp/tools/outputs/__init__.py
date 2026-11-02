@@ -32,10 +32,10 @@ from ...definitions.conventions import (
     SEQUENTIAL_GENERATION_TOOL_NAME,
     TEXT_TO_IMAGE_TOOL_NAME,
 )
+from ...utils.core.errors import ErrorText, as_plain, raw_error_text, render_boundary_error_text
 from ...utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
 from ...utils.core.logs import get_logger
 from ...utils.core.sanitizers import (
-    sanitize_assembled_text,
     sanitize_data_text,
     sanitize_summary_lines,
     strip_unpaired_surrogates,
@@ -225,11 +225,12 @@ TOOL_OUTPUT_MODELS: Mapping[str, type[_BaseStructuredOutput]] = {
 }
 
 
-def build_error_dict(error_type: str, message: str) -> dict[str, Any]:
+def build_error_dict(error_type: str, message: str | ErrorText) -> dict[str, Any]:
     """构建结构化错误载荷，各工具错误分支共用同一字段集。
 
-    message 恒经 sanitize_assembled_text 幂等净化兜底。边界不截断，长度上限由各
-    错误通道自行维护（含恢复指引的组装消息可至 16KB 宽限）。
+    message 经 render_boundary_error_text 统一渲染（ErrorText 与 str 两臂同口径：
+    全套净化、不截断），长度上限由各错误通道自行维护（含恢复指引的组装消息可至
+    16KB 宽限）。
 
     Args:
         error_type: 载荷的 type 取值，为归约档案错误码或浏览工具的 browse_failed。
@@ -238,13 +239,13 @@ def build_error_dict(error_type: str, message: str) -> dict[str, Any]:
     Returns:
         含 type 与 message 两键的错误字典。
     """
-    return {"type": error_type, "message": sanitize_assembled_text(message)}
+    return {"type": error_type, "message": render_boundary_error_text(message)}
 
 
 def build_error_structured(
     tool_name: str,
     error_type: str,
-    message: str,
+    message: str | ErrorText,
     status: str = "failed",
 ) -> dict[str, Any]:
     """构建失败路径的 structuredContent 并绑定声明 schema。
@@ -300,7 +301,9 @@ def _mirror_node(key: Any, value: Any) -> Any:
         return _mirror_string(key, value)
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    raise ValueError(f"镜像不支持 {type(value).__name__} 类型的值")
+    raise ValueError(
+        raw_error_text("镜像不支持 {type_name} 类型的值", type_name=as_plain(type(value).__name__))
+    )
 
 
 def dump_compact_strict_json(value: Any) -> str:

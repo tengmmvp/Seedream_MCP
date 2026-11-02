@@ -10,16 +10,18 @@ import copy
 from typing import Any
 
 from ...utils.core.errors import (
+    ErrorText,
+    as_plain,
+    as_text,
+    assemble_error_segments,
+    error_text,
     has_message_value,
     normalized_upstream_error_code,
+    render_boundary_error_text,
     response_reports_failure,
 )
 from ...utils.core.logs import get_logger
-from ...utils.core.sanitizers import (
-    ERROR_TEXT_SEGMENT_JOINER,
-    normalize_message_text,
-    sanitize_error_text,
-)
+from ...utils.core.sanitizers import normalize_message_text, sanitize_error_text
 from ...utils.io.save import AutoSaveResult
 from ..outputs.sanitize import (
     _REQUEST_FAILED_TYPE,
@@ -197,14 +199,27 @@ def aggregate_parallel_generation_results(
     }
     if success_requests == 0:
         if error_items:
-            error_preview = ERROR_TEXT_SEGMENT_JOINER.join(
-                f"请求{item['request_index']}: {item['message']}" for item in error_items[:3]
-            )
-            if len(error_items) > 3:
-                error_preview += (
-                    f"{ERROR_TEXT_SEGMENT_JOINER}其余 {len(error_items) - 3} 个请求也失败"
+            # 各段消息已在 _extract_parallel_request_error 出口净化，段终止由组装
+            # 原语承担，长度上限仍由下游错误通道自行维护。
+            preview_segments = [
+                error_text(
+                    "请求{index}: {detail}",
+                    index=as_plain(item["request_index"]),
+                    detail=as_text(item["message"]),
                 )
-            message = f"并行请求全部失败。{error_preview}"
+                for item in error_items[:3]
+            ]
+            if len(error_items) > 3:
+                preview_segments.append(
+                    error_text(
+                        "其余 {count} 个请求也失败",
+                        count=as_plain(len(error_items) - 3),
+                    )
+                )
+            message: str | ErrorText = error_text(
+                "并行请求全部失败。{preview}",
+                preview=as_text(assemble_error_segments(*preview_segments)),
+            )
         else:
             message = "并行请求全部失败"
         representative = next(
@@ -340,12 +355,19 @@ def _format_failure_section(result: dict[str, Any], *, failure_message: str | No
     产物（含恢复指引），净化改用防御性宽上限防截断指引；脱敏口径两档一致。
     """
     aggregated, message_limit, raw_error = _failure_render_context(result)
-    error_text = (
+    failure_detail = (
         failure_message
         if failure_message is not None
         else _failure_message_from_context(aggregated, message_limit, raw_error)
     )
-    failure_summary = f"图片生成失败: {error_text}"
+    # 已净化消息经边界渲染幂等重放：safe 通道的 500 字符截断会切断聚合消息
+    # 携带的恢复指引。
+    failure_summary = render_boundary_error_text(
+        error_text(
+            "图片生成失败: {detail}",
+            detail=as_text(failure_detail),
+        )
+    )
     batch_info = result.get("batch")
     if not isinstance(batch_info, dict):
         return failure_summary
@@ -449,8 +471,13 @@ def _format_auto_save_section(
         else:
             display_index = i + 1
         # 保存失败原因经错误消息净化口径处理，防止换行注入。
-        error_text = sanitize_error_text(save_result.error or "未知原因")
-        parts.append(f"  图片 {display_index}: 保存失败 - {error_text}")
+        failure_reason = sanitize_error_text(save_result.error or "未知原因")
+        failure_line = error_text(
+            "  图片 {index}: 保存失败 - {reason}",
+            index=as_plain(display_index),
+            reason=as_text(failure_reason),
+        )
+        parts.append(render_boundary_error_text(failure_line))
     parts.append("")
     return parts
 
@@ -511,6 +538,13 @@ def _extract_truncated_events(result: dict[str, Any]) -> int | None:
 def _extract_deadline_exceeded(result: dict[str, Any]) -> bool:
     """提取 SSE 流超时提前终止标记，仅键值为 True 时视为发生。"""
     return result.get("deadline_exceeded") is True
+
+
+def _append_tail_notice(parts: list[str], notice: str) -> None:
+    """追加尾部提示行；usage 与自动保存段落自带的收尾空行先去除一个，避免连续空行。"""
+    if parts and parts[-1] == "":
+        parts.pop()
+    parts.append(notice)
 
 
 def format_generation_response(
@@ -577,15 +611,10 @@ def format_generation_response(
 
     truncated_events = _extract_truncated_events(result)
     if truncated_events:
-        # usage 与自动保存段落自带收尾空行，追加提示行前去除一个，避免连续空行。
-        if parts and parts[-1] == "":
-            parts.pop()
-        parts.append(f"因超限或解析失败丢弃 {truncated_events} 个事件")
+        _append_tail_notice(parts, f"因超限或解析失败丢弃 {truncated_events} 个事件")
 
     if _extract_deadline_exceeded(result):
-        if parts and parts[-1] == "":
-            parts.pop()
-        parts.append("响应流超过总时长预算，已保留提前终止前收到的结果")
+        _append_tail_notice(parts, "响应流超过总时长预算，已保留提前终止前收到的结果")
 
     return "\n".join(parts)
 

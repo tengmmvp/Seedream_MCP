@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ...utils.core.errors import SeedreamValidationError
+from ...utils.core.errors import SeedreamValidationError, base_detail_error_text
 from ...utils.io.path import normalize_path, resolve_images_root, resolve_rejecting_cycle
 
 
@@ -33,7 +33,9 @@ def _resolve_base_dir(save_path: str | None) -> Path:
         return resolve_rejecting_cycle(normalized)
     except (ValueError, OSError) as exc:
         raise SeedreamValidationError(
-            f"保存路径无效: {exc}", field="save_path", value=save_path
+            base_detail_error_text("保存路径无效", exc),
+            field="save_path",
+            value=save_path,
         ) from exc
 
 

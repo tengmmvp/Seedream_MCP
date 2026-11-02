@@ -18,11 +18,11 @@ from ...client import SeedreamClient
 from ...config import SeedreamConfig
 from ...utils.core.errors import (
     SeedreamConfigError,
+    failure_message_with_guidance,
     format_error_for_user,
     resolve_error_profile,
     response_reports_failure,
 )
-from ...utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 from ...utils.images.thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
 from ...utils.io.path import resolve_images_root
 from ...utils.io.save import AutoSaveResult
@@ -30,7 +30,7 @@ from ..outputs import build_error_structured, build_structured_tool_result
 from ..outputs.channels import PREVIEW_CHANNEL, output_channel_enabled, output_channels_scope
 from ..outputs.sanitize import _sanitize_image_errors
 from ..schemas import GenerationInputParams
-from ._failures import _failure_guidance_for_code, log_tiered_failure
+from ._failures import _DEFAULT_FAILURE_GUIDANCE, log_tiered_failure
 from ._paths import prevalidate_save_path
 from ._progress import (
     PROGRESS_AUTOSAVE_DONE,
@@ -182,7 +182,9 @@ async def _auto_save_generation_images(
             await safe_report_progress(ctx, progress=PROGRESS_AUTOSAVE_DONE, message="自动保存完成")
         except Exception as exc:
             auto_save_error = format_error_for_user(exc)
-            module_logger.error("自动保存阶段失败，已降级跳过: {}", auto_save_error)
+            module_logger.opt(exception=True).error(
+                "自动保存阶段失败，已降级跳过: {}", auto_save_error
+            )
     return result, images, auto_save_results, saveable_indices, auto_save_error
 
 
@@ -351,22 +353,25 @@ async def execute_generation_handler(
                 saveable_indices=saveable_indices,
             )
         except Exception as exc:
-            log_tiered_failure(module_logger, exc, "{}处理失败", metadata.failure_prefix)
-            await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
-            user_facing_error = format_error_for_user(exc)
+            # 用户文案与归约档案各算一次，日志、失败消息与结构化错误三出口共用，
+            # 免对同一异常重复执行净化管线与档案解析。
+            user_facing = format_error_for_user(exc)
             profile = resolve_error_profile(exc)
-            # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍。
-            if profile.user_hint:
-                error_message = f"{metadata.failure_prefix}失败：{user_facing_error}"
-            else:
-                error_message = (
-                    f"{metadata.failure_prefix}失败：{user_facing_error}{ERROR_TEXT_SEGMENT_JOINER}"
-                    f"{_failure_guidance_for_code(profile.error_code)}"
-                )
+            log_tiered_failure(
+                module_logger,
+                exc,
+                "{}处理失败",
+                metadata.failure_prefix,
+                user_facing=user_facing,
+            )
+            await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
+            error_message = failure_message_with_guidance(
+                metadata.failure_prefix, user_facing, profile.user_hint, _DEFAULT_FAILURE_GUIDANCE
+            )
             error_structured = build_error_structured(
                 metadata.tool_name,
                 profile.error_code,
-                user_facing_error,
+                user_facing,
             )
             return await build_structured_tool_result(
                 error_message, error_structured, is_error=True

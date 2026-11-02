@@ -18,10 +18,19 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from mcp.types import CallToolResult
 
 from ...definitions.conventions import BROWSE_FAILED_ERROR_TYPE, BROWSE_IMAGES_TOOL_NAME
-from ...utils.core.errors import format_error_for_user
+from ...utils.core.errors import (
+    as_detail,
+    as_plain,
+    as_text,
+    assemble_error_segments,
+    failure_message_with_guidance,
+    format_error_for_user,
+    raw_error_text,
+    resolve_error_profile,
+    safe_error_text,
+)
 from ...utils.core.sanitizers import (
     CONTROL_CHARS_PATTERN,
-    ERROR_TEXT_SEGMENT_JOINER,
     sanitize_data_text,
     sanitize_error_text,
 )
@@ -434,17 +443,20 @@ def _narrow_scope_to_bounds(read_scope: list[Path], bounds_scope: list[Path]) ->
 async def build_browse_fallback_result(
     params: BrowseImagesInput,
     resolved_directories: list[Path],
-    user_message: str,
+    user_facing: str,
+    user_hint: str,
 ) -> CallToolResult:
     """构建未预期异常的兜底错误 CallToolResult。
 
     回退根读取仅在无会话 Roots 时触发现算，与预解析同口径下沉线程执行；过滤值经
-    同一过滤规则回显，保留用户原始输入。
+    同一过滤规则回显，保留用户原始输入。错误文案经 failure_message_with_guidance
+    以浏览失败前缀装配。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。
         resolved_directories: 外层创建的共享列表，兜底分支经同一引用回显已解析目录。
-        user_message: 已格式化的用户可见错误消息。
+        user_facing: 调用方对兜底异常单次计算的 format_error_for_user 产物。
+        user_hint: 归约档案携带的可操作建议，空串表示无建议。
 
     Returns:
         is_error=True 的工具结果。
@@ -456,6 +468,9 @@ async def build_browse_fallback_result(
         logger.warning("浏览兜底分支重读工作区根失败，按无工作区处理: {}", exc)
         fallback_roots = []
     fallback_filter, _ = _normalize_format_filter(params.format_filter)
+    message = failure_message_with_guidance(
+        "浏览图片", user_facing, user_hint, "请确认目录路径有效且位于工作区内。"
+    )
     return await _build_browse_error(
         state=_BrowseRequestState.from_params(
             params,
@@ -463,7 +478,7 @@ async def build_browse_fallback_result(
             resolved_directories=resolved_directories,
             format_filter=fallback_filter,
         ),
-        message=f"浏览图片失败：{user_message}{ERROR_TEXT_SEGMENT_JOINER}请确认目录路径有效且位于工作区内。",
+        message=message,
     )
 
 
@@ -475,15 +490,19 @@ async def _resolve_browse_directories(
 
     resolved_directory 为调用方经 resolve_against_base 同口径预解析的结果，提供时
     免重复解析，相对与读权限判定照常执行。绝对目录判读权限，相对目录仅限图片
-    目录内。解析成功返回单个已 resolve 目录；路径无效与相对越界携带错误消息，
-    绝对越界返回 None。
+    目录内。
+
+    Returns:
+        (工作区根列表, 读权限基集合, 请求目录, 错误消息) 四元组：解析成功时请求
+        目录为已 resolve 形态且错误消息为 None，路径无效与相对越界携带错误消息，
+        绝对越界两者均 None。
     """
 
     # 读权限求值与请求目录的 resolve/normalize 可能阻塞网络挂载目录，整体下沉
     # 线程；会话 Roots 时工作区为 ContextVar 直读，下沉无额外开销。后续以已
     # resolve 的目录直接比较；structuredContent 仍回显原始 workspace_roots。
     def _read_scope_and_resolve_dir() -> tuple[list[Path], list[Path], Path | None, str | None]:
-        """求值工作区、图片目录与读权限并解析请求目录，返回四元组。
+        """求值工作区、图片目录与读权限并解析请求目录。
 
         三类位置经 get_read_context 单点求值共享，消除本函数内对图片目录与工作区
         的重复解析；请求目录解析经 resolve_against_base 与 Web 图库共用同一组合。
@@ -497,12 +516,12 @@ async def _resolve_browse_directories(
                 # 相对路径以图片目录为基准；默认目录 "." 即图片目录本身。
                 resolved_dir, within_images_root = resolve_against_base(directory, images_root)
             except ValueError as exc:
-                # 异常消息内含用户输入路径，经净化后才进入错误通道。
+                # 异常消息内含用户输入路径，构造即净化后才进入错误通道。
                 return (
                     workspace_roots,
                     read_scope,
                     None,
-                    sanitize_error_text(f"目录路径无效: {exc}"),
+                    safe_error_text("目录路径无效: {reason}", reason=as_detail(exc)),
                 )
         if not os.path.isabs(directory) and not within_images_root:
             return (
@@ -527,7 +546,11 @@ async def _scan_browse_entries(
     read_scope: list[Path],
     format_filter_exhausted: bool,
 ) -> tuple[list[ScanEntry], list[Path], ScanResult | None]:
-    """扫描阶段：扫描请求目录收集越界过滤后的条目，上报扫描进度并回传扫描信号。"""
+    """扫描阶段：扫描请求目录收集越界过滤后的条目，上报扫描进度并回传扫描信号。
+
+    Returns:
+        (界内条目, 不可读目录, 扫描信号) 三元组，未扫描时扫描信号为 None。
+    """
     # scan_limit 多取一张用于判定 has_more；越界剔除经读范围包含谓词由扫描层
     # 端到端承担，见 _scan_and_filter_directory。format_filter_exhausted 时跳过扫描
     # 与进度上报，由空结果分支统一返回。
@@ -631,7 +654,7 @@ def _continue_tail_texts(
     原地重扫。
 
     Returns:
-        (续扫导引, 未完成标记) 二元组，缺省分量为 None，标记已含括号包裹。
+        (续扫导引, 括号包裹的未完成标记) 二元组，缺项为 None。
     """
     hint: str | None = None
     if not page.has_more and page.next_offset is not None:
@@ -660,19 +683,27 @@ async def _build_empty_browse_result(
             # 用户 filter 字符串经净化后拼入消息；支持列表为静态服务端数据，
             # 不参与净化。
             user_formats = sanitize_error_text(", ".join(state.format_filter))
-            message = f"指定的图片格式 {user_formats} 均不在支持列表内，支持: {supported_list}。"
+            message = raw_error_text(
+                "指定的图片格式 {formats} 均不在支持列表内，支持: {supported}。",
+                formats=as_text(user_formats),
+                supported=as_plain(supported_list),
+            )
         else:
             # 空列表无格式可回显，改用不含空位的文案，避免残缺语义。
-            message = f"未指定任何受支持的图片格式，支持: {supported_list}。"
+            message = raw_error_text(
+                "未指定任何受支持的图片格式，支持: {supported}。",
+                supported=as_plain(supported_list),
+            )
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         return await _build_browse_error(
             state=state, message=message, error_type="validation_error"
         )
     if page.total_count:
         # 消息携带总数与有效区间，模型修正 offset 后即可重试。
-        message = (
-            f"offset={state.offset} 超出范围，目录共有 {page.total_count} 张图片，"
-            f"请使用 0 <= offset < {page.total_count}。"
+        message = raw_error_text(
+            "offset={offset} 超出范围，目录共有 {total} 张图片，请使用 0 <= offset < {total}。",
+            offset=as_plain(state.offset),
+            total=as_plain(page.total_count),
         )
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         return await _build_browse_error(
@@ -687,12 +718,12 @@ async def _build_empty_browse_result(
         if hidden:
             parts.append(f"另有 {hidden} 个目录")
         dirs_text = "，".join(parts)
-        message = f"目录不可读或无图片文件：{dirs_text}"
+        message = raw_error_text("目录不可读或无图片文件：{dirs}", dirs=as_text(dirs_text))
     else:
         message = "未找到图片文件，请确认目录或过滤条件。"
     hint_text, marker_text = _continue_tail_texts(page, scan_result)
     if hint_text is not None:
-        message = f"{message}{ERROR_TEXT_SEGMENT_JOINER}{hint_text}"
+        message = assemble_error_segments(message, hint_text)
     if marker_text is not None:
         message = f"{message}{marker_text}"
     structured = _build_browse_structured_result(
@@ -890,8 +921,13 @@ async def handle_browse_images(
             resolved_directory=resolved_directory,
         )
     except Exception as exc:
-        log_tiered_failure(logger, exc, "浏览图片处理失败")
+        # 用户文案单次计算供日志与兜底装配共用，档案仅取 user_hint 判定指引叠加。
+        user_facing = format_error_for_user(exc)
+        log_tiered_failure(logger, exc, "浏览图片处理失败", user_facing=user_facing)
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         return await build_browse_fallback_result(
-            params, resolved_directories, format_error_for_user(exc)
+            params,
+            resolved_directories,
+            user_facing,
+            resolve_error_profile(exc).user_hint,
         )

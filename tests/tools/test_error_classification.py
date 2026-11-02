@@ -1,9 +1,9 @@
 """错误分类、HTTP 错误归约、用户可见格式化与失败排查建议选择的测试。
 
 覆盖 _classify_generation_error_type 的 8 个分支、handle_api_error 的状态码阶梯文案
-与上游错误体提取、format_error_for_user 的 isinstance 分支与 message 截断、
-_failure_guidance_for_code 的查表与流水线降级文案拼接。guidance 拼接语义：归约
-档案携带 user_hint 时该建议即最终建议，档案无建议时才以查表值补充。
+与上游错误体提取、format_error_for_user 的 isinstance 分支与 message 截断、失败
+排查建议的档案归属。guidance 拼接语义：归约档案携带 user_hint 时该建议即最终建议
+（定向指引归位档案），档案无建议时才以通用排查建议补充。
 """
 
 from typing import Any, cast
@@ -13,11 +13,7 @@ import pytest
 from mcp.types import TextContent
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.pipeline._failures import (
-    _FAILURE_GUIDANCE_BY_ERROR_CODE,
-    _classify_generation_error_type,
-    _failure_guidance_for_code,
-)
+from seedream_mcp.tools.pipeline._failures import _classify_generation_error_type
 from seedream_mcp.tools.pipeline import (
     ToolMetadata,
     execute_generation_handler,
@@ -34,6 +30,7 @@ from seedream_mcp.utils.core.errors import (
     format_error_for_user,
     handle_api_error,
     iter_error_profiles,
+    resolve_error_profile,
 )
 from seedream_mcp.utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 
@@ -380,78 +377,33 @@ def test_handle_api_error_5xx_user_hint_mentions_retry_later() -> None:
 # ==================== 失败排查建议按错误类型选择 ====================
 
 
-def test_failure_guidance_hint_profiles_fall_back_to_generic() -> None:
-    """自带 user_hint 的档案不走查表：查表回退通用建议，用户文案由 hint 承担。
+def test_config_error_guidance_lives_in_profile_user_hint() -> None:
+    """config_error 的定向指引归位错误档案 user_hint，单源承载不再查表补充。"""
+    profile = resolve_error_profile(SeedreamConfigError("missing key"))
 
-    _execute 层对带 hint 档案跳过查表直接用 hint（全链路行为由
-    test_handler_failure_text_*_uses_profile_hint_only 锁定），查表对这些码
-    不再提供文案。
+    assert profile.error_code == "config_error"
+    assert profile.user_hint == "请检查服务端配置后重试。"
+
+
+def test_hintless_profile_error_codes_snapshot() -> None:
+    """无 user_hint 的档案错误码快照，定向指引由档案 user_hint 单源承载。
+
+    新增档案码未更新快照即在此失败，须显式决定补 user_hint 还是走通用建议。
     """
-    for exc in (
-        SeedreamValidationError("bad size"),
-        SeedreamNetworkError("conn refused"),
-        SeedreamTimeoutError("t"),
-        SeedreamAPIError("unauthorized", status_code=401),
-    ):
-        assert (
-            _failure_guidance_for_code(_classify_generation_error_type(exc))
-            == "请根据错误信息排查后重试。"
-        )
-
-
-def test_failure_guidance_unknown_code_falls_back_to_generic() -> None:
-    """未列举错误码回退到通用排查建议。"""
-    assert (
-        _failure_guidance_for_code(_classify_generation_error_type(ValueError("x")))
-        == "请根据错误信息排查后重试。"
-    )
-
-
-def test_failure_guidance_config_error_directs_to_server_config() -> None:
-    """config_error 查表命中定向指引，指向服务端配置而非通用排查。"""
-    assert (
-        _failure_guidance_for_code(
-            _classify_generation_error_type(SeedreamConfigError("missing key"))
-        )
-        == "请检查服务端配置后重试。"
-    )
-
-
-@pytest.mark.parametrize("status", [400, 404, 500])
-def test_failure_guidance_api_error_uses_generic(status: int) -> None:
-    """api_error 无论状态码均回退通用建议，成因多样不做定向指引。
-
-    JSON 解析失败、响应体过大等无状态码形态曾被引导查 API Key 与网络，与实际
-    原因无关。
-    """
-    guidance = _failure_guidance_for_code(
-        _classify_generation_error_type(SeedreamAPIError("boom", status_code=status))
-    )
-    assert guidance == "请根据错误信息排查后重试。"
-    assert "API Key" not in guidance
-
-
-def test_failure_guidance_api_error_without_status_falls_back_to_generic() -> None:
-    """无状态码的 API 错误同样回退通用建议。"""
-    guidance = _failure_guidance_for_code(
-        _classify_generation_error_type(SeedreamAPIError("unspecified failure"))
-    )
-    assert guidance == "请根据错误信息排查后重试。"
-
-
-def test_failure_guidance_table_covers_hintless_profile_error_codes() -> None:
-    """无 user_hint 的档案错误码须划入查表键或默认集之一，带 hint 的不进表。
-
-    带 hint 档案由 _execute 层直接采用 hint，表中登记即双源漂移；新增无 hint
-    档案码未更新划分快照即在此失败，须显式决定走查表还是默认建议。
-    """
-    expected_table_keys = frozenset({"config_error"})
-    expected_default_codes = frozenset({"api_error", "generation_failed"})
-    hinted = {profile.error_code for profile in iter_error_profiles() if profile.user_hint}
+    expected_hintless_codes = frozenset({"api_error", "generation_failed"})
     hintless = {profile.error_code for profile in iter_error_profiles() if not profile.user_hint}
 
-    assert not (hinted & set(_FAILURE_GUIDANCE_BY_ERROR_CODE))
-    assert hintless == expected_table_keys | expected_default_codes
+    assert hintless == expected_hintless_codes
+
+
+async def test_handler_failure_text_config_error_uses_profile_hint() -> None:
+    """config_error 降级文案：指引由档案 user_hint 拼接承担，与查表时代逐字节一致。"""
+    text = await _run_failing_handler(SeedreamConfigError("缺少密钥配置"))
+
+    assert text == (
+        f"文生图生成失败：配置错误: 缺少密钥配置{ERROR_TEXT_SEGMENT_JOINER}"
+        "请检查服务端配置后重试。"
+    )
 
 
 async def _run_failing_handler(exc: Exception) -> str:
@@ -486,7 +438,7 @@ async def test_handler_failure_text_validation_error_uses_profile_hint_only() ->
 
     assert "API Key" not in text
     assert "请检查对应参数的取值范围。" in text
-    # user_hint 即最终建议，查表值不再拼接，避免双源叠加。
+    # user_hint 即最终建议，不追加通用排查建议，避免双源叠加。
     assert "请根据错误信息调整对应参数取值。" not in text
 
 

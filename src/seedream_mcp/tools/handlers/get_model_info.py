@@ -130,8 +130,10 @@ async def handle_get_model_info(config: SeedreamConfig) -> CallToolResult:
             build_model_info_text(payload), structured, is_error=False
         )
     except Exception as exc:
-        log_tiered_failure(logger, exc, "模型信息查询失败")
+        # 用户文案单次计算供日志与结构化错误共用。
+        user_facing = format_error_for_user(exc)
+        log_tiered_failure(logger, exc, "模型信息查询失败", user_facing=user_facing)
         structured = build_error_structured(
-            GET_MODEL_INFO_TOOL_NAME, MODEL_INFO_FAILED_ERROR_TYPE, format_error_for_user(exc)
+            GET_MODEL_INFO_TOOL_NAME, MODEL_INFO_FAILED_ERROR_TYPE, user_facing
         )
         return await build_error_tool_result(structured)

@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Final
 
+from ...utils.core.errors import as_plain, raw_error_text
+
 # 全部输出通道名常量：缩略图预览与 JSON 镜像两个 content 通道，收发两侧共用同一来源。
 PREVIEW_CHANNEL: Final[str] = "preview"
 MIRROR_CHANNEL: Final[str] = "mirror"
@@ -31,7 +33,11 @@ def output_channels_scope(**enabled: bool) -> Iterator[None]:
     """
     unknown = set(enabled) - ALL_OUTPUT_CHANNELS
     if unknown:
-        raise ValueError(f"未知输出通道: {', '.join(sorted(unknown))}")
+        raise ValueError(
+            raw_error_text(
+                "未知输出通道: {channels}", channels=as_plain(", ".join(sorted(unknown)))
+            )
+        )
     current = _enabled_output_channels.get()
     merged = frozenset(
         channel for channel in ALL_OUTPUT_CHANNELS if enabled.get(channel, channel in current)
@@ -46,5 +52,5 @@ def output_channels_scope(**enabled: bool) -> Iterator[None]:
 def output_channel_enabled(channel: str) -> bool:
     """读取通道启用态，未知名抛 ValueError，与作用域入口同口径拦截拼写错误。"""
     if channel not in ALL_OUTPUT_CHANNELS:
-        raise ValueError(f"未知输出通道: {channel}")
+        raise ValueError(raw_error_text("未知输出通道: {channel}", channel=as_plain(channel)))
     return channel in _enabled_output_channels.get()

@@ -20,7 +20,7 @@ from pydantic import (
 )
 
 from ..definitions.conventions import MAX_PARALLEL_REQUEST_COUNT, MAX_SEQUENTIAL_TOTAL_IMAGES
-from ..utils.core.errors import SeedreamValidationError
+from ..utils.core.errors import SeedreamValidationError, as_plain, as_plain_list, raw_error_text
 from ..utils.images.validation import MAX_IMAGE_FILE_SIZE
 from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
@@ -225,7 +225,13 @@ def _enum_normalizer(allowed: list[str], label: str) -> Callable[[object], objec
         if isinstance(value, str):
             normalized = value.strip().lower()
             if normalized not in allowed:
-                raise ValueError(f"{label} 仅支持 {allowed}")
+                raise ValueError(
+                    raw_error_text(
+                        "{label} 仅支持 {allowed}",
+                        label=as_plain(label),
+                        allowed=as_plain_list(allowed),
+                    )
+                )
             return normalized
         return value
 
@@ -292,7 +298,11 @@ def _reject_blank_or_oversized_image_items(items: list[str]) -> list[str]:
             raise ValueError("image 不能为空字符串")
         if len(stripped) > MAX_IMAGE_INPUT_CHARS:
             raise ValueError(
-                f"image 输入长度 {len(stripped)} 超过防御上限 {MAX_IMAGE_INPUT_CHARS} 字符"
+                raw_error_text(
+                    "image 输入长度 {length} 超过防御上限 {limit} 字符",
+                    length=as_plain(len(stripped)),
+                    limit=as_plain(MAX_IMAGE_INPUT_CHARS),
+                )
             )
         normalized.append(stripped)
     return normalized
@@ -308,7 +318,11 @@ def _image_count_validator(minimum: int) -> Callable[[object], object]:
             and not minimum <= len(value) <= SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
         ):
             raise ValueError(
-                f"参考图片数量需在 {minimum}-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 之间"
+                raw_error_text(
+                    "参考图片数量需在 {minimum}-{maximum} 之间",
+                    minimum=as_plain(minimum),
+                    maximum=as_plain(SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES),
+                )
             )
         return value
 

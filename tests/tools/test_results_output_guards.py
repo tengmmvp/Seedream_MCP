@@ -604,6 +604,24 @@ def test_deadline_exceeded_surfaced_in_both_channels() -> None:
     assert structured["deadline_exceeded"] is True
 
 
+def test_tail_notices_stack_without_intervening_blank_lines() -> None:
+    """两类尾部提示并存时逐行紧接追加，既不吞并前一条提示也不插入空行。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [{"url": "https://example.com/a.png"}],
+        "usage": {"generated_images": 1},
+        "truncated_events": 2,
+        "deadline_exceeded": True,
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+
+    assert text.endswith(
+        "因超限或解析失败丢弃 2 个事件\n响应流超过总时长预算，已保留提前终止前收到的结果"
+    )
+
+
 def test_extract_deadline_exceeded_returns_plain_bool() -> None:
     """提取器返回纯 bool：仅键值 True 视为发生，其余形态归 False，无幻影第三态。"""
     assert _extract_deadline_exceeded({"deadline_exceeded": True}) is True
