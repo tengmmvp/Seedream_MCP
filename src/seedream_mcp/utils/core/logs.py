@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 from loguru import logger
 
+from .errors import as_text, raw_error_text
+
 from .sanitizers import CONTROL_CHARS_PATTERN
 from ...definitions.conventions import DATA_DIR_NAME
 from ...definitions.defaults import (
@@ -181,7 +183,7 @@ def _floor_severity(floor: str) -> int:
     try:
         return _LEVEL_SEVERITY[floor]
     except KeyError:
-        raise ValueError(f"未知日志级别: {floor}") from None
+        raise ValueError(raw_error_text("未知日志级别: {level}", level=as_text(floor))) from None
 
 
 def _sink_filter(floor: str) -> Callable[[Any], bool]:

@@ -16,9 +16,18 @@ from __future__ import annotations
 import re
 from typing import Any, NamedTuple
 
-from .errors import SeedreamConfigError, SeedreamValidationError
+from .errors import (
+    SeedreamConfigError,
+    SeedreamValidationError,
+    _TextParam,
+    assemble_error_segments,
+    as_plain,
+    as_plain_list,
+    as_text,
+    as_text_list,
+    error_text,
+)
 from .logs import get_logger
-from .sanitizers import ERROR_TEXT_SEGMENT_JOINER
 from ..model.capabilities import (
     capability_param_label,
     get_max_reference_images,
@@ -79,17 +88,29 @@ def _parse_pixel_size(size: str) -> tuple[int, int] | None:
     return int(matched.group(1)), int(matched.group(2))
 
 
+# 整数要求拒绝文案的共用模板：字段名以分类参数进入，多处构造点共享单一来源。
+_INTEGER_REQUIRED_TEMPLATE = "{field} 必须是整数"
+
+
 def _coerce_int_in_range(value: Any, field: str, min_value: int, max_value: int) -> int:
     """将任意输入校验并转换为 [min_value, max_value] 内的整数。
 
     非法值抛出 SeedreamValidationError。
     """
     if isinstance(value, bool):
-        raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
+        raise SeedreamValidationError(
+            error_text(_INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
+            field=field,
+            value=value,
+        )
     if isinstance(value, float):
         # 拒绝非整数浮点，避免静默截断造成语义偏差；整数浮点允许转换。
         if not value.is_integer():
-            raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
+            raise SeedreamValidationError(
+                error_text(_INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
+                field=field,
+                value=value,
+            )
         validated_value = int(value)
     else:
         try:
@@ -98,15 +119,28 @@ def _coerce_int_in_range(value: Any, field: str, min_value: int, max_value: int)
                 raise ValueError
             validated_value = int(value)
         except (ValueError, TypeError, OverflowError):
-            raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
+            raise SeedreamValidationError(
+                error_text(_INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
+                field=field,
+                value=value,
+            )
         # Decimal/Fraction 经 int() 会静默截断小数，与 float 分支同规则拒绝非整数值；
         # 字符串经 int() 解析已保证无损转换，不参与等值比较。
         if not isinstance(value, str) and value != validated_value:
-            raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
+            raise SeedreamValidationError(
+                error_text(_INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
+                field=field,
+                value=value,
+            )
 
     if validated_value < min_value or validated_value > max_value:
         raise SeedreamValidationError(
-            f"{field} 必须在 {min_value}-{max_value} 之间",
+            error_text(
+                "{field} 必须在 {min_value}-{max_value} 之间",
+                field=as_plain(field),
+                min_value=as_plain(min_value),
+                max_value=as_plain(max_value),
+            ),
             field=field,
             value=validated_value,
         )
@@ -138,21 +172,29 @@ def parse_bool(value: object) -> bool:
         return True
     if normalized in FALSE_BOOL_STRINGS:
         return False
-    raise SeedreamConfigError(f"无法解析为布尔值(期望 true/false/yes/no/on/off/1/0): {value!r}")
+    raise SeedreamConfigError(
+        error_text(
+            "无法解析为布尔值(期望 true/false/yes/no/on/off/1/0): {value}",
+            value=as_text(repr(value)),
+        )
+    )
 
 
-def ensure_utf8_encodable(value: str, message: str, field: str) -> None:
+def ensure_utf8_encodable(
+    value: str, template: str, field: str, **template_params: _TextParam
+) -> None:
     """无法 UTF-8 编码的文本在参数层拒绝，纯 ASCII 输入免探测直接放行。
 
     MCP JSON 可合法传入未配对 UTF-16 代理字符的转义序列，此类文本无法 UTF-8 编码，
-    若放行会在请求体序列化处才失败并呈现编码细节错误。
+    若放行会在请求体序列化处才失败并呈现编码细节错误。template 与 template_params
+    即 error_text 的构造入参，错误载荷仅在失败分支构造。
     """
     if value.isascii():
         return
     try:
         value.encode("utf-8")
     except UnicodeEncodeError:
-        raise SeedreamValidationError(message, field=field, value=None)
+        raise SeedreamValidationError(error_text(template, **template_params), field=field)
 
 
 def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words: int = 600) -> str:
@@ -175,8 +217,6 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
 
     if not isinstance(prompt, str):
         raise SeedreamValidationError("提示词必须是字符串", field="prompt", value=prompt)
-    if not prompt:
-        raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
 
     prompt = prompt.strip()
     if not prompt:
@@ -244,7 +284,10 @@ def validate_response_format(response_format: str) -> str:
     response_format = response_format.strip().lower()
     if response_format not in VALID_RESPONSE_FORMATS:
         raise SeedreamValidationError(
-            f"response_format 必须是以下值之一: {sorted(VALID_RESPONSE_FORMATS)}",
+            error_text(
+                "response_format 必须是以下值之一: {formats}",
+                formats=as_plain_list(sorted(VALID_RESPONSE_FORMATS)),
+            ),
             field="response_format",
             value=response_format,
         )
@@ -281,7 +324,10 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
 
     if normalized not in VALID_OUTPUT_FORMATS:
         raise SeedreamValidationError(
-            f"output_format 仅支持 {sorted(VALID_OUTPUT_FORMATS)}",
+            error_text(
+                "output_format 仅支持 {formats}",
+                formats=as_plain_list(sorted(VALID_OUTPUT_FORMATS)),
+            ),
             field="output_format",
             value=output_format,
         )
@@ -341,7 +387,11 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
         extra_keys = set(tool.keys()) - {"type"}
         if extra_keys:
             raise SeedreamValidationError(
-                f"tools[{index}] 包含不支持的字段: {sorted(extra_keys, key=repr)}",
+                error_text(
+                    "tools[{index}] 包含不支持的字段: {keys}",
+                    index=as_plain(index),
+                    keys=as_text_list(sorted(extra_keys, key=repr)),
+                ),
                 field=f"tools[{index}]",
                 value=tool,
             )
@@ -364,7 +414,10 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
 
         if normalized_type not in VALID_GENERATION_TOOL_TYPES:
             raise SeedreamValidationError(
-                f"tools.type 仅支持 {sorted(VALID_GENERATION_TOOL_TYPES)}",
+                error_text(
+                    "tools.type 仅支持 {types}",
+                    types=as_plain_list(sorted(VALID_GENERATION_TOOL_TYPES)),
+                ),
                 field=f"tools[{index}].type",
                 value=tool_type,
             )
@@ -429,8 +482,6 @@ def _resolve_size_token(
     """
     if not isinstance(size, str):
         raise SeedreamValidationError("图像尺寸必须为字符串", field="size", value=size)
-    if not size:
-        raise SeedreamValidationError("图像尺寸不能为空", field="size", value=size)
 
     normalized = size.strip()
     if not normalized:
@@ -454,7 +505,10 @@ def _resolve_size_token(
             )
         )
         raise SeedreamValidationError(
-            f"图层拆分场景的 size 仅支持分辨率档位（{presets_text}）或 auto",
+            error_text(
+                "图层拆分场景的 size 仅支持分辨率档位（{presets}）或 auto",
+                presets=as_plain(presets_text),
+            ),
             field="size",
             value=size,
         )
@@ -503,8 +557,11 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
         if token not in caps.allowed_presets:
             presets_str = "/".join(sorted(caps.allowed_presets, key=_preset_numeric_sort_key))
             raise SeedreamValidationError(
-                f"在 {caps.display_name} 模型下仅支持 {presets_str}，"
-                "请调整 size 参数或更换为支持该尺寸的模型",
+                error_text(
+                    "在 {model} 模型下仅支持 {presets}，请调整 size 参数或更换为支持该尺寸的模型",
+                    model=as_plain(caps.display_name),
+                    presets=as_plain(presets_str),
+                ),
                 field="size",
                 value=token,
             )
@@ -522,7 +579,11 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
     ratio = width / height
     if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
         raise SeedreamValidationError(
-            f"尺寸宽高比需在 [{MIN_IMAGE_RATIO}, {MAX_IMAGE_RATIO}] 范围内",
+            error_text(
+                "尺寸宽高比需在 [{min_ratio}, {max_ratio}] 范围内",
+                min_ratio=as_plain(MIN_IMAGE_RATIO),
+                max_ratio=as_plain(MAX_IMAGE_RATIO),
+            ),
             field="size",
             value=pixel_text,
         )
@@ -541,7 +602,11 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
         else:
             bound_text = f"不超过 {max_pixels}"
         raise SeedreamValidationError(
-            f"在 {caps.display_name} 模型下，像素尺寸总像素需{bound_text}",
+            error_text(
+                "在 {model} 模型下，像素尺寸总像素需{bound}",
+                model=as_plain(caps.display_name),
+                bound=as_plain(bound_text),
+            ),
             field="size",
             value=pixel_text,
         )
@@ -567,10 +632,14 @@ def capability_gate_error(
     """
     if param_desc is None:
         param_desc = capability_param_label(capability)
+    gate = error_text(
+        "当前模型 {model} 不支持{param}，支持的模型：{families}",
+        model=as_text(model_id),
+        param=as_plain(param_desc),
+        families=as_plain(supported_family_display_names(capability)),
+    )
     return SeedreamValidationError(
-        f"当前模型 {model_id} 不支持{param_desc}，"
-        f"支持的模型：{supported_family_display_names(capability)}{ERROR_TEXT_SEGMENT_JOINER}"
-        "如需更换模型，请告知用户调整服务器配置",
+        assemble_error_segments(gate, "如需更换模型，请告知用户调整服务器配置"),
         field=field,
         value=value,
     )
@@ -632,7 +701,10 @@ def validate_background(
     normalized = background.strip().lower()
     if normalized not in VALID_BACKGROUND_MODES:
         raise SeedreamValidationError(
-            f"background 必须为 {sorted(VALID_BACKGROUND_MODES)}",
+            error_text(
+                "background 必须为 {modes}",
+                modes=as_plain_list(sorted(VALID_BACKGROUND_MODES)),
+            ),
             field="background",
             value=background,
         )
@@ -679,7 +751,10 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict[str, A
     extra_keys = set(options.keys()) - {"mode"}
     if extra_keys:
         raise SeedreamValidationError(
-            f"optimize_prompt_options 包含不支持的字段: {sorted(extra_keys, key=repr)}",
+            error_text(
+                "optimize_prompt_options 包含不支持的字段: {keys}",
+                keys=as_text_list(sorted(extra_keys, key=repr)),
+            ),
             field="optimize_prompt_options",
             value=options,
         )
@@ -695,7 +770,10 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict[str, A
     mode = mode.strip().lower()
     if mode not in VALID_OPTIMIZE_MODES:
         raise SeedreamValidationError(
-            f"optimize_prompt_options.mode 必须为 {sorted(VALID_OPTIMIZE_MODES)}",
+            error_text(
+                "optimize_prompt_options.mode 必须为 {modes}",
+                modes=as_plain_list(sorted(VALID_OPTIMIZE_MODES)),
+            ),
             field="optimize_prompt_options.mode",
             value=mode,
         )
@@ -817,7 +895,11 @@ def validate_reference_image_count(
     max_reference = get_max_reference_images(model_id)
     if len(images) > max_reference:
         raise SeedreamValidationError(
-            f"{field_name} 数量不能超过 {max_reference}",
+            error_text(
+                "{field} 数量不能超过 {max_reference}",
+                field=as_plain(field_name),
+                max_reference=as_plain(max_reference),
+            ),
             field=field_name,
             value=images,
         )
@@ -864,8 +946,11 @@ def validate_sequential_image_limit(
     reference_count = len(images)
     if reference_count + max_images > MAX_SEQUENTIAL_TOTAL_IMAGES:
         raise SeedreamValidationError(
-            f"参考图数量与生成数量之和不能超过 {MAX_SEQUENTIAL_TOTAL_IMAGES}"
-            f"（参考图最多 {max_reference}）",
+            error_text(
+                "参考图数量与生成数量之和不能超过 {total}（参考图最多 {max_reference}）",
+                total=as_plain(MAX_SEQUENTIAL_TOTAL_IMAGES),
+                max_reference=as_plain(max_reference),
+            ),
             field="image",
             value={"reference_images": reference_count, "max_images": max_images},
         )

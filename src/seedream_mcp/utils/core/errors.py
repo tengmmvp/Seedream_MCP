@@ -9,43 +9,238 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
+from enum import Enum
+import re
 from typing import Any
 
 from pydantic import ValidationError
 
 from .sanitizers import (
-    _EMPTY_VALUE_CREDENTIAL_TAIL_PATTERN,
     ERROR_TEXT_SEGMENT_JOINER,
     _sanitize_message_for_output,
     _truncate_value_for_output,
+    normalize_message_text,
+    sanitize_assembled_text,
     sanitize_error_text,
+    sanitize_url,
+    terminate_empty_value_credential_tails,
     truncate_upstream_message_fragment,
 )
 
+# 错误文本模板占位符：{name} 形态，单遍替换不重扫替换产物。
+_ERROR_TEXT_TOKEN_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-def validation_error_user_message(exc: ValidationError) -> str:
+
+class _ParamPolicy(Enum):
+    """错误文本参数的渲染策略分类。"""
+
+    PLAIN = "plain"
+    TEXT = "text"
+    URL = "url"
+    DETAIL = "detail"
+    SECRET = "secret"
+
+
+@dataclass(frozen=True)
+class _TextParam:
+    """错误文本参数：值与渲染策略分类。"""
+
+    value: str
+    policy: _ParamPolicy
+
+    def render(self) -> str:
+        """按策略渲染单参数：SECRET 恒掩码、URL 剥凭据与查询，其余原值。"""
+        if self.policy is _ParamPolicy.SECRET:
+            return "***"
+        if self.policy is _ParamPolicy.URL:
+            return sanitize_url(self.value)
+        return self.value
+
+
+def as_plain(value: Any) -> _TextParam:
+    """代码常量与派生数值参数。"""
+    return _TextParam(normalize_message_text(value), _ParamPolicy.PLAIN)
+
+
+def as_text(value: Any) -> _TextParam:
+    """可示动态文本参数（配置值、路径、用户输入、第三方 str）。"""
+    return _TextParam(normalize_message_text(value), _ParamPolicy.TEXT)
+
+
+def as_url(value: Any) -> _TextParam:
+    """URL 参数：两通道均剥 userinfo 与查询参数。"""
+    return _TextParam(normalize_message_text(value), _ParamPolicy.URL)
+
+
+def as_detail(value: Any) -> _TextParam:
+    """上游或第三方自由文本参数（最高不信等级）。"""
+    return _TextParam(normalize_message_text(value), _ParamPolicy.DETAIL)
+
+
+def as_secret(value: Any) -> _TextParam:
+    """密钥材料参数：任何渲染通道不得明文。"""
+    return _TextParam(normalize_message_text(value), _ParamPolicy.SECRET)
+
+
+# 清单参数经 str 取 Python 列表字面量（单引号 repr）定形：裸 list 进入分类器会走
+# JSON 序列化改用双引号，同一清单的文案形态随消费侧写法漂移。
+def as_plain_list(items: list[str]) -> _TextParam:
+    """清单类代码常量参数，渲染为 Python 列表字面量形态。"""
+    return as_plain(str(items))
+
+
+def as_text_list(items: list[str]) -> _TextParam:
+    """清单类可示动态文本参数，渲染形态同 as_plain_list。"""
+    return as_text(str(items))
+
+
+class ErrorText:
+    """结构化错误文本：静态模板携带分类参数，双通道按策略渲染。
+
+    模板为代码常量（占位符 {name}），动态值一律以分类参数进入；raw_text 供日志
+    通道（原文语义），safe_text 供用户可见通道（全套净化）；str() 取 safe 渲染，
+    明文仅经 raw_text 显式获取。
+    """
+
+    __slots__ = ("template", "params")
+
+    def __init__(self, template: str, params: Mapping[str, _TextParam]):
+        tokens = set(_ERROR_TEXT_TOKEN_PATTERN.findall(template))
+        names = set(params)
+        if tokens != names:
+            raise ValueError(
+                raw_error_text(
+                    "错误文本模板与参数不一致: 占位 {tokens} 参数 {names}",
+                    tokens=as_plain_list(sorted(tokens)),
+                    names=as_plain_list(sorted(names)),
+                )
+            )
+        self.template = template
+        self.params = dict(params)
+
+    def _substitute(self) -> str:
+        """参数按策略渲染后单遍替换占位符，替换产物不参与二次匹配。"""
+        rendered = {name: param.render() for name, param in self.params.items()}
+        return _ERROR_TEXT_TOKEN_PATTERN.sub(lambda match: rendered[match.group(1)], self.template)
+
+    def raw_text(self) -> str:
+        """日志通道渲染：SECRET 掩码、URL 净化，其余参数原样。"""
+        return self._substitute()
+
+    def safe_text(self) -> str:
+        """用户通道渲染：空值尾形终止后经截断与全套脱敏管线，产物幂等。"""
+        return sanitize_error_text(terminate_empty_value_credential_tails(self._substitute()))
+
+    def assembled_text(self) -> str:
+        """边界渲染：全套净化且不截断，供错误载荷出口（幂等重放口径）。"""
+        return sanitize_assembled_text(self._substitute())
+
+    def __str__(self) -> str:
+        return self.safe_text()
+
+
+def error_text(template: str, **params: _TextParam) -> ErrorText:
+    """以关键字参数形态构造 ErrorText，模板占位符与参数名双向校验。"""
+    return ErrorText(template, params)
+
+
+def raw_error_text(template: str, **params: _TextParam) -> str:
+    """构造并直接取日志通道渲染：内部 builtin 异常与日志侧文本的惯用产线。"""
+    return ErrorText(template, params).raw_text()
+
+
+def safe_error_text(template: str, **params: _TextParam) -> str:
+    """构造并直接取用户通道渲染：直达用户输出的 SDK/CLI 边界惯用产线。"""
+    return ErrorText(template, params).safe_text()
+
+
+def base_detail_error_text(base: Any, detail: Any) -> ErrorText:
+    """「基底文案: 详情」组合：基底为可信文案常量，详情为不可信自由文本。
+
+    基底经参数进入而非拼入模板：文案演化出花括号不被当作占位符炸构造期校验。
+    """
+    return error_text(
+        "{base}: {detail}",
+        base=as_plain(base),
+        detail=as_detail(detail),
+    )
+
+
+def detail_error_text(value: Any) -> ErrorText:
+    """外来不可信字符串一步包裹为 ErrorText 载荷，经 detail 分类进入双通道渲染。"""
+    return error_text("{detail}", detail=as_detail(value))
+
+
+def render_boundary_error_text(message: str | ErrorText) -> str:
+    """错误载荷边界的统一渲染：ErrorText 取不截断的全套净化，str 走幂等净化。"""
+    if isinstance(message, ErrorText):
+        return message.assembled_text()
+    return sanitize_assembled_text(message)
+
+
+def assemble_error_segments(*segments: str | ErrorText) -> str:
+    """多段错误文本以段分隔符拼接：段按日志原文渲染并在段边界终止，空段不参与。
+
+    终止在拼接前对每段文末补空值凭据尾形（幂等）——段边界后拼入的恢复指引在
+    出口重放时不被值吸收吞成掩码；ErrorText 段取 raw_text（日志原文语义），
+    用户通道净化由出口的边界渲染承担。
+    """
+    joined: list[str] = []
+    for segment in segments:
+        text = segment.raw_text() if isinstance(segment, ErrorText) else segment
+        if text:
+            joined.append(terminate_empty_value_credential_tails(text))
+    return ERROR_TEXT_SEGMENT_JOINER.join(joined)
+
+
+def validation_error_user_message(exc: ValidationError) -> ErrorText:
     """取首条 pydantic 校验错误的字段与原因拼为可定位的用户消息。"""
     first = exc.errors()[0]
     field = ".".join(str(part) for part in first.get("loc", ()))
-    return f"参数校验失败: {field or first.get('type')} {first.get('msg')}"
+    return error_text(
+        "参数校验失败: {field} {reason}",
+        field=as_plain(field or str(first.get("type"))),
+        reason=as_text(first.get("msg")),
+    )
 
 
 class SeedreamMCPError(Exception):
     """所有 Seedream MCP 自定义异常的基类，供按类型捕获与分支处理。
 
+    message 接受纯字符串或 ErrorText：字符串走遗留净化路径；ErrorText 时
+    str(exc) 与 .message 为日志通道渲染（原文语义），用户可见渲染经
+    format_error_for_user 取 safe_text。
+
     Attributes:
-        message: 人类可读的错误描述文本。
+        message: 日志通道渲染文本（SECRET 掩码、URL 净化，其余原文）。
         error_code: 结构化错误码。
     """
 
     def __init__(
         self,
-        message: str,
+        message: str | ErrorText,
         error_code: str | None = None,
     ):
-        super().__init__(message)
-        self.message = message
+        if isinstance(message, ErrorText):
+            payload: ErrorText | None = message
+            rendered = message.raw_text()
+        else:
+            payload = None
+            rendered = message
+        super().__init__(rendered)
+        self._error_text_payload = payload
+        self._message = rendered
         self.error_code = error_code
+
+    @property
+    def message(self) -> str:
+        """日志通道渲染文本。"""
+        return self._message
+
+    @property
+    def error_text_payload(self) -> ErrorText | None:
+        """结构化载荷，纯字符串构造时为 None。"""
+        return self._error_text_payload
 
 
 class SeedreamConfigError(SeedreamMCPError):
@@ -65,7 +260,7 @@ class SeedreamAPIError(SeedreamMCPError):
 
     def __init__(
         self,
-        message: str,
+        message: str | ErrorText,
         status_code: int | None = None,
         response_data: dict[str, Any] | None = None,
         error_code: str | None = None,
@@ -86,7 +281,9 @@ class SeedreamValidationError(SeedreamMCPError):
             截断前缀未经脱敏，输出到用户可见层前仍须经 sanitize_error_text。
     """
 
-    def __init__(self, message: str, field: str | None = None, value: Any | None = None):
+    def __init__(
+        self, message: str | ErrorText, field: str | None = None, value: Any | None = None
+    ):
         super().__init__(message)
         self.field = field
         self.value = _truncate_value_for_output(value)
@@ -303,7 +500,8 @@ def handle_api_error(
     Returns:
         装配完成的 SeedreamAPIError，供调用方直接 raise。
     """
-    error_message = _lookup_http_error_profile(response_status).base_message
+    profile = _lookup_http_error_profile(response_status)
+    message: str | ErrorText = profile.base_message
 
     error_code: str | None = None
     if isinstance(response_data, dict):
@@ -316,15 +514,13 @@ def handle_api_error(
             detail_fragment = upstream_message_fragment(error_detail.get("message"))
         elif isinstance(error_detail, str):
             detail_fragment = upstream_message_fragment(error_detail)
+        if detail_fragment is None:
+            detail_fragment = upstream_message_fragment(response_data.get("message"))
         if detail_fragment is not None:
-            error_message = f"{error_message}: {detail_fragment}"
-        else:
-            top_fragment = upstream_message_fragment(response_data.get("message"))
-            if top_fragment is not None:
-                error_message = f"{error_message}: {top_fragment}"
+            message = base_detail_error_text(profile.base_message, detail_fragment)
 
     return SeedreamAPIError(
-        message=error_message,
+        message=message,
         status_code=response_status,
         response_data=response_data,
         error_code=error_code,
@@ -335,7 +531,10 @@ def handle_api_error(
 # 自定义异常类型到归约档案的映射，按 isinstance 顺序匹配。APIError 按 status 子查表，
 # 不在此列表；SeedreamMCPError 基类与未识别异常各自有兜底档案。
 _EXCEPTION_PROFILES: tuple[tuple[type, _ErrorProfile], ...] = (
-    (SeedreamConfigError, _ErrorProfile("配置错误", "", "config_error", http_status=503)),
+    (
+        SeedreamConfigError,
+        _ErrorProfile("配置错误", "请检查服务端配置后重试。", "config_error", http_status=503),
+    ),
     (
         SeedreamValidationError,
         _ErrorProfile(
@@ -392,30 +591,57 @@ def iter_error_profiles() -> Iterator[_ErrorProfile]:
 def format_error_for_user(error: Exception) -> str:
     """按异常类型将错误格式化为面向用户的提示文案。
 
-    展示标题与可操作建议取自 resolve_error_profile 归约档案；message 与错误码均
-    先截断再脱敏，上游回显的敏感片段不进入用户可见输出，拼接前收敛 message 尾形、
-    产物经出口净化重放后指引仍完整；仅 APIError 携带错误码时附加错误码提示。
+    展示标题与可操作建议取自 resolve_error_profile 归约档案；ErrorText 载荷经
+    safe_text 全套净化，遗留字符串路径经截断脱敏，上游回显的敏感片段不进入用户
+    可见输出；仅 APIError 携带错误码时附加错误码提示，错误码与 message 同口径
+    净化。
     """
     profile = resolve_error_profile(error)
-    if isinstance(error, SeedreamAPIError):
-        raw_message = error.message
+    code_hint = ""
+    if isinstance(error, SeedreamAPIError) and error.error_code:
         # 错误码是上游可回显的自由文本，经 sanitize_error_text 与 message 同口径净化。
-        code_hint = (
-            f" [错误码: {sanitize_error_text(error.error_code)}]" if error.error_code else ""
-        )
+        code_hint = f" [错误码: {sanitize_error_text(error.error_code)}]"
+    payload = error.error_text_payload if isinstance(error, SeedreamMCPError) else None
+    if payload is not None:
+        rendered = payload.safe_text()
     elif isinstance(error, SeedreamMCPError):
-        raw_message = error.message
-        code_hint = ""
+        rendered = _sanitize_message_for_output(error.message)
     else:
-        raw_message = str(error)
-        code_hint = ""
+        rendered = _sanitize_message_for_output(str(error))
     # 尾随空白衔接 Bearer 空白分支、空值尾形衔接键值与 Bearer 冒号分支，重放都会把
-    # joiner 与指引开头吞成掩码；收敛尾随空白并对空值尾形补掩码终止形态。
-    message = _sanitize_message_for_output(raw_message).rstrip()
-    if _EMPTY_VALUE_CREDENTIAL_TAIL_PATTERN.search(message):
-        message += "***"
+    # joiner 与指引开头吞成掩码；收敛尾随空白并对空值尾形补掩码终止形态（与
+    # sanitize_assembled_text 共用终止逻辑，指引拼接后重放恒等）。
+    message = terminate_empty_value_credential_tails(rendered.rstrip())
 
     line = f"{profile.display_title}: {message}{code_hint}"
     if profile.user_hint:
-        line += f"{ERROR_TEXT_SEGMENT_JOINER}{profile.user_hint}"
+        line = assemble_error_segments(line, profile.user_hint)
     return line
+
+
+def failure_message_with_guidance(
+    prefix: str, user_facing: str, user_hint: str, fallback_guidance: str
+) -> str:
+    """装配带恢复指引的失败消息：场景前缀包裹用户文案。
+
+    user_facing 取调用方对同一异常单次计算的 format_error_for_user 产物；
+    user_hint 非空时文案已含建议，取日志通道渲染不叠加，空建议以段分隔符追加
+    fallback_guidance。
+
+    Args:
+        prefix: 失败场景前缀，与「失败：」拼接为消息开头。
+        user_facing: 已格式化的用户可见错误文案。
+        user_hint: 归约档案携带的可操作建议，空串表示无建议。
+        fallback_guidance: 无 user_hint 时追加的回退恢复指引。
+
+    Returns:
+        日志通道语义的失败消息字符串。
+    """
+    failure_line = error_text(
+        "{prefix}失败：{detail}",
+        prefix=as_plain(prefix),
+        detail=as_text(user_facing),
+    )
+    if user_hint:
+        return failure_line.raw_text()
+    return assemble_error_segments(failure_line, fallback_guidance)

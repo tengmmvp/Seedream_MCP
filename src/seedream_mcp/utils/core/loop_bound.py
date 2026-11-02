@@ -14,6 +14,7 @@ import weakref
 from collections.abc import Callable, Hashable
 from typing import Any, Generic, TypeVar
 
+from .errors import as_plain, raw_error_text
 from .inflight import InflightEntry
 
 # 各调用点的最近信号量缓存：key -> (事件循环, 限值, 信号量)。key 集合由调用点
@@ -32,7 +33,7 @@ def loop_bound_semaphore(limit: int, *, key: str) -> asyncio.Semaphore:
         ValueError: limit 小于 1（Semaphore(0) 会永久阻塞，尽早暴露配置错误）。
     """
     if limit < 1:
-        raise ValueError(f"信号量并发上限须不小于 1: {limit}")
+        raise ValueError(raw_error_text("信号量并发上限须不小于 1: {limit}", limit=as_plain(limit)))
     loop = asyncio.get_running_loop()
     cached = _last_semaphore.get(key)
     if cached is not None and cached[0] is loop and cached[1] == limit:

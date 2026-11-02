@@ -8,6 +8,7 @@ import unicodedata
 from bisect import bisect_right
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar, cast
+from urllib.parse import urlparse
 
 # 上游错误 message 片段拼入异常文案前的截断上限，防止超大错误体形成巨型日志行；
 # 重试日志脱敏时复用为宽截断上限，日志保留原文便于排障。
@@ -535,18 +536,6 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     + r"\S+))*)"
 )
 
-# 空值尾形的凭据前缀探测：敏感键或 Bearer 冒号形态（冒号分支同前置断言）以分隔符
-# 收尾而值为空时，键值与 Bearer 净化均因值缺失不命中、裸前缀存活；拼接恢复指引前
-# 据此补掩码终止，防下游重放把 joiner 与指引开头吞成掩码。
-_EMPTY_VALUE_CREDENTIAL_TAIL_PATTERN = re.compile(
-    r"(?i)(?:(?<![A-Za-z0-9_/.=@\-])Bearer[:：]\s*|(?:"
-    + _SENSITIVE_KEYVALUE_KEYS
-    + r")(?:"
-    + _SENSITIVE_KEYVALUE_SEPARATOR
-    + r"))\Z"
-)
-
-
 # 形近字母折叠表：与 ASCII 字母形近的西里尔、希腊与拉丁扩展字符 NFKD 不折叠，仅在
 # 匹配判定时归一；条目目标字母对齐敏感关键词字母表可达的范围，不泛化到全字母表；
 # U+0445→x 另承重于键值分隔符转义族：西里尔同形字母冒充 x 的十六进制转义分隔符
@@ -902,6 +891,46 @@ def _strip_url_userinfo(text: str) -> str:
     return _URL_USERINFO_PATTERN.sub(_replace, text)
 
 
+def sanitize_url(url: str) -> str:
+    """脱敏 URL 用于错误文案与日志，保留 scheme/host/path，剥离凭据、查询参数与控制字符。
+
+    控制字符 CRLF 等会被剥离，防止攻击者经由 URL 在日志中伪造行，注入误导性记录。
+    scheme 非 http/https 或 host 与 path 同时为空时无 authority 可保留，改输出
+    ``scheme:<redacted>``。
+
+    Args:
+        url: 原始 URL 字符串。
+
+    Returns:
+        脱敏后的 URL；解析失败返回 ``<invalid-url>``。
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if parsed.scheme not in ("http", "https") or (not host and not parsed.path):
+            result = f"{parsed.scheme}:<redacted>"
+        else:
+            # 重建不含 userinfo 的 netloc；hostname 对 IPv6 字面量剥离方括号，需补回
+            # 以保持 host 与端口边界。端口非法不整体降级，丢弃端口保留 scheme/host
+            # 供日志定位目标主机。
+            if ":" in host:
+                host = f"[{host}]"
+            netloc = host
+            try:
+                port = parsed.port
+            except ValueError:
+                port = None
+            if port is not None:
+                netloc = f"{netloc}:{port}"
+            if parsed.query:
+                result = f"{parsed.scheme}://{netloc}{parsed.path}?<query-redacted>"
+            else:
+                result = f"{parsed.scheme}://{netloc}{parsed.path}"
+    except Exception:
+        return "<invalid-url>"
+    return re.sub(r"[\x00-\x1f\x7f]", "", result)
+
+
 _SanitizedValue = TypeVar("_SanitizedValue")
 
 
@@ -967,13 +996,40 @@ def sanitize_error_text(
     return cast("_SanitizedValue", sanitized)
 
 
+# 空值尾形的凭据前缀探测：敏感键或 Bearer 冒号形态（冒号分支同前置断言）以分隔符
+# 收尾而值为空时，键值与 Bearer 净化均因值缺失不命中、裸前缀存活；终止锚定文末，
+# 在此补掩码终止形态，防后续拼接恢复指引时值吸收把指引吞成掩码。终止形（*** 位于
+# 文末）重放恒等。错误消息的动态值经 ErrorText 分类参数进入、多段拼接经
+# assemble_error_segments 在参数已终止后聚合，段边界不进入文本层判定——本模式
+# 只服务文末尾形与防御性重放，不依赖任何文字脚本判别。
+_EMPTY_VALUE_CREDENTIAL_TAIL_SEGMENT_PATTERN = re.compile(
+    r"(?i)(?:(?<![A-Za-z0-9_/.=@\-])Bearer[:：]\s*|(?:"
+    + _SENSITIVE_KEYVALUE_KEYS
+    + r")(?:"
+    + _SENSITIVE_KEYVALUE_SEPARATOR
+    + r"))(?=\Z)"
+)
+
+
+def terminate_empty_value_credential_tails(text: str) -> str:
+    """空值凭据尾形在文末补掩码终止形态，消息收敛与边界净化共用。
+
+    键名交替组与 Bearer 分支均内嵌触发词字面段，预检未命中即无匹配，免约 50
+    分支正则对干净文本的全文扫描。
+    """
+    if _IDENTITY_PRECHECK_TRIGGER_PATTERN.search(text) is None:
+        return text
+    return _EMPTY_VALUE_CREDENTIAL_TAIL_SEGMENT_PATTERN.sub(r"\g<0>***", text)
+
+
 def sanitize_assembled_text(text: str) -> str:
     """组装消息的幂等边界净化：全套管线，对掩码产物重放恒等。
 
     供 build_error_dict 等错误构造边界兜底：构造点遗漏净化的凭据片段（键值
-    裸值、userinfo、Bearer）在此掩码剥离，已掩码标记与恢复指引原样保留。
+    裸值、userinfo、Bearer）在此掩码剥离，已掩码标记与恢复指引原样保留；空值
+    凭据尾形先补掩码终止，其后拼入的恢复指引不被值吸收吞成掩码。
     """
-    return _sanitize_output_string(text)
+    return _sanitize_output_string(terminate_empty_value_credential_tails(text))
 
 
 def sanitize_summary_lines(text: str) -> str:
@@ -1000,7 +1056,8 @@ _URL_DATA_PREFIX_PATTERN = re.compile(r"https?://", re.IGNORECASE)
 _WHITESPACE_PATTERN = re.compile(r"\s")
 
 # 恒等快路触发词：由敏感键两清单与 Bearer 分支词派生，注册表加词自动进入预检集，
-# 键值交替组的各复合分支均内嵌清单词字面段，超集由构造保证；命中即回退完整净化。
+# 键值交替组的各复合分支均内嵌清单词字面段，空值尾形终止模式的键匹配复用交替组、
+# Bearer 分支同词，超集由构造保证；命中即回退完整净化或终止扫描。
 _IDENTITY_PRECHECK_TRIGGER_WORDS = frozenset(
     (*_SENSITIVE_KEY_KEYWORDS, *_SENSITIVE_KEY_SUBSTRINGS, "bearer")
 )
