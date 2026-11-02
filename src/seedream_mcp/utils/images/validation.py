@@ -21,7 +21,16 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ...definitions.conventions import MAX_IMAGE_PIXELS
-from ..core.errors import SeedreamValidationError
+from ..core.errors import (
+    ErrorText,
+    SeedreamValidationError,
+    as_detail,
+    as_plain,
+    as_text,
+    base_detail_error_text,
+    error_text,
+    raw_error_text,
+)
 from ..core.formats import (
     EXTENSIONS_BY_PIL_FORMAT,
     MIME_BY_EXTENSION,
@@ -69,8 +78,11 @@ LocalImageCandidate = tuple[Path, os.stat_result]
 def _unsupported_format_error(offender: str, value_label: str) -> SeedreamValidationError:
     """组装格式不支持的统一拒绝错误，白名单子句单点拼接防两条拒绝路径文案漂移。"""
     return SeedreamValidationError(
-        f"不支持的图像格式: {offender}，"
-        f"支持的格式: {'/'.join(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)}",
+        error_text(
+            "不支持的图像格式: {offender}，支持的格式: {supported}",
+            offender=as_text(offender),
+            supported=as_plain("/".join(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)),
+        ),
         field="image",
         value=value_label,
     )
@@ -156,10 +168,10 @@ def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> str
     except (ValueError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
         # SyntaxError：Pillow 的 PNG 插件对损坏 chunk 抛原生 SyntaxError，归一为
         # 校验错误，保留 field/value 元数据。
-        message = (
+        message: str | ErrorText = (
             UNIDENTIFIED_IMAGE_MESSAGE
             if is_unidentified_image_error(exc)
-            else f"图像维度解析失败: {str(exc)}"
+            else base_detail_error_text("图像维度解析失败", exc)
         )
         raise SeedreamValidationError(message, field="image", value=field_value) from exc
 
@@ -175,7 +187,7 @@ def read_and_decode_local_image(
     path: Path,
     *,
     field_value: str,
-    format_read_error: Callable[[OSError], str],
+    format_read_error: Callable[[OSError], str | ErrorText],
 ) -> tuple[bytes, str]:
     """no-follow 读取本地图像字节并做形态复核、限额复核、格式维度校验与出站标签一致性判定，供校验与读取两条路径复用。
 
@@ -189,7 +201,7 @@ def read_and_decode_local_image(
     Args:
         path: 已通过候选定位的本地文件路径。
         field_value: 出现在错误信息中的调用方输入标识。
-        format_read_error: 读取阶段 OSError 的文案生成函数。
+        format_read_error: 读取阶段 OSError 的文案生成函数，返回 str 或 ErrorText。
 
     Returns:
         读取并通过限额复核的完整图像字节与经一致性判定的出站 MIME 标签。
@@ -217,7 +229,11 @@ def read_and_decode_local_image(
     media_type = outbound_media_type(extension, actual_format)
     if media_type is None:
         raise SeedreamValidationError(
-            f"文件扩展名与实际内容不一致: {extension}，实际 {actual_format.lower()}",
+            error_text(
+                "文件扩展名与实际内容不一致: {extension}，实际 {actual}",
+                extension=as_text(extension),
+                actual=as_text(actual_format.lower()),
+            ),
             field="image",
             value=field_value,
         )
@@ -241,17 +257,31 @@ def _resolve_local_image_path(file_path: str) -> Path:
             基目录解析的形态，或 win32 分量含冒号即 NTFS 备用数据流形态。
     """
     if is_unc_path(file_path):
-        raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {file_path}")
+        raise ValueError(
+            raw_error_text("拒绝 UNC 路径以避免触发 SMB 连接: {path}", path=as_text(file_path))
+        )
     raw_path = Path(file_path)
     # 盘符相对与有根无盘符形态的 pathlib 拼接会丢弃基目录重设锚点，静默逃逸
     # 图片目录；判定与 normalize_path 共用单一来源。
     if is_drive_relative(raw_path):
-        raise ValueError(f"拒绝驱动器相对路径以避免绕过基目录解析: {file_path}")
+        raise ValueError(
+            raw_error_text(
+                "拒绝驱动器相对路径以避免绕过基目录解析: {path}", path=as_text(file_path)
+            )
+        )
     if is_windows_rooted_without_drive(raw_path):
-        raise ValueError(f"拒绝有根无盘符路径以避免绕过基目录解析: {file_path}")
+        raise ValueError(
+            raw_error_text(
+                "拒绝有根无盘符路径以避免绕过基目录解析: {path}", path=as_text(file_path)
+            )
+        )
     # 分量含冒号是 NTFS 备用数据流形态，读取会命中同文件的另一数据流。
     if has_windows_colon_component(file_path):
-        raise ValueError(f"拒绝路径分量含冒号以避免访问 NTFS 备用数据流: {file_path}")
+        raise ValueError(
+            raw_error_text(
+                "拒绝路径分量含冒号以避免访问 NTFS 备用数据流: {path}", path=as_text(file_path)
+            )
+        )
     if raw_path.is_absolute():
         return raw_path.resolve()
     return (_get_validation_base_dir() / raw_path).resolve()
@@ -269,7 +299,11 @@ def _validate_url(url: str) -> str:
             raise SeedreamValidationError("URL 不允许携带用户名密码", field="image", value=url)
         return url
     except ValueError as e:
-        raise SeedreamValidationError(f"URL验证失败: {str(e)}", field="image", value=url) from e
+        raise SeedreamValidationError(
+            base_detail_error_text("URL验证失败", e),
+            field="image",
+            value=url,
+        ) from e
 
 
 def image_candidate_stat(path: Path) -> os.stat_result | None:
@@ -377,7 +411,10 @@ def resolve_local_image_candidate(
         scheme = image.partition("://")[0]
         if not (len(scheme) == 1 and sys.platform == "win32"):
             raise SeedreamValidationError(
-                f"仅支持图像 URL（http/https）、Data URI 或本地路径: {image}",
+                error_text(
+                    "仅支持图像 URL（http/https）、Data URI 或本地路径: {image}",
+                    image=as_text(image),
+                ),
                 field="image",
                 value=image,
             )
@@ -386,7 +423,10 @@ def resolve_local_image_candidate(
     # 参考图链与浏览、保存链拒绝口径一致。
     if has_windows_colon_component(image):
         raise SeedreamValidationError(
-            f"拒绝参考图路径分量含冒号以避免访问 NTFS 备用数据流: {image}",
+            error_text(
+                "拒绝参考图路径分量含冒号以避免访问 NTFS 备用数据流: {image}",
+                image=as_text(image),
+            ),
             field="image",
             value=image,
         )
@@ -394,14 +434,14 @@ def resolve_local_image_candidate(
     # 候选资格检查归为未知错误；判定与 normalize_path 共用单一来源。
     if has_null_byte(image):
         raise SeedreamValidationError(
-            f"路径含空字节: {image}",
+            error_text("路径含空字节: {image}", image=as_text(image)),
             field="image",
             value=image,
         )
     # 有根无盘符形态在候选定位入口显式拒绝，避免退化为含糊的找不到文件。
     if is_windows_rooted_without_drive(Path(image)):
         raise SeedreamValidationError(
-            f"拒绝有根无盘符路径以避免绕过基目录解析: {image}",
+            error_text("拒绝有根无盘符路径以避免绕过基目录解析: {image}", image=as_text(image)),
             field="image",
             value=image,
         )
@@ -420,20 +460,28 @@ def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
     """校验图像宽高下限、宽高比与总像素约束，供本地文件与 Data URI 两条路径复用。"""
     if width < MIN_IMAGE_EDGE or height < MIN_IMAGE_EDGE:
         raise SeedreamValidationError(
-            f"图像宽高长度至少{MIN_IMAGE_EDGE}px", field="image", value=value
+            error_text("图像宽高长度至少{min_edge}px", min_edge=as_plain(MIN_IMAGE_EDGE)),
+            field="image",
+            value=value,
         )
 
     ratio = width / height
     if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
         raise SeedreamValidationError(
-            f"图像宽高比需在[{MIN_IMAGE_RATIO}, {MAX_IMAGE_RATIO}]范围内",
+            error_text(
+                "图像宽高比需在[{min_ratio}, {max_ratio}]范围内",
+                min_ratio=as_plain(MIN_IMAGE_RATIO),
+                max_ratio=as_plain(MAX_IMAGE_RATIO),
+            ),
             field="image",
             value=value,
         )
 
     if width * height > MAX_IMAGE_PIXELS:
         raise SeedreamValidationError(
-            f"图像总像素不能超过 {MAX_IMAGE_PIXELS}", field="image", value=value
+            error_text("图像总像素不能超过 {max_pixels}", max_pixels=as_plain(MAX_IMAGE_PIXELS)),
+            field="image",
+            value=value,
         )
 
 
@@ -464,13 +512,27 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         try:
             stat_result = path.stat()
         except FileNotFoundError:
-            raise SeedreamValidationError(f"文件不存在: {path}", field="image", value=file_path)
+            raise SeedreamValidationError(
+                error_text("文件不存在: {path}", path=as_text(path)),
+                field="image",
+                value=file_path,
+            )
         except OSError as exc:
             raise SeedreamValidationError(
-                f"无法访问文件: {path} -> {exc}", field="image", value=file_path
+                error_text(
+                    "无法访问文件: {path} -> {reason}",
+                    path=as_text(path),
+                    reason=as_detail(exc),
+                ),
+                field="image",
+                value=file_path,
             ) from exc
         if not stat.S_ISREG(stat_result.st_mode):
-            raise SeedreamValidationError(f"路径不是文件: {path}", field="image", value=file_path)
+            raise SeedreamValidationError(
+                error_text("路径不是文件: {path}", path=as_text(path)),
+                field="image",
+                value=file_path,
+            )
 
         if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
             raise _unsupported_format_error(path.suffix, file_path)
@@ -488,14 +550,18 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
             read_and_decode_local_image(
                 path,
                 field_value=file_path,
-                format_read_error=lambda exc: f"无法读取文件: {path} -> {exc}",
+                format_read_error=lambda exc: error_text(
+                    "无法读取文件: {path} -> {reason}", path=as_text(path), reason=as_detail(exc)
+                ),
             )
 
         return str(path.absolute())
 
     except (OSError, ValueError, RuntimeError, SyntaxError) as e:
         raise SeedreamValidationError(
-            f"文件路径验证失败: {str(e)}", field="image", value=file_path
+            base_detail_error_text("文件路径验证失败", e),
+            field="image",
+            value=file_path,
         ) from e
 
 
@@ -530,7 +596,9 @@ def _validate_data_uri(data_uri: str) -> str:
         fmt = media_type.lower().split("image/")[-1]
         if fmt not in _DATA_URI_ALLOWED_FORMATS:
             raise SeedreamValidationError(
-                f"不支持的Data URI图片格式: {fmt}", field="image", value=data_uri
+                error_text("不支持的Data URI图片格式: {format}", format=as_text(fmt)),
+                field="image",
+                value=data_uri,
             )
         # 官方要求格式小写；标准 MIME 子类型经 formats 单一映射派生，jpg 随之归一为 jpeg。
         canonical_fmt = MIME_BY_EXTENSION[f".{fmt}"].split("/", 1)[1]
@@ -549,7 +617,9 @@ def _validate_data_uri(data_uri: str) -> str:
             raw = base64.b64decode(b64, validate=True)
         except ValueError as e:
             raise SeedreamValidationError(
-                f"Base64 解码失败: {str(e)}", field="image", value=data_uri
+                base_detail_error_text("Base64 解码失败", e),
+                field="image",
+                value=data_uri,
             ) from e
 
         size_bytes = len(raw)
@@ -564,8 +634,11 @@ def _validate_data_uri(data_uri: str) -> str:
         media_type = outbound_media_type(f".{canonical_fmt}", actual_format)
         if media_type is None:
             raise SeedreamValidationError(
-                f"Data URI 声明格式与实际内容不一致: 声明 {canonical_fmt}，"
-                f"实际 {actual_format.lower()}",
+                error_text(
+                    "Data URI 声明格式与实际内容不一致: 声明 {declared}，实际 {actual}",
+                    declared=as_text(canonical_fmt),
+                    actual=as_text(actual_format.lower()),
+                ),
                 field="image",
                 value=data_uri,
             )
@@ -574,7 +647,9 @@ def _validate_data_uri(data_uri: str) -> str:
 
     except (OSError, ValueError, SyntaxError) as e:
         raise SeedreamValidationError(
-            f"Data URI 验证失败: {str(e)}", field="image", value=data_uri
+            base_detail_error_text("Data URI 验证失败", e),
+            field="image",
+            value=data_uri,
         ) from e
 
 
@@ -642,5 +717,7 @@ def validate_image_path(path: str, skip_dimensions: bool = False) -> str | None:
             return e.message
 
     except Exception as e:
-        logger.error("路径验证失败 {}: {}", path, e)
-        return f"路径验证错误: {str(e)}"
+        logger.opt(exception=True).error("路径验证失败 {}: {}", path, e)
+        # 诊断链返回 str 契约不变：结构化构造后取 raw 渲染，嵌入层（inputs）再整体
+        # 以 as_detail 参数进入最终错误文本。
+        return raw_error_text("路径验证错误: {reason}", reason=as_detail(e))

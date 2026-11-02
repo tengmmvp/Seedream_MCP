@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import stat
 import threading
 import time
 from io import BytesIO
@@ -265,9 +266,9 @@ _thumb_inflight: LoopKeyedInflight[Path, bytes | None] = LoopKeyedInflight()
 async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes | None:
     """带落盘缓存与在途去重的缩略图获取：命中直接读文件，未命中共享单次解码。
 
-    缓存键取进入解码前的一次源图 stat，解码期间源图被替换时旧键写入的缩略图
-    随旧图失效，新图的键未命中重新生成；同循环内并发同键共享同一解码 task
-    （跨循环各自解码），取消语义与孤儿异常兜底由 InflightEntry 承担。
+    缓存键取进入解码前的一次源图 no-follow stat，解码期间源图被替换时旧键写入
+    的缩略图随旧图失效，新图的键未命中重新生成；同循环内并发同键共享同一解码
+    task（跨循环各自解码），取消语义与孤儿异常兜底由 InflightEntry 承担。
 
     Args:
         image_path: 已保存图片的文件路径。
@@ -278,14 +279,24 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
             失败时为 None。
 
     Raises:
-        FileNotFoundError: 源图缺失，与生成失败分档供调用方映射。
+        FileNotFoundError: 源图缺失或非常规文件（目录、断链、符号链接，及 POSIX
+            中间分量为普通文件的 NotADirectoryError），与生成失败分档供调用方映射。
         OSError: 源图 stat 瞬时失败（权限、共享冲突），不与缺失混淆。
     """
     thumbs_root = thumbnail_cache_root(images_root)
 
     def _stat_and_read() -> tuple[bytes | None, Path]:
-        stat = image_path.stat()
-        thumb = thumbs_root / _thumb_key(image_path, stat.st_mtime_ns, stat.st_size)
+        # no-follow 口径与原图端点的打开序列一致，不跟随渲染符号链接目标；POSIX
+        # 中间分量为普通文件时 stat 抛 NotADirectoryError（FileNotFoundError 的
+        # 兄弟异常），显式并列归缺失，不逃逸为瞬时 stat 失败。
+        try:
+            st = image_path.stat(follow_symlinks=False)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise FileNotFoundError(image_path) from exc
+        if not stat.S_ISREG(st.st_mode):
+            # 目录、断链与符号链接等非常规文件按缺失口径上抛，免去调用方另做存在性预检。
+            raise FileNotFoundError(image_path)
+        thumb = thumbs_root / _thumb_key(image_path, st.st_mtime_ns, st.st_size)
         # 空字节条目视为未命中，重新生成覆盖写损坏缓存
         return _read_bytes_safely(thumb), thumb
 

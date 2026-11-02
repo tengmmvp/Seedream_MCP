@@ -15,7 +15,17 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from ..core.errors import SeedreamMCPError, SeedreamValidationError
+from ..core.errors import (
+    ErrorText,
+    SeedreamMCPError,
+    SeedreamValidationError,
+    as_detail,
+    as_plain,
+    as_text,
+    base_detail_error_text,
+    detail_error_text,
+    error_text,
+)
 from ..core.executors import (
     CpuOffloadPoolClosedError,
     run_in_cpu_pool,
@@ -100,7 +110,7 @@ async def prepare_image_input(image: str) -> str:
         raise
     except Exception as e:
         # 兜底异常均来自本地预处理，归校验档。
-        raise SeedreamValidationError(f"图像处理失败: {e}") from e
+        raise SeedreamValidationError(base_detail_error_text("图像处理失败", e)) from e
 
 
 def _resolves_outside_read_scope(
@@ -117,7 +127,7 @@ def _resolves_outside_read_scope(
     return not any(iter_local_candidates(normalized, images_root, read_scope))
 
 
-def _format_local_read_error(exc: OSError, normalized: str) -> str:
+def _format_local_read_error(exc: OSError, normalized: str) -> ErrorText:
     """构建本地文件读取失败的错误文案，回显解析后的绝对路径。
 
     路径取异常携带的 filename，缺失时回退调用方输入的原样字符串，与诊断分支
@@ -125,12 +135,16 @@ def _format_local_read_error(exc: OSError, normalized: str) -> str:
     errno 数值。
     """
     if exc.strerror:
-        reason = exc.strerror
+        reason = as_detail(exc.strerror)
     elif exc.errno is not None:
-        reason = f"errno {exc.errno}"
+        reason = as_plain(f"errno {exc.errno}")
     else:
-        reason = "无法读取"
-    return f"读取图像文件失败: {reason}: {exc.filename or normalized}"
+        reason = as_plain("无法读取")
+    return error_text(
+        "读取图像文件失败: {reason}: {path}",
+        reason=reason,
+        path=as_text(exc.filename or normalized),
+    )
 
 
 def _prepare_local_image(normalized: str, original: str) -> str:
@@ -156,7 +170,11 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             try:
                 resolved_probe = normalize_path(normalized, str(images_root))
             except ValueError as exc:
-                raise SeedreamValidationError(str(exc), field="image", value=normalized) from exc
+                raise SeedreamValidationError(
+                    detail_error_text(exc),
+                    field="image",
+                    value=normalized,
+                ) from exc
             if not os.path.isabs(normalized) and not is_within_resolved(
                 resolved_probe, images_root
             ):
@@ -172,7 +190,8 @@ def _prepare_local_image(normalized: str, original: str) -> str:
                     value=normalized,
                 )
             error_msg = validate_image_path(normalized, skip_dimensions=True)
-            error_text = error_msg or "图像路径校验失败"
+            # 诊断文案可能内嵌上游异常原文，按最高不信等级进入最终错误文本。
+            diagnostic = error_msg or "图像路径校验失败"
             suggestions = suggest_similar_paths(original, search_dirs=[str(images_root)])
             suggestion_text = ""
             if suggestions:
@@ -180,7 +199,13 @@ def _prepare_local_image(normalized: str, original: str) -> str:
                     f"  • {suggestion}" for suggestion in suggestions[:3]
                 )
             raise SeedreamValidationError(
-                f"{error_text}{suggestion_text}", field="image", value=normalized
+                error_text(
+                    "{diagnostic}{suggestions}",
+                    diagnostic=as_detail(diagnostic),
+                    suggestions=as_text(suggestion_text),
+                ),
+                field="image",
+                value=normalized,
             )
 
     validated_path, _ = found
