@@ -19,6 +19,8 @@ from ..config import (
     build_config_from_sources,
 )
 from .transport import is_loopback_bind_host
+from ..utils.core.errors import as_plain, as_text, safe_error_text
+from ..utils.core.http_int import strict_http_int
 from ..utils.core.logs import LEGAL_LOG_LEVELS
 from ..utils.model.capabilities import MODEL_ALIASES
 from ..version import __version__
@@ -51,13 +53,21 @@ def _log_level_type(value: str) -> str:
 
 
 def _port_type(value: str) -> int:
-    """校验端口为 1-65535 范围内的整数，作为 argparse type 使用。"""
-    try:
-        port = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"端口必须为整数，收到 {value!r}")
+    """校验端口为 1-65535 的纯 ASCII 十进制数字，作为 argparse type 使用。
+
+    字面量口径经 strict_http_int 单源，拒绝裸 int() 可解析的 '8_0'、'+80'、
+    ' 80' 与全角数字等非规范形态，避免手误静默绑定另一合法端口。
+    """
+    # ArgumentTypeError 只收 str，repr 形态在参数处预渲染后走 safe 通道。
+    port = strict_http_int(value)
+    if port is None:
+        raise argparse.ArgumentTypeError(
+            safe_error_text("端口必须为纯 ASCII 数字，收到 {value}", value=as_text(repr(value)))
+        )
     if not 1 <= port <= 65535:
-        raise argparse.ArgumentTypeError(f"端口必须在 1-65535 范围内，收到 {port}")
+        raise argparse.ArgumentTypeError(
+            safe_error_text("端口必须在 1-65535 范围内，收到 {port}", port=as_plain(port))
+        )
     return port
 
 

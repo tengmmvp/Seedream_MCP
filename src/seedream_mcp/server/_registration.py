@@ -147,9 +147,16 @@ from ..tools.outputs import (
     build_error_structured,
     build_error_tool_result,
 )
-from ..utils.core.errors import SeedreamConfigError
+from ..utils.core.errors import (
+    ErrorText,
+    SeedreamConfigError,
+    as_plain,
+    as_text,
+    assemble_error_segments,
+    base_detail_error_text,
+    raw_error_text,
+)
 from ..utils.core.logs import get_logger
-from ..utils.core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 from ..utils.io.path import get_workspace_roots
 from ..utils.io.roots import (
     modern_revision_negotiated,
@@ -277,12 +284,15 @@ def _filter_unset_params(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 def _validation_error_message(exc: ValidationError) -> str:
     """把输入模型构造期的校验失败展开为可读文本，逐条呈现字段路径与消息。"""
-    parts: list[str] = []
+    parts: list[str | ErrorText] = []
     for error in exc.errors():
         location = ".".join(str(item) for item in error["loc"])
         message = str(error["msg"])
-        parts.append(f"{location}: {message}" if location else message)
-    return ERROR_TEXT_SEGMENT_JOINER.join(parts)
+        if location:
+            parts.append(base_detail_error_text(location, message))
+        else:
+            parts.append(message)
+    return assemble_error_segments(*parts)
 
 
 async def _validation_error_result(tool_name: str, exc: ValidationError) -> CallToolResult:
@@ -322,7 +332,11 @@ async def _run_tool_pipeline(
     unknown_keys = kwargs.keys() - model_cls.model_fields.keys()
     if unknown_keys:
         raise TypeError(
-            f"工具 {tool_name} 参数字典含输入模型未知字段: " f"{', '.join(sorted(unknown_keys))}"
+            raw_error_text(
+                "工具 {tool} 参数字典含输入模型未知字段: {keys}",
+                tool=as_plain(tool_name),
+                keys=as_text(", ".join(sorted(unknown_keys))),
+            )
         )
     try:
         params = model_cls(**_filter_unset_params(kwargs))

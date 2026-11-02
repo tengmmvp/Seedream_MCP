@@ -40,6 +40,7 @@ from seedream_mcp.server.transport import (
     _bind_address_allowlist,
     _is_dns_rebinding_protected_host,
     _resolve_body_read_policy,
+    _split_bare_netloc,
     _transport_security_for_host,
     _web_app_host_allowlist,
     is_loopback_bind_host,
@@ -835,10 +836,18 @@ def test_origin_guard_pins_webapp_prefix_and_subtree() -> None:
         (b"http://127.0.0.1", b"127.0.0.1"),
         (b"http://LOCALHOST:8000", b"localhost:8000"),
         (b"http://[::1]:8000", b"[::1]:8000"),
+        (b"http://127.0.0.1:80", b"127.0.0.1"),
+        (b"http://127.0.0.1", b"127.0.0.1:80"),
+        (b"http://127.0.0.1:80", b"127.0.0.1:80"),
+        (b"http://127.0.0.1:080", b"127.0.0.1:80"),
+        (b"https://localhost:443", b"localhost"),
+        (b"https://[::1]:443", b"[::1]"),
     ],
 )
 async def test_origin_guard_passes_same_origin(origin: bytes, host: bytes) -> None:
-    """同源 Origin 放行进入下游，netloc 比对忽略大小写、IPv6 方括号形态参与比对。"""
+    """同源 Origin 放行进入下游：主机比对忽略大小写、IPv6 方括号形态参与，显式
+    默认端口（http :80、https :443）与省略形式等价，Origin 侧前导零端口与
+    Host 侧同口径按值归一。"""
     reached, guard = _make_guard_app()
 
     sent = await _run_guard(
@@ -857,21 +866,201 @@ async def test_origin_guard_passes_same_origin(origin: bytes, host: bytes) -> No
 @pytest.mark.parametrize(
     ("origin", "host"),
     [
+        (b"http://[fe80::1%25Eth0]:8000", b"[fe80::1%25Eth0]:8000"),
+        (b"http://[fe80::1%25Eth0]:8000", b"[fe80::1%25eth0]:8000"),
+        (b"http://[fe80::1%25eth0]:8000", b"[FE80::1%25ETH0]:8000"),
+    ],
+    ids=["identical-mixed-case", "origin-mixed-host-lower", "host-upper"],
+)
+async def test_origin_guard_passes_same_origin_with_zone_id_case_mismatch(
+    origin: bytes, host: bytes
+) -> None:
+    """zone-id 混合大小写的同源放行：两侧主机同经 _split_bare_netloc 整体小写，
+    zone-id 大小写差异在比对前抹平。"""
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "path": "/web/api/config-info",
+            "headers": [(b"origin", origin), (b"host", host)],
+        },
+    )
+
+    assert reached == ["/web/api/config-info"]
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("origin", "host"),
+    [
+        (b"http://127.0.0.1:", b"127.0.0.1"),
+        (b"http://127.0.0.1", b"127.0.0.1:"),
+    ],
+    ids=["origin-empty-port", "host-empty-port"],
+)
+async def test_origin_guard_passes_same_origin_with_empty_port(origin: bytes, host: bytes) -> None:
+    """混合空端口形态的同源放行：空端口按缺省归一，与 WHATWG 口径一致。
+
+    Origin "http://x:" 对 Host "x" 及反向两方向，两侧 _split_bare_netloc 均
+    把空端口归一为无端口，经 scheme 默认端口补齐后判同源，属有意行为。
+    """
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "path": "/web/api/config-info",
+            "headers": [(b"origin", origin), (b"host", host)],
+        },
+    )
+
+    assert reached == ["/web/api/config-info"]
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("netloc", "expected"),
+    [
+        ("127.0.0.1:1", ("127.0.0.1", 1)),
+        ("127.0.0.1:65535", ("127.0.0.1", 65535)),
+        ("127.0.0.1:080", ("127.0.0.1", 80)),
+        ("127.0.0.1:0", None),
+        ("127.0.0.1:65536", None),
+    ],
+    ids=["lower-bound", "upper-bound", "leading-zero-fold", "zero-port", "oversized-port"],
+)
+def test_split_bare_netloc_port_bounds(
+    netloc: str, expected: tuple[str, int | None] | None
+) -> None:
+    """端口有效范围 1-65535：为零与超范围按畸形归 None，为零口径与
+    _host_port_invalid_reason 一致；前导零仍按值折叠接受。"""
+    assert _split_bare_netloc(netloc) == expected
+
+
+@pytest.mark.parametrize(
+    ("origin", "host"),
+    [
         (b"http://evil.example", b"127.0.0.1:8000"),
         (b"http://127.0.0.1:9999", b"127.0.0.1:8000"),
         (b"http://127.0.0.1:8000", b"127.0.0.1"),
+        (b"http://127.0.0.1:80", b"127.0.0.1:8000"),
+        (b"http://127.0.0.1:443", b"127.0.0.1"),
+        (b"https://127.0.0.1", b"127.0.0.1:80"),
+        (b"http://user@127.0.0.1", b"127.0.0.1"),
+        (b"http://127.0.0.1:x", b"127.0.0.1:x"),
         (b"null", b"127.0.0.1:8000"),
         (b"http://[::1", b"127.0.0.1:8000"),
+        pytest.param(
+            b"http://127.0.0.1:8000",
+            b"127.0.0.1:" + b"9" * 5000,
+            id="host-oversized-port",
+        ),
+        pytest.param(b"http://127.0.0.1:0", b"127.0.0.1:0", id="port-zero-both-sides"),
+        pytest.param(b"http://127.0.0.1:65536", b"127.0.0.1:65536", id="port-oversized-both-sides"),
         (b"http://127.0.0.1:8000", None),
     ],
 )
 async def test_origin_guard_rejects_cross_origin(origin: bytes, host: bytes | None) -> None:
-    """跨源 Origin 一律 403：域名不同、端口不一致、null、畸形与 Host 缺失均拒绝。"""
+    """跨源 Origin 一律 403：域名不同、端口不一致（非默认端口显式不等）、null、
+    畸形与 Host 缺失均拒绝；scheme 默认端口之外的显式端口不获归一等价。"""
     reached, guard = _make_guard_app()
     headers = [(b"origin", origin)] + ([] if host is None else [(b"host", host)])
 
     sent = await _run_guard(
         guard, {"type": "http", "path": "/web/api/config-info", "headers": headers}
+    )
+
+    assert reached == []
+    assert sent[0]["status"] == 403
+    body = sent[1]["body"].decode("utf-8")
+    assert "invalid_origin" in body
+
+
+@pytest.mark.parametrize(
+    ("origin", "host"),
+    [
+        (b"http://[fe80::1%25Eth0]:8000", b"[fe80::1%25eth1]:8000"),
+        (b"http://[fe80::2%25Eth0]:8000", b"[fe80::1%25eth0]:8000"),
+    ],
+    ids=["zone-id-differs", "address-differs"],
+)
+async def test_origin_guard_rejects_cross_origin_despite_zone_id_case_folding(
+    origin: bytes, host: bytes
+) -> None:
+    """zone-id 大小写折叠只抹平拼写差异：zone 或 IPv6 地址不同仍按跨源 403 拒绝。"""
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "path": "/web/api/config-info",
+            "headers": [(b"origin", origin), (b"host", host)],
+        },
+    )
+
+    assert reached == []
+    assert sent[0]["status"] == 403
+    body = sent[1]["body"].decode("utf-8")
+    assert "invalid_origin" in body
+
+
+async def test_origin_guard_accepts_host_leading_zero_port_normalized() -> None:
+    """Host 端口解析委托 strict_http_int：前导零端口按 int 归一（000080 → 80），与 Origin 侧同口径。
+
+    浏览器不发此形态；本用例显式钉住从畸形拒绝到归一接受的行为翻转。
+    """
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "path": "/web/api/config-info",
+            "headers": [(b"origin", b"http://x"), (b"host", b"x:000080")],
+        },
+    )
+
+    assert reached == ["/web/api/config-info"]
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("origin", "host"),
+    [
+        pytest.param(b"http://[::1]:8000", b"::1:8000", id="host-unbracketed-ipv6"),
+        pytest.param(b"http://[::1]", b"::1", id="host-unbracketed-ipv6-bare"),
+        pytest.param(b"http://x:8000", b"x:8000:9000", id="host-multi-colon-tail"),
+        pytest.param(b"http://::1:8000", b"[::1]:8000", id="origin-unbracketed-ipv6"),
+        pytest.param(b"//x:8000", b"x:8000", id="origin-without-scheme"),
+        pytest.param(b"ftp://x:8000", b"x:8000", id="origin-non-http-scheme"),
+        pytest.param(b"http://x:8000/", b"x:8000", id="origin-with-path"),
+        pytest.param(b"http://x:8000?a=1", b"x:8000", id="origin-with-query"),
+        pytest.param(b"http://x:8000#f", b"x:8000", id="origin-with-fragment"),
+        pytest.param(b"http://x:+8000", b"x:8000", id="origin-signed-port"),
+        pytest.param(b"http://x:65536", b"x:65536", id="port-out-of-range"),
+        pytest.param(b"http://[::1]junk:8000", b"[::1]:8000", id="origin-bracket-host-junk"),
+        pytest.param(b"http://:8000", b":8000", id="empty-host"),
+    ],
+)
+async def test_origin_guard_rejects_non_browser_sendable_forms(origin: bytes, host: bytes) -> None:
+    """浏览器发不出的形态一律 403：未方括号 IPv6 裸形态（多冒号，URL 序列化
+    必加方括号，Origin 与 Host 两侧同拒）、非 http/https scheme、带路径/
+    query/fragment、符号与超 65535 端口、方括号闭合后尾随杂质与空主机均非
+    浏览器可发亦非标准等价；对偶接受例（方括号 IPv6、显式默认端口、前导零
+    与空端口归一）由同源放行用例钉住。"""
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "path": "/web/api/config-info",
+            "headers": [(b"origin", origin), (b"host", host)],
+        },
     )
 
     assert reached == []

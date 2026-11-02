@@ -71,6 +71,30 @@ def test_build_arg_parser_log_level_case_insensitive(level: str) -> None:
     assert args.log_level == "DEBUG"
 
 
+@pytest.mark.parametrize(
+    "port",
+    ["8_0", "+80", " 80", "８０", "abc", "0", "65536"],
+    ids=["underscore", "plus", "space", "fullwidth", "non-numeric", "zero", "oversized"],
+)
+def test_build_arg_parser_rejects_non_canonical_port(port: str) -> None:
+    """--port 字面量口径与 strict_http_int 单源，裸 int() 可解析的 '8_0'、'+80'、' 80'
+    与全角数字等形态一律拒绝，argparse 以退出码 2 终止。"""
+    parser = cli.build_arg_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["--port", port])
+
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize("port", ["1", "8000", "65535"])
+def test_build_arg_parser_accepts_ports_in_range(port: str) -> None:
+    """--port 接受 1-65535 的边界与常规纯 ASCII 数字值。"""
+    parser = cli.build_arg_parser()
+    args = parser.parse_args(["--port", port])
+
+    assert args.port == int(port)
+
+
 def test_build_arg_parser_supports_tls_options() -> None:
     """--ssl-certfile 与 --ssl-keyfile 可解析，默认不豁免非 TLS。"""
     parser = cli.build_arg_parser()

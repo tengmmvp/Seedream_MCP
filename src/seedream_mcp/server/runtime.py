@@ -30,7 +30,7 @@ from ..config import (
     get_active_config,
     set_active_config,
 )
-from ..utils.core.errors import validation_error_user_message
+from ..utils.core.errors import as_plain, as_text, safe_error_text, validation_error_user_message
 from ..utils.core.executors import shutdown_cpu_offload_executor
 from ..utils.core.logs import get_logger
 from ..version import __version__
@@ -377,7 +377,10 @@ class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
     ) -> GetPromptResult | InputRequiredResult:
         prompt = self._prompt_manager.get_prompt(name)
         if prompt is None:
-            raise MCPError(INVALID_PARAMS, f"Unknown prompt: {name}")
+            raise MCPError(
+                INVALID_PARAMS,
+                safe_error_text("Unknown prompt: {name}", name=as_text(name)),
+            )
         declared = {argument.name for argument in prompt.arguments or []}
         missing = sorted(
             argument.name
@@ -385,10 +388,16 @@ class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
             if argument.required and argument.name not in (arguments or {})
         )
         if missing:
-            raise MCPError(INVALID_PARAMS, f"缺少必填参数: {', '.join(missing)}")
+            raise MCPError(
+                INVALID_PARAMS,
+                safe_error_text("缺少必填参数: {missing}", missing=as_plain(", ".join(missing))),
+            )
         unknown = sorted(set(arguments or {}) - declared)
         if unknown:
-            raise MCPError(INVALID_PARAMS, f"未知参数: {', '.join(unknown)}")
+            raise MCPError(
+                INVALID_PARAMS,
+                safe_error_text("未知参数: {unknown}", unknown=as_text(", ".join(unknown))),
+            )
         try:
             return await super().get_prompt(name, arguments, context)
         except ValueError as exc:
@@ -397,7 +406,7 @@ class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
             if validation_error is None or not _targets_argument(validation_error, declared):
                 raise
             raise MCPError(
-                INVALID_PARAMS, validation_error_user_message(validation_error)
+                INVALID_PARAMS, validation_error_user_message(validation_error).safe_text()
             ) from validation_error
 
     async def call_tool(
@@ -407,7 +416,10 @@ class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
         context: Context[dict[str, Any], Any] | None = None,
     ) -> CallToolResult | InputRequiredResult:
         if self._tool_manager.get_tool(name) is None:
-            raise MCPError(INVALID_PARAMS, f"Unknown tool: {name}")
+            raise MCPError(
+                INVALID_PARAMS,
+                safe_error_text("Unknown tool: {name}", name=as_text(name)),
+            )
         return await super().call_tool(name, arguments, context)
 
 

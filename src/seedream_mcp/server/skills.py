@@ -13,6 +13,7 @@ from pathlib import Path
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError
 from mcp.shared.path_security import PathEscapeError, safe_join
 
+from ..utils.core.errors import as_text, safe_error_text
 from ..utils.io.files import open_packaged_read
 
 # 渐进式披露三层：SKILL.md 条目常驻 resources/list，正文在读取时加载，
@@ -63,8 +64,13 @@ def _read_skill_reference(path: str) -> str:
     try:
         target = safe_join(_SKILL_REFERENCES_DIR, path)
     except PathEscapeError:
-        raise ResourceNotFoundError(f"skill 参考文件路径越界: {path}")
+        # ResourceNotFoundError 只收 str，路径按 as_text 分类后走 safe 通道。
+        raise ResourceNotFoundError(
+            safe_error_text("skill 参考文件路径越界: {path}", path=as_text(path))
+        )
     payload = _read_packaged_text(target)
     if payload is None:
-        raise ResourceNotFoundError(f"skill 参考文件不存在或不可读取: {path}")
+        raise ResourceNotFoundError(
+            safe_error_text("skill 参考文件不存在或不可读取: {path}", path=as_text(path))
+        )
     return payload

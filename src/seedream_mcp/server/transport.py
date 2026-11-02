@@ -27,13 +27,15 @@ from starlette.responses import RedirectResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..config.host_syntax import (
+    DEFAULT_SCHEME_PORTS,
     _bracket_ipv6_literal,
     _decompose_allowed_host_entry,
+    _decompose_netloc,
     _is_valid_host_port,
     bind_host_invalid_reason,
 )
 from ..config import get_active_config
-from ..utils.core.errors import SeedreamConfigError
+from ..utils.core.errors import SeedreamConfigError, as_plain, error_text, raw_error_text
 from ..utils.core.http_int import strict_http_int
 from ..utils.core.logs import get_logger
 from ..utils.core.loop_bound import loop_bound_semaphore
@@ -96,7 +98,12 @@ def _ensure_printable_ascii_bind_host(host: str) -> None:
     """绑定地址守卫：空串与非可打印 ASCII 装配期拒绝，判定与文案取自 host_syntax 的共用谓词。"""
     invalid_reason = bind_host_invalid_reason(host)
     if invalid_reason is not None:
-        raise SeedreamConfigError(f"streamable-http 绑定地址{invalid_reason}。")
+        raise SeedreamConfigError(
+            error_text(
+                "streamable-http 绑定地址{invalid_reason}。",
+                invalid_reason=as_plain(invalid_reason),
+            )
+        )
 
 
 def _is_dns_rebinding_protected_host(host: str) -> bool:
@@ -155,7 +162,9 @@ def _loopback_allowlists() -> tuple[tuple[str, ...], tuple[str, ...]]:
     for address in sorted(_DNS_REBINDING_PROTECTED_HOSTS):
         allowlist = _bind_address_allowlist(address)
         if allowlist is None:
-            raise RuntimeError(f"回环地址 {address} 不应判为通配绑定")
+            raise RuntimeError(
+                raw_error_text("回环地址 {address} 不应判为通配绑定", address=as_plain(address))
+            )
         hosts.extend(allowlist[0])
         origins.extend(allowlist[1])
     return tuple(hosts), tuple(origins)
@@ -248,38 +257,21 @@ def _content_length_or_none(value: bytes | None) -> int | None:
     return strict_http_int(value)
 
 
-def _is_valid_host_port_bytes(port: bytes) -> bool:
-    """bytes 端口经 host_syntax 的条目侧端口谓词判定，非 ASCII 字节按畸形拒绝。"""
-    try:
-        return _is_valid_host_port(port.decode("ascii"))
-    except ValueError:
-        return False
-
-
 def _strip_host_port(host: bytes) -> bytes:
     """剥离 Host 头值的端口部分，IPv6 字面量如 [::1]:8000 保留方括号主机部分。
 
-    端口形态共用 host_syntax 的条目侧端口谓词，畸形端口整值返回以偏离白名单
-    条目；空端口形态（[::1]:）按 SDK 口径容忍；方括号后非冒号尾随内容同样
-    整值返回。
+    结构切分消费 host_syntax 的 netloc 分解核，端口形态共用其条目侧端口谓词
+    （非 ASCII 字节按畸形拒绝），畸形端口与不可分解形态整值返回以偏离白名单
+    条目；空端口形态（[::1]:）按 SDK 口径容忍并剥离；头值经 latin-1 解码
+    往返切片，字节保持。
     """
-    if host.startswith(b"["):
-        end = host.find(b"]")
-        if end == -1:
-            return host
-        remainder = host[end + 1 :]
-        if remainder in (b"", b":"):
-            return host[: end + 1]
-        if not remainder.startswith(b":") or not _is_valid_host_port_bytes(remainder[1:]):
-            return host
-        return host[: end + 1]
-    idx = host.rfind(b":")
-    if idx == -1:
+    parts = _decompose_netloc(host.decode("latin-1"))
+    if parts is None:
         return host
-    port = host[idx + 1 :]
-    if port and not _is_valid_host_port_bytes(port):
+    host_region = f"[{parts.host}]" if parts.bracketed else parts.host
+    if parts.port_text and not _is_valid_host_port(parts.port_text):
         return host
-    return host[:idx]
+    return host_region.encode("latin-1")
 
 
 def _error_body(error: str, description: str) -> bytes:
@@ -1018,14 +1010,45 @@ class _AppHostGuardMiddleware:
         return host.startswith(stripped + b":") and stripped in self._wildcard_hosts
 
 
+def _split_bare_netloc(netloc: str) -> tuple[str, int | None] | None:
+    """拆出裸 netloc 的小写主机与显式端口：端口为 1-65535 的纯 ASCII 数字
+    （前导零按 int 折叠），空端口按缺省归一为无端口，其余畸形形态返回 None。
+
+    结构切分消费 host_syntax 的 netloc 分解核；空端口与 WHATWG 空端口视为
+    缺省的口径一致（混合空端口形态的同源比对因此放行）。userinfo、游离
+    右括号、未方括号 IPv6 裸形态（多冒号，URL 序列化必加方括号）、空主机
+    与为零、超范围端口的拒绝为本侧策略（为零口径与 _host_port_invalid_reason
+    一致），_same_origin 的 Origin 与 Host 两侧共用本管线。
+    """
+    if "@" in netloc:
+        return None
+    if not netloc.startswith("[") and "]" in netloc:
+        return None
+    parts = _decompose_netloc(netloc)
+    if parts is None:
+        return None
+    if not parts.bracketed and ":" in parts.host:
+        # 未方括号多冒号主机非 URL 序列化产物，两侧头值均无此形态，非浏览器可发。
+        return None
+    if not parts.host:
+        return None
+    if not parts.port_text:
+        return parts.host.lower(), None
+    port = strict_http_int(parts.port_text)
+    if port is None or not 1 <= port <= 65535:
+        return None
+    return parts.host.lower(), port
+
+
 class _WebOriginGuardMiddleware:
     """无令牌 Web 部署下 /web/api 前缀请求的同源 Origin 与跨站加载校验中间件。
 
     仅在 web_enabled 且未配置令牌时装配：有令牌时 Bearer 已挡 drive-by，无需
     本层。无 Origin 头放行，覆盖 curl 等非浏览器客户端与本地进程；携带 Origin
-    的请求取其经 urlsplit 解析出的 netloc 与 Host 头全值做忽略大小写的字符串
-    相等比对，端口参与比对：同源页面的 Origin 与请求 Host 恒为同一 host:port，
-    域名不同、端口不一致、Origin 为 null 与 Host 缺失均按跨源 403 拒绝；配置的
+    的请求按 Origin 的 scheme 归一默认端口（http 显式 :80 与 https 显式 :443
+    等价于省略形式）后做忽略大小写的主机与有效端口比对：同源页面的 Origin 与
+    请求 Host 恒为同一 host:port，域名不同、端口不一致、Origin 为 null 与
+    Host 缺失均按跨源 403 拒绝；配置的
     SEEDREAM_HTTP_ALLOWED_ORIGINS 条目为显式信任声明，命中的 Origin 同样放行
     且不查跨站标记，与 CORS 层放行口径一致。Origin 守卫覆盖不了不带 Origin 头
     的跨站 img/no-cors 加载，GET 与 HEAD 请求另按浏览器管控不可伪造的
@@ -1077,23 +1100,43 @@ class _WebOriginGuardMiddleware:
 
     @staticmethod
     def _same_origin(scope: Scope, origin: bytes) -> bool:
-        """判定 Origin 与 Host 是否同源：两者 netloc 全值忽略大小写相等。
+        """判定 Origin 与 Host 是否同源：主机与有效端口相等，默认端口归一。
 
-        Origin 解析不出 netloc、头值畸形无法解析或 Host 头缺失时无法确立同源，
-        均按跨源拒绝；头值按 ASGI 约定以 latin-1 解码。
+        http 的显式 :80 与 https 的显式 :443 视为其省略形式等价（浏览器同源
+        算法口径），非默认端口严格不等；两侧 netloc 同经 _split_bare_netloc
+        拒绝与归一（主机整体小写，zone-id 大小写随之抹平），比对以浏览器可发
+        形态为界，标准等价形态（显式默认端口、前导零与空端口归一）照旧等价
+        接受，其余非浏览器可发的形态拒绝。Origin 头值畸形无法解析或 Host 头
+        缺失时无法确立同源，均按跨源拒绝；头值按 ASGI 约定以 latin-1 解码。
         """
         host = _header_value(scope, b"host")
         if not host:
             return False
         try:
-            origin_netloc = urlsplit(origin.decode("latin-1")).netloc
+            parsed = urlsplit(origin.decode("latin-1"))
         except ValueError:
-            # 畸形 Origin 如未闭合的 IPv6 方括号会使 urlsplit 抛 ValueError，按
-            # 跨源拒绝而非穿透为 500。
+            # 畸形 Origin 如未闭合的 IPv6 方括号会使 urlsplit 抛 ValueError，
+            # 按跨源拒绝而非穿透为 500。
             return False
-        if not origin_netloc:
+        default_port = DEFAULT_SCHEME_PORTS.get(parsed.scheme.lower())
+        if default_port is None:
+            # 浏览器 Origin 仅 http/https 两 scheme，其余 scheme 非浏览器可发。
             return False
-        return origin_netloc.lower() == host.decode("latin-1").lower()
+        if parsed.path or parsed.query or parsed.fragment:
+            # Origin 序列化仅含 scheme/host/port，带路径等成分的头非浏览器可发。
+            return False
+        origin_parts = _split_bare_netloc(parsed.netloc)
+        if origin_parts is None:
+            return False
+        origin_name, origin_port = origin_parts
+        host_parts = _split_bare_netloc(host.decode("latin-1"))
+        if host_parts is None:
+            return False
+        host_name, host_port = host_parts
+        # 端口经 _split_bare_netloc 恒为 None 或 1-65535，or 折叠与 None 判定等价。
+        return origin_name == host_name and (origin_port or default_port) == (
+            host_port or default_port
+        )
 
     @classmethod
     def _cross_site_fetch(cls, scope: Scope) -> bool:
