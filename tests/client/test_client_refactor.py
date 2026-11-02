@@ -772,19 +772,25 @@ def test_normalize_image_sequence_rejects_non_str_element_in_sequence() -> None:
 
 def test_normalize_single_image_rejects_unencodable_surrogate() -> None:
     """含未配对代理字符的 image 输入在参数层拒绝，不推迟到请求序列化报编码错误。"""
-    with pytest.raises(SeedreamValidationError, match="无法编码的字符"):
+    with pytest.raises(SeedreamValidationError) as excinfo:
         SeedreamClient._normalize_single_image("http://example.com/\ud800.png")
+
+    assert excinfo.value.message == "image 参数包含无法编码的字符"
+    assert excinfo.value.field == "image"
 
 
 def test_normalize_image_sequence_rejects_unencodable_surrogate() -> None:
     """列表形态逐项经同一编码预检，代理字符同样在参数层拒绝。"""
-    with pytest.raises(SeedreamValidationError, match="image\\[2\\]"):
+    with pytest.raises(SeedreamValidationError) as excinfo:
         SeedreamClient._normalize_image_sequence(
             images=["http://example.com/a.png", "http://example.com/\ud800.png"],
             min_count=1,
             model_id="",
             field_name="image",
         )
+
+    assert excinfo.value.message == "image[2] 参数包含无法编码的字符"
+    assert excinfo.value.field == "image[2]"
 
 
 def test_summarize_prompt_does_not_expose_prompt_plaintext() -> None:

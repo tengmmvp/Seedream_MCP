@@ -24,7 +24,7 @@ from ..definitions.conventions import (
     TEXT_TO_IMAGE_TOOL_NAME,
 )
 from .request_plan import _ACTIVE_REQUEST_PLAN, _build_request_data
-from ..utils.core.errors import SeedreamValidationError
+from ..utils.core.errors import SeedreamValidationError, as_plain, error_text, raw_error_text
 from ..utils.core.logs import get_logger
 from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
@@ -659,15 +659,24 @@ class SeedreamClient(_ClientHTTPMixin):
         """校验并规范化单张图片输入，field_name 用于错误消息定位字段。"""
         if not isinstance(image, str):
             raise SeedreamValidationError(
-                f"{field_name} 参数必须是字符串", field=field_name, value=image
+                error_text("{field_name} 参数必须是字符串", field_name=as_plain(field_name)),
+                field=field_name,
+                value=image,
             )
 
         normalized = image.strip()
         if not normalized:
             raise SeedreamValidationError(
-                f"{field_name} 参数不能为空字符串", field=field_name, value=image
+                error_text("{field_name} 参数不能为空字符串", field_name=as_plain(field_name)),
+                field=field_name,
+                value=image,
             )
-        ensure_utf8_encodable(normalized, f"{field_name} 参数包含无法编码的字符", field_name)
+        ensure_utf8_encodable(
+            normalized,
+            "{field_name} 参数包含无法编码的字符",
+            field_name,
+            field_name=as_plain(field_name),
+        )
         return normalized
 
     @staticmethod
@@ -681,7 +690,7 @@ class SeedreamClient(_ClientHTTPMixin):
         """校验并规范化图片序列输入，str 视作单元素列表，逐项规范化并按 min_count 与模型参考图上限校验数量。"""
         if not isinstance(images, (str, list, tuple)):
             raise SeedreamValidationError(
-                f"{field_name} 参数必须是字符串列表",
+                error_text("{field_name} 参数必须是字符串列表", field_name=as_plain(field_name)),
                 field=field_name,
                 value=images,
             )
@@ -697,7 +706,11 @@ class SeedreamClient(_ClientHTTPMixin):
 
         if len(normalized_images) < min_count:
             raise SeedreamValidationError(
-                f"{field_name} 数量不能少于 {min_count}",
+                error_text(
+                    "{field_name} 数量不能少于 {min_count}",
+                    field_name=as_plain(field_name),
+                    min_count=as_plain(min_count),
+                ),
                 field=field_name,
                 value=normalized_images,
             )
@@ -725,5 +738,9 @@ for _member in vars(SeedreamClient).values():
         leftover = _PLACEHOLDER_RESIDUE_PATTERN.search(_member.__doc__ or "")
         if leftover is not None:
             raise RuntimeError(
-                f"{_member.__name__} docstring 残留未识别的家族占位符 {leftover.group(0)}"
+                raw_error_text(
+                    "{member} docstring 残留未识别的家族占位符 {residue}",
+                    member=as_plain(_member.__name__),
+                    residue=as_plain(leftover.group(0)),
+                )
             )

@@ -27,10 +27,15 @@ from ..utils.core.errors import (
     SeedreamMCPError,
     SeedreamNetworkError,
     SeedreamTimeoutError,
+    as_detail,
+    as_plain,
+    base_detail_error_text,
+    error_text,
     format_error_for_user,
     handle_api_error,
     has_message_value,
     parse_retry_after,
+    raw_error_text,
     response_reports_failure,
 )
 from ..utils.core.sanitizers import (
@@ -174,7 +179,9 @@ class _ClientHTTPMixin:
                         raise
                     except Exception as e:
                         self.logger.error("HTTP 客户端创建失败: {}", e)
-                        raise SeedreamAPIError(f"HTTP 客户端初始化失败: {str(e)}") from e
+                        raise SeedreamAPIError(
+                            base_detail_error_text("HTTP 客户端初始化失败", str(e))
+                        ) from e
 
     def _get_headers(self) -> dict[str, str]:
         """构建带 Bearer 认证与 JSON Content-Type 的请求头。
@@ -235,7 +242,12 @@ class _ClientHTTPMixin:
         if not isinstance(payload, dict):
             # null 体映射为 JSON 术语，其余形态用类型名表述。
             received = "null" if payload is None else type(payload).__name__
-            raise SeedreamAPIError(f"响应格式错误: 期望 JSON 对象，实际收到 {received}")
+            raise SeedreamAPIError(
+                error_text(
+                    "响应格式错误: 期望 JSON 对象，实际收到 {received}",
+                    received=as_plain(received),
+                )
+            )
         return payload
 
     def _build_api_result(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -404,8 +416,13 @@ class _ClientHTTPMixin:
             declared_bytes = strict_http_int(content_length)
             if declared_bytes is not None and declared_bytes > max_bytes:
                 raise SeedreamAPIError(
-                    f"响应体过大: Content-Length 声明 {declared_bytes} 字节，"
-                    f"超过上限 {max_bytes} 字节{adjust_hint}",
+                    error_text(
+                        "响应体过大: Content-Length 声明 {declared_bytes} 字节，"
+                        "超过上限 {max_bytes} 字节{adjust_hint}",
+                        declared_bytes=as_plain(declared_bytes),
+                        max_bytes=as_plain(max_bytes),
+                        adjust_hint=as_plain(adjust_hint),
+                    ),
                     status_code=status_code,
                     retry_after=retry_after,
                 )
@@ -416,15 +433,23 @@ class _ClientHTTPMixin:
                     chunk = await session.next_data_chunk(deadline)
                 except StreamDeadlineExceeded:
                     raise asyncio.TimeoutError(
-                        f"响应体读取超过总时长预算: 已读取 {len(buffer)} 字节"
+                        raw_error_text(
+                            "响应体读取超过总时长预算: 已读取 {read_bytes} 字节",
+                            read_bytes=as_plain(len(buffer)),
+                        )
                     ) from None
                 if chunk is None:
                     break
                 buffer += chunk
                 if len(buffer) > max_bytes:
                     raise SeedreamAPIError(
-                        f"响应体过大: 已读取 {len(buffer)} 字节，超过上限 {max_bytes} 字节"
-                        f"{adjust_hint}",
+                        error_text(
+                            "响应体过大: 已读取 {read_bytes} 字节，超过上限 {max_bytes} 字节"
+                            "{adjust_hint}",
+                            read_bytes=as_plain(len(buffer)),
+                            max_bytes=as_plain(max_bytes),
+                            adjust_hint=as_plain(adjust_hint),
+                        ),
                         status_code=status_code,
                         retry_after=retry_after,
                     )
@@ -451,7 +476,12 @@ class _ClientHTTPMixin:
             truncated = len(raw_body) > _ERROR_JSON_PARSE_LIMIT
             text = fit_utf8_bytes(raw_body, _ERROR_JSON_PARSE_LIMIT)
             if truncated:
-                text += f"...(截断，原文 {len(raw_body)} 字节)"
+                # 载荷经 handle_api_error 以 as_detail 消费，此处按 raw 通道预渲染保持原文拼接。
+                text = raw_error_text(
+                    "{text}...(截断，原文 {raw_bytes} 字节)",
+                    text=as_detail(text),
+                    raw_bytes=as_plain(len(raw_body)),
+                )
             if not text:
                 return {"message": "响应体为空"}
             return {"message": text}
@@ -483,7 +513,12 @@ class _ClientHTTPMixin:
                 else "读取错误响应体失败"
             )
             raise SeedreamAPIError(
-                f"{reason}（状态码 {response.status_code}）: {exc}",
+                error_text(
+                    "{reason}（状态码 {status_code}）: {exc}",
+                    reason=as_plain(reason),
+                    status_code=as_plain(response.status_code),
+                    exc=as_detail(str(exc)),
+                ),
                 status_code=response.status_code,
                 retry_after=self._retry_after_or_none(response.status_code, response.headers),
             ) from exc
@@ -505,7 +540,7 @@ class _ClientHTTPMixin:
         except CpuOffloadPoolClosedError:
             raise
         except Exception as exc:
-            raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
+            raise SeedreamAPIError(base_detail_error_text("JSON 解析失败", str(exc))) from exc
         finally:
             # 解析完成后立即释放原始缓冲，避免与 b64 解码产物双驻留。
             del raw_body
@@ -515,7 +550,11 @@ class _ClientHTTPMixin:
         max_data_items = self._parsed_data_items_limit()
         if data_count > max_data_items:
             raise SeedreamAPIError(
-                f"响应条目数过多: data 含 {data_count} 项，超过上限 {max_data_items} 项"
+                error_text(
+                    "响应条目数过多: data 含 {data_count} 项，超过上限 {max_data_items} 项",
+                    data_count=as_plain(data_count),
+                    max_data_items=as_plain(max_data_items),
+                )
             )
         return self._build_api_result(payload_dict)
 
@@ -646,7 +685,11 @@ class _ClientHTTPMixin:
                 return await self._call_api_admitted(endpoint, request_data)
             except CpuOffloadPoolClosedError as exc:
                 self.logger.warning("{} API 调用因服务正在关闭中止: {}", endpoint, exc)
-                raise SeedreamMCPError(f"服务正在关闭，{endpoint} API 调用已中止") from exc
+                raise SeedreamMCPError(
+                    error_text(
+                        "服务正在关闭，{endpoint} API 调用已中止", endpoint=as_plain(endpoint)
+                    )
+                ) from exc
 
     async def _call_api_admitted(
         self, endpoint: str, request_data: dict[str, Any]
@@ -677,11 +720,23 @@ class _ClientHTTPMixin:
             # 剩余预算低于可行性下限即不足以支撑一次完整尝试，
             # 提前终止以免派发大概率中途取消的计费请求。
             if attempt > 0 and remaining_budget < retry_feasibility_floor(single_attempt_timeout):
-                # 耗尽时剩余为负，钳 0 展示避免错误文案出现负数秒。
-                detail = f"，最后错误: {last_error}" if last_error is not None else ""
+                # 耗尽时剩余为负，钳 0 展示避免错误文案出现负数秒；尾缀段独立构造后
+                # 以 as_detail 并入主模板，raw 通道拼接与既有文案逐字一致。
+                detail = (
+                    raw_error_text(
+                        "，最后错误: {last_error}", last_error=as_detail(str(last_error))
+                    )
+                    if last_error is not None
+                    else ""
+                )
                 raise SeedreamTimeoutError(
-                    f"{endpoint} API 调用剩余预算 {max(remaining_budget, 0.0):.2f} 秒"
-                    f"不足以支撑一次完整尝试，提前终止重试{detail}"
+                    error_text(
+                        "{endpoint} API 调用剩余预算 {budget} 秒"
+                        "不足以支撑一次完整尝试，提前终止重试{detail}",
+                        endpoint=as_plain(endpoint),
+                        budget=as_plain(format(max(remaining_budget, 0.0), ".2f")),
+                        detail=as_detail(detail),
+                    )
                 ) from last_error
             attempt_timeout = min(single_attempt_timeout, remaining_budget)
             pending_retry_after: float | None = None
@@ -755,9 +810,13 @@ class _ClientHTTPMixin:
                 if attempt == total_attempts - 1:
                     detail = str(exc)
                     raise SeedreamTimeoutError(
-                        f"{endpoint} API 调用超时: {detail}"
+                        error_text(
+                            "{endpoint} API 调用超时: {detail}",
+                            endpoint=as_plain(endpoint),
+                            detail=as_detail(detail),
+                        )
                         if detail
-                        else f"{endpoint} API 调用超时"
+                        else error_text("{endpoint} API 调用超时", endpoint=as_plain(endpoint))
                     ) from exc
             except httpx.RequestError as exc:
                 last_error = exc
@@ -769,7 +828,13 @@ class _ClientHTTPMixin:
                     str(exc),
                 )
                 if attempt == total_attempts - 1:
-                    raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(exc)}") from exc
+                    raise SeedreamNetworkError(
+                        error_text(
+                            "{endpoint} 网络连接失败: {error}",
+                            endpoint=as_plain(endpoint),
+                            error=as_detail(str(exc)),
+                        )
+                    ) from exc
             except CpuOffloadPoolClosedError:
                 # 池关闭属服务退出窗口，由 _call_api 归一为服务关闭错误，不落非预期错误告警。
                 raise
@@ -811,7 +876,9 @@ class _ClientHTTPMixin:
                         )
                     )
 
-        raise SeedreamAPIError(f"{endpoint} API 调用意外结束")
+        raise SeedreamAPIError(
+            error_text("{endpoint} API 调用意外结束", endpoint=as_plain(endpoint))
+        )
 
     @staticmethod
     def _summarize_image_field(image_value: Any) -> Any:
@@ -856,7 +923,7 @@ class _ClientHTTPMixin:
         if isinstance(error, SeedreamMCPError):
             return error
 
-        wrapped = SeedreamAPIError(f"API 调用失败: {error}")
+        wrapped = SeedreamAPIError(base_detail_error_text("API 调用失败", error))
         wrapped.__cause__ = error
         return wrapped
 
