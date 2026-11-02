@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import traceback
 from collections.abc import AsyncIterator
 
 import pytest
@@ -134,3 +135,41 @@ async def test_overshoot_at_exhaustion_delivers_queued_stream_end(
     delivered = await _drain_ready_stream(monkeypatch, count=33)
 
     assert [int(chunk.rsplit(b"-", 1)[1]) for chunk in delivered] == list(range(1, 34))
+
+
+async def test_terminal_error_reentry_raises_clone_without_traceback_pollution() -> None:
+    """迭代器异常落为终态后重入读取：抛独立克隆，首抛实例的 traceback 不叠入重入帧。"""
+
+    class _FailingIterator:
+        """__anext__ 抛 RuntimeError 的迭代器。"""
+
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise RuntimeError("upstream read failed")
+
+    session = stream_module.StreamSession(_FailingIterator())
+
+    async def _first_read() -> bytes | None:
+        return await session.next_data_chunk(None)
+
+    async def _second_read() -> bytes | None:
+        return await session.next_data_chunk(None)
+
+    with pytest.raises(RuntimeError, match="upstream read failed") as first:
+        await _first_read()
+    frames_after_first = [frame.name for frame in traceback.extract_tb(first.value.__traceback__)]
+    assert "_first_read" in frames_after_first
+
+    with pytest.raises(RuntimeError, match="upstream read failed") as second:
+        await _second_read()
+
+    # 重入抛独立克隆：对象互异，首抛实例的链不叠入重入帧；克隆继承首抛链并前置自身帧。
+    assert second.value is not first.value
+    assert [frame.name for frame in traceback.extract_tb(first.value.__traceback__)] == (
+        frames_after_first
+    )
+    second_frames = [frame.name for frame in traceback.extract_tb(second.value.__traceback__)]
+    assert "_first_read" in second_frames
+    assert "_second_read" in second_frames

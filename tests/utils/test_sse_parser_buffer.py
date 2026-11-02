@@ -512,7 +512,7 @@ async def test_frame_buffer_parse_tail_returns_length_of_sliced_tail() -> None:
     complete = b'data: {"type":"image_generation.completed"}\n\n'
     trailing = b'data: {"type":"image_generation.partial_succeeded"'
     frames.extend(complete + trailing)
-    for _start, _end in frames.drain():
+    for _start, _end, _dropped_remainder in frames.drain():
         pass
 
     event, _lost, tail_length = await frames.parse_tail(_log())
@@ -564,6 +564,87 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
     )
     assert truncated_result["truncated_events"] == 1
     assert truncated_result["status"] == "partial"
+
+
+async def test_parse_sse_response_counts_logical_events_not_chunks() -> None:
+    """同一超大未终结事件分多 chunk 送达按逻辑事件计 1，计数不随 chunk 数膨胀。
+
+    修复前阈值丢弃按 chunk 计数：1800 字节事件单 chunk 送达计 1、三等分送达
+    每块都触发尾部截断被计 3。
+    """
+    oversized = b"y" * 1800  # 无事件分隔符的未终结事件，单块即超阈值。
+    threshold = 512
+
+    single_chunk = await _parse_sse([oversized], event_truncate_threshold=threshold)
+    assert single_chunk["truncated_events"] == 1
+    assert single_chunk["status"] == "partial"
+
+    split = [oversized[i : i + 600] for i in range(0, len(oversized), 600)]
+    assert len(split) == 3
+    multi_chunk = await _parse_sse(split, event_truncate_threshold=threshold)
+    assert multi_chunk["truncated_events"] == 1
+    assert multi_chunk["status"] == "partial"
+
+
+async def test_parse_sse_response_oversized_drop_episode_ends_at_complete_event() -> None:
+    """丢弃事件被完整事件终结后，后续超阈值尾部按新逻辑事件计数，完整事件正常解析。"""
+    complete = b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n'
+    chunks = [
+        b"y" * 600,  # 首个超阈值事件开启丢弃。
+        complete,  # 完整事件终结丢弃事件，正常解析。
+        b"z" * 600,  # 第二个超阈值事件按新事件计数。
+        b"z" * 600,  # 同一事件续块，不重复计数。
+    ]
+    result = await _parse_sse(chunks, event_truncate_threshold=512)
+
+    assert result["truncated_events"] == 2
+    assert result["usage"]["generated_images"] == 1
+    assert result["status"] == "partial"
+
+
+async def test_parse_sse_response_oversized_drop_leftover_tail_not_recounted() -> None:
+    """丢弃事件流末尾的不足阈值残留与已计数事件同属一个逻辑事件，不重复计数。"""
+    chunks = [
+        b"y" * 600,  # 超阈值被丢弃并计数。
+        b"data: partial",  # 同一未终结事件的尾部残留，不足阈值留存至流末尾。
+    ]
+    result = await _parse_sse(chunks, event_truncate_threshold=512)
+
+    assert result["truncated_events"] == 1
+    assert result["status"] == "partial"
+
+
+async def test_parse_sse_response_oversized_drop_midstream_remainder_not_recounted() -> None:
+    """丢弃事件的截断残余在中流成段解析失败时与截断计数同事件，不重复计。
+
+    超阈值截断只丢已到字节，后继字节仍延续同一未终结事件：残余随首个空行分隔符
+    在中流路径成段，与流末尾残留同样受逻辑事件守卫；修复前 drain 在产出残余段
+    前即重置丢弃标记，残余段的解析失败被再计一次（实测 truncated_events=2）。
+    """
+    log = _CapturingLog()
+    chunks = [
+        b"data: " + b"y" * 600,  # 同一 SSE 事件的超大首行，超阈值截断并计数。
+        b"\ndata: bad\n\n",  # 该事件的第二行 data 与终止空行：残余在中流成段。
+    ]
+    result = await _parse_sse(chunks, log=cast("Logger", log), event_truncate_threshold=512)
+
+    assert result["truncated_events"] == 1
+    assert result["status"] == "partial"
+    # 丢弃计数告警不因残余段再次出现；残余段的解析失败告警与流末尾残留同口径保留。
+    assert not any("流中段" in str(call) for call in log.warning_calls)
+    assert any("SSE事件解析失败" in str(call) for call in log.warning_calls)
+
+
+async def test_parse_sse_response_oversized_drop_remainder_guard_scopes_to_first_segment() -> None:
+    """逻辑事件守卫仅覆盖终结丢弃事件的首段，同轮后续新坏事件照常计数。"""
+    chunks = [
+        b"data: " + b"y" * 600,  # 超阈值截断计数 1。
+        b"\ndata: bad\n\n" + b'data: {"broken}\n\n',  # 首段为丢弃残余不计，次段为新坏事件计 1。
+    ]
+    result = await _parse_sse(chunks, event_truncate_threshold=512)
+
+    assert result["truncated_events"] == 2
+    assert result["status"] == "partial"
 
 
 async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:

@@ -22,6 +22,9 @@ from seedream_mcp.tools.outputs import build_structured_tool_result
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamValidationError,
+    assemble_error_segments,
+    as_text,
+    error_text,
     format_error_for_user,
     handle_api_error,
 )
@@ -34,6 +37,7 @@ from seedream_mcp.utils.core.sanitizers import (
     sanitize_data_text,
     sanitize_error_text,
     sanitize_summary_lines,
+    terminate_empty_value_credential_tails,
     truncate_upstream_message_fragment,
 )
 
@@ -433,6 +437,129 @@ def test_format_error_for_user_bearer_colon_tail_keeps_hint_on_replay() -> None:
 
         assert f"{ERROR_TEXT_SEGMENT_JOINER}{hint}" in replayed, repr(tail)
         assert sanitize_assembled_text(replayed) == replayed, repr(tail)
+
+
+def test_sanitize_assembled_text_keeps_appended_guidance_after_empty_value_tail() -> None:
+    """空值凭据尾形后的恢复指引经构造层保住：safe 渲染先终止参数尾形再经组装原语拼接。
+
+    images_root_unavailable_error 场景：指引存活由构造保证（参数渲染时文末终止，
+    assemble_error_segments 在终止后拼接，重放幂等）；文本层不再猜段语义，裸直拼
+    形态的指引段按凭据续值整体掩码（宁多脱）。
+    """
+    message = error_text(
+        "无法确定图片目录: {detail}",
+        detail=as_text("工作区根目录配置无法解析: api_key:"),
+    ).safe_text()
+    assembled = assemble_error_segments(
+        message, "可配置 SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_DATA_ROOT"
+    )
+
+    assert "api_key:***" in assembled
+    assert "可配置 SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_DATA_ROOT" in assembled
+    assert sanitize_assembled_text(assembled) == assembled
+
+    bare = (
+        "无法确定图片目录: 工作区根目录配置无法解析: api_key:"
+        f"{ERROR_TEXT_SEGMENT_JOINER}可配置 SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_DATA_ROOT"
+    )
+    assert (
+        sanitize_assembled_text(bare) == "无法确定图片目录: 工作区根目录配置无法解析: api_key:***"
+    )
+
+
+def test_terminate_empty_value_credential_tails_matches_text_end_only() -> None:
+    """空值尾形终止仅锚定文末：段分隔符不再是终止边界，段语义判定已上移构造层。"""
+    assert terminate_empty_value_credential_tails("回显 token=") == "回显 token=***"
+    assert (
+        terminate_empty_value_credential_tails(f"回显 token={ERROR_TEXT_SEGMENT_JOINER}指引")
+        == f"回显 token={ERROR_TEXT_SEGMENT_JOINER}指引"
+    )
+    # 已终止形态不重复插入，真实值前不拦截（交由净化管线掩码）。
+    assert terminate_empty_value_credential_tails("回显 token=***") == "回显 token=***"
+    assert terminate_empty_value_credential_tails("回显 token=abc") == "回显 token=abc"
+
+
+def test_terminate_anchors_text_end_regardless_of_script() -> None:
+    """终止仅看文末锚定、不依赖任何文字脚本：段中形态（含汉字首）一概不终止。
+
+    段语义判别已删除：终止的边界裁决发生在构造层（参数渲染时的文末），文本层对
+    段中空值尾形不插入终止，交净化管线按续值 fail-closed 吸收。
+    """
+    assert terminate_empty_value_credential_tails("回显 token=") == "回显 token=***"
+    assert terminate_empty_value_credential_tails("回显 token=；hunter2") == "回显 token=；hunter2"
+    assert terminate_empty_value_credential_tails("回显 token=；1234") == "回显 token=；1234"
+    assert terminate_empty_value_credential_tails("鉴权 Bearer:；tok1") == "鉴权 Bearer:；tok1"
+    assert (
+        terminate_empty_value_credential_tails(f"回显 token={ERROR_TEXT_SEGMENT_JOINER}指引")
+        == f"回显 token={ERROR_TEXT_SEGMENT_JOINER}指引"
+    )
+
+
+def test_sanitize_assembled_text_masks_joiner_leading_credential_values() -> None:
+    """值首字符恰为段分隔符的凭据在组装边界整体掩码，不借终止标记放行明文。
+
+    终止先于掩码管线运行时插入的 *** 使「***；」被纯掩码标记前瞻判纯、整个键值
+    匹配被跳过（hunter2 明文存活的回归）；键值与 Bearer 冒号两族同口径按续值
+    fail-closed 吸收，产物重放幂等。
+    """
+    redacted = sanitize_assembled_text("失败 token=；hunter2 trailing words")
+    assert redacted == "失败 token=***"
+    assert sanitize_assembled_text(redacted) == redacted
+
+    assert sanitize_assembled_text("失败 token=；hunter2") == "失败 token=***"
+    assert sanitize_assembled_text("鉴权 Bearer:；tok123 tail") == "鉴权 Bearer:*** tail"
+    assert sanitize_assembled_text("鉴权 Bearer:；tok123") == "鉴权 Bearer:***"
+
+
+def test_sanitize_assembled_text_absorbs_joiner_leading_credential_values() -> None:
+    """joiner 后续凭据值（含汉字首）整体掩码：残窗随段语义判别删除而消灭，语言无关。
+
+    经 ErrorText 构造的路径不可能产生该形态（参数渲染时文末即终止）；裸文本层的
+    值吸收对任何脚本的续值 fail-closed 吞并，宁多脱。
+    """
+    assert sanitize_assembled_text("失败 api_key=；秘密123abc") == "失败 api_key=***"
+    assert sanitize_assembled_text("鉴权 Bearer:；令牌甲乙丙") == "鉴权 Bearer:***"
+
+
+def test_sanitize_assembled_text_absorbs_bare_guidance_after_empty_value_tail() -> None:
+    """裸文本的空值尾形+指引段按续值整体掩码；指引存活由构造层保证（见组装用例）。"""
+    assert (
+        sanitize_assembled_text(f"失败 token={ERROR_TEXT_SEGMENT_JOINER}请检查对应参数的取值范围。")
+        == "失败 token=***"
+    )
+
+
+class _TerminationSubSpy:
+    """记录 sub 调用的替身模式，供前置守卫的跳过行为断言复用。"""
+
+    def __init__(self, real: re.Pattern[str]) -> None:
+        self._real = real
+        self.calls: list[str] = []
+
+    def sub(self, repl: str, text: str) -> str:
+        self.calls.append(text)
+        return self._real.sub(repl, text)
+
+
+def test_terminate_empty_value_tails_skips_sub_via_trigger_precheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无触发词文本经前置守卫免约 50 分支终止正则的全文扫描，含触发词文本照常进入。
+
+    终止模式的键匹配复用键值交替组、Bearer 分支同词，触发词预检集对二者同为
+    构造超集；干净错误消息在热路径不再无条件运行终止 sub。
+    """
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+
+    spy = _TerminationSubSpy(sanitizers_module._EMPTY_VALUE_CREDENTIAL_TAIL_SEGMENT_PATTERN)
+    monkeypatch.setattr(sanitizers_module, "_EMPTY_VALUE_CREDENTIAL_TAIL_SEGMENT_PATTERN", spy)
+
+    clean = "干净错误文本；第二段恢复指引 " + "x" * 2_000
+    assert terminate_empty_value_credential_tails(clean) == clean
+    assert spy.calls == []
+
+    assert terminate_empty_value_credential_tails("回显 token=") == "回显 token=***"
+    assert spy.calls == ["回显 token="]
 
 
 # ==================== CRLF 日志注入剥离 ====================

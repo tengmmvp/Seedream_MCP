@@ -1,4 +1,4 @@
-"""url 模块的 URL 辅助契约测试：sanitize_url 脱敏与 get_file_extension_from_url 推断。
+"""URL 辅助契约测试：sanitize_url 脱敏（utils/core/sanitizers）与 get_file_extension_from_url 推断（utils/io/url）。
 
 锁定 http/https 的 scheme/host/path 保留与凭据、query 剥离，以及无 authority 形态
 收敛为 scheme:<redacted>，防止 data URI 被伪造成 data://、空串输出 :// 进入日志。
@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from seedream_mcp.utils.io.url import get_file_extension_from_url, sanitize_url
+from seedream_mcp.utils.core.sanitizers import sanitize_url
+from seedream_mcp.utils.io.url import get_file_extension_from_url
 
 
 def test_sanitize_url_preserves_scheme_host_path() -> None:

@@ -301,7 +301,7 @@ async def _single_trip_to_temp(
     """
     if wall_start_time is None:
         wall_start_time = time.monotonic()
-    resume = _ResumeState()
+    resume = _ResumeState(manager.max_file_size)
     try:
         return await manager._stream_response_to_resume(
             response,

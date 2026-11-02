@@ -13,6 +13,7 @@ import pytest
 
 from seedream_mcp.utils.core import sanitizers
 from seedream_mcp.utils.io import storage as io_storage
+from seedream_mcp.utils.io.path import is_windows_reserved_name
 from seedream_mcp.utils.io.storage import (
     FileManager,
     _MAX_EXTENSION_LENGTH,
@@ -298,6 +299,35 @@ def test_sanitize_filename_windows_reserved_names(
 ) -> None:
     """Windows 保留设备名追加下划线规避，非保留名不受影响。"""
     assert manager.sanitize_filename(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # 恰 199 字节：插入下划线后恰达 200，预算内不重截。
+        ("NUL" + "." * 192 + ".jpg", "NUL_" + "." * 192 + ".jpg"),
+        # 恰 200 字节：旧行为插入后输出 201 字节。
+        ("NUL" + "." * 193 + ".jpg", "NUL_" + "." * 192 + ".jpg"),
+        # 203 字节截断到 200 后词干首段恰为保留名，旧行为同样破预算 1 字节。
+        ("NUL" + "." * 196 + ".jpg", "NUL_" + "." * 192 + ".jpg"),
+        # 超长扩展名按纯词干截断后命中保留名，重截走同一分支。
+        ("CON." + "z" * 300, "CON_" + "." + "z" * 195),
+    ],
+)
+def test_sanitize_filename_reserved_name_stays_within_byte_budget(
+    manager: FileManager, raw: str, expected: str
+) -> None:
+    """保留名下划线插入后同口径重截字节预算，输出恒不超 _MAX_FILENAME_LENGTH。
+
+    旧行为下划线在字节预算截断之后插入且不再重截，200/201 边界输出 201 字节，
+    ext4/APFS 的 255 字节目录项限额下 rename 必然 ENAMETOOLONG；规避保留名的
+    语义保持，首段词干带下划线不再命中保留名。
+    """
+    sanitized = manager.sanitize_filename(raw)
+
+    assert sanitized == expected
+    assert len(sanitized.encode("utf-8")) <= _MAX_FILENAME_LENGTH
+    assert not is_windows_reserved_name(sanitized)
 
 
 def test_sanitize_filename_all_unsafe_falls_back_to_unnamed(manager: FileManager) -> None:

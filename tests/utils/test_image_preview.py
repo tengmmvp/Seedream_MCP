@@ -76,6 +76,67 @@ async def test_cached_thumbnail_bytes_raises_for_missing_source(tmp_path: Path) 
         await cached_thumbnail_bytes(tmp_path / "missing.png", tmp_path)
 
 
+async def test_cached_thumbnail_bytes_maps_enotdir_stat_to_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """中间分量为普通文件的路径按缺失分档，不逃逸为瞬时 stat 失败。"""
+    import errno
+    import os
+
+    real_stat = Path.stat
+    blocked = tmp_path / "component.png" / "image.png"
+
+    def _enotdir_for_blocked(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        # Windows 把同形态映射为 FileNotFoundError，注入 POSIX 的 NotADirectoryError
+        # 使缺失分类在任一平台可测。
+        if self == blocked:
+            raise NotADirectoryError(errno.ENOTDIR, "中间分量为普通文件", str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", _enotdir_for_blocked)
+
+    with pytest.raises(FileNotFoundError):
+        await cached_thumbnail_bytes(blocked, tmp_path)
+
+
+async def test_cached_thumbnail_bytes_rejects_symlink_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """最终分量为符号链接的源图按缺失分档上抛，不跟随链接目标取缓存键。"""
+    import os
+    import stat
+
+    real_stat = Path.stat
+    linked = _write_png(tmp_path / "linked.png", (64, 64))
+    regular_st = real_stat(linked)
+    link_st = os.stat_result(
+        (
+            stat.S_IFLNK | 0o644,
+            regular_st.st_ino,
+            regular_st.st_dev,
+            regular_st.st_nlink,
+            regular_st.st_uid,
+            regular_st.st_gid,
+            regular_st.st_size,
+            regular_st.st_atime,
+            regular_st.st_mtime,
+            regular_st.st_ctime,
+        )
+    )
+
+    def _link_view_stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        # no-follow 视角呈链接形态、跟随视角呈常规文件目标，模拟指向常规文件
+        # 的符号链接；Windows 创建符号链接需特权，经注入口径跨平台可测。
+        if self == linked and not follow_symlinks:
+            return link_st
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", _link_view_stat)
+
+    with pytest.raises(FileNotFoundError):
+        await cached_thumbnail_bytes(linked, tmp_path)
+
+
 async def test_build_preview_contents_skips_missing_source(tmp_path: Path) -> None:
     """保存后预览装配前源图被删时跳过该张，FileNotFoundError 不外泄到工具调用。"""
     image = _write_png(tmp_path / "gone.png", (64, 64))

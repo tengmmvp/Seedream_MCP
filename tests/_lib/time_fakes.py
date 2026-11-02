@@ -1,8 +1,9 @@
 """time 层双假钟的共享测试替身。
 
-假 time 供 test_throttles、test_auto_save_and_download 与 test_auto_save_batch
-检验 due/mark 计时，两钟一并安装防用例漏装单调钟；mark(key, backoff) 到期
-公式的 due 翻转断言供两处清理退避用例复用。
+假 time 装在读取 time 的被测模块上（到期计时的单调钟读数单点位于 throttles，
+ThrottleRegistry 与清理门用例均装于 throttles），两钟一并安装防用例漏装单调
+钟；mark 写入的到期时间戳公式经双假钟在时钟窗口两端翻转 due 锁定，供清理
+退避用例复用。
 """
 
 from __future__ import annotations
@@ -12,8 +13,7 @@ import types
 
 import pytest
 
-from seedream_mcp.utils.core import throttles
-from seedream_mcp.utils.core.throttles import ThrottleRegistry
+from seedream_mcp.utils.io.save import _CleanupGate
 
 
 def _install_dual_clock(
@@ -32,18 +32,19 @@ def _install_dual_clock(
 
 def _assert_due_flips_at_window_edges(
     monkeypatch: pytest.MonkeyPatch,
-    registry: ThrottleRegistry[str],
+    module: types.ModuleType,
+    gate: _CleanupGate,
     key: str,
     t_before: float,
     t_after: float,
     backoff: float,
 ) -> None:
-    """锁定 mark(key, backoff) 写入的到期时间戳形态为 now + backoff：双假钟在时钟窗口两端翻转 due。"""
-    _, mono = _install_dual_clock(monkeypatch, throttles)
+    """锁定 mark 写入的到期时间戳形态为 now + backoff：双假钟在时钟窗口两端翻转 due。"""
+    _, mono = _install_dual_clock(monkeypatch, module)
     mono[0] = t_before + backoff - 1.0
-    assert registry.due(key) is False
+    assert gate.due(key) is False
     mono[0] = t_after + backoff + 1.0
-    assert registry.due(key) is True
+    assert gate.due(key) is True
 
 
 def _install_stepping_monotonic(step: float, monkeypatch: pytest.MonkeyPatch) -> None:

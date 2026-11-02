@@ -8,8 +8,9 @@ web_post_raw 以原始请求体 POST 供请求体解析分支用例，_assert_st
 drive_asgi_messages 直驱响应对象收集全部 ASGI 消息，asgi_start_headers 与
 asgi_body_bytes 自消息列取值，供绕过传输栈直调响应对象的用例共享；路由状态
 隔离 fixture 见 conftest 的 clean_web_routes；read_js_module_source 读取前端
-JS 模块源文本、function_body 以列首 } 结构锚点取函数体源文本，供静态资源
-契约断言共用。
+JS 模块源文本、function_body 以列首 } 结构锚点取函数体源文本、
+_assert_imported_from 断言符号经导入块引自指定兄弟模块，供静态资源契约
+断言共用。
 """
 
 from __future__ import annotations
@@ -209,6 +210,21 @@ def function_body(source: str, pattern: str) -> str:
     match = re.search(pattern, source, re.DOTALL | re.MULTILINE)
     assert match is not None, f"缺函数体锚: {pattern}"
     return match.group(0)
+
+
+def _assert_imported_from(source: str, module: str, *names: str) -> None:
+    """断言指定符号经统一导入块引自给定兄弟模块。
+
+    按逗号项解析标识符精确匹配（as 别名取尾名、空项跳过）：子串匹配会把
+    前缀名（postJson 对 postJsonRaw）误判为已引入。
+    """
+    block = re.search(rf'import \{{([^}}]*)\}} from "\./{re.escape(module)}";', source)
+    assert block is not None, f"缺 {module} 导入块"
+    imported = {
+        item.split(" as ")[-1].strip() for item in block.group(1).split(",") if item.strip()
+    }
+    for name in names:
+        assert name in imported, f"未从 {module} 引入 {name}"
 
 
 def make_png_bytes(width: int = 8, height: int = 8) -> bytes:

@@ -134,8 +134,10 @@ async def test_save_image_rejects_decompression_bomb_error(
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
 
-    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict[str, Any]:
-        del url, save_path, fsync
+    async def fake_download(
+        url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+    ) -> dict[str, Any]:
+        del url, save_path, fsync, max_file_size
         return {
             "success": True,
             "file_path": str(target),
@@ -172,8 +174,10 @@ async def test_save_image_rejects_pixels_between_limit_and_double(
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
 
-    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict[str, Any]:
-        del url, save_path, fsync
+    async def fake_download(
+        url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+    ) -> dict[str, Any]:
+        del url, save_path, fsync, max_file_size
         return {
             "success": True,
             "file_path": str(target),
@@ -289,6 +293,8 @@ async def test_cleanup_partial_failure_writes_backoff_timestamp(
     """清理返回 errors 时改写为短退避到期，下次保存按退避秒数重试。"""
     import time
 
+    from seedream_mcp.utils.core import throttles as throttles_module
+
     default_root = tmp_path / "images"
     default_root.mkdir()
 
@@ -300,20 +306,26 @@ async def test_cleanup_partial_failure_writes_backoff_timestamp(
         base_dir=default_root / "a", cleanup_base_dir=default_root, cleanup_days=30
     )
     monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", failing_cleanup)
-    auto_save_module._cleanup_last_run.clear()
+    auto_save_module._cleanup_gate.clear()
 
     t_before = time.monotonic()
     await manager._maybe_cleanup()
     await auto_save_module.drain_background_cleanup_tasks()
     t_after = time.monotonic()
 
-    assert len(auto_save_module._cleanup_last_run) == 1
+    assert len(auto_save_module._cleanup_gate) == 1
     assert manager._cleanup_file_manager is not None
     base_key = str(manager._cleanup_file_manager.base_dir)
     backoff = auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
     # 退避到期时间戳形态为 now + backoff，经 due 在时钟窗口两端的翻转锁定写入公式。
     _assert_due_flips_at_window_edges(
-        monkeypatch, auto_save_module._cleanup_last_run, base_key, t_before, t_after, backoff
+        monkeypatch,
+        throttles_module,
+        auto_save_module._cleanup_gate,
+        base_key,
+        t_before,
+        t_after,
+        backoff,
     )
 
 
@@ -323,7 +335,7 @@ async def test_run_cleanup_in_background_skips_without_file_manager(tmp_path: Pa
 
     await manager._run_cleanup_in_background("cleanup-key")
 
-    assert "cleanup-key" not in auto_save_module._cleanup_last_run
+    assert "cleanup-key" not in auto_save_module._cleanup_gate
 
 
 async def test_drain_background_cleanup_warns_on_timeout(

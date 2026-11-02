@@ -592,6 +592,31 @@ async def test_arm_unretrieved_exception_logging_rearms_done_task() -> None:
     assert calls == [task, task]
 
 
+async def test_arm_unretrieved_exception_logging_keeps_first_armed_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """特征化锁定：身份去重先于回调比较，首次默认布防后换自定义回调不生效。"""
+    from seedream_mcp.utils.core import inflight
+
+    async def failing() -> None:
+        raise RuntimeError("orphan failed")
+
+    task = asyncio.get_running_loop().create_task(failing())
+    arm_unretrieved_exception_logging(task)
+    custom_calls: list[object] = []
+    arm_unretrieved_exception_logging(task, custom_calls.append)
+
+    capture = RecordingLogger()
+    monkeypatch.setattr(inflight, "logger", capture)
+
+    while not task.done():
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert custom_calls == []
+    assert capture.warnings == ["后台共享任务失败: orphan failed"]
+
+
 async def test_inflight_entry_orphan_failure_logged_once_across_rearm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

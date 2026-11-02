@@ -620,6 +620,7 @@ def _invoke_common_generation_params(prompt: object) -> None:
         pytest.param(
             lambda: validate_size_for_model(cast(str, 123), _PRO_MODEL_ID), "size", id="size-type"
         ),
+        pytest.param(lambda: validate_size_for_model("", _PRO_MODEL_ID), "size", id="size-empty"),
         pytest.param(
             lambda: validate_size_for_model("   ", _PRO_MODEL_ID), "size", id="size-whitespace"
         ),
@@ -683,3 +684,15 @@ def test_public_validators_reject_unexpected_type_and_blank_with_field(
         invoke()
 
     assert exc_info.value.field == expected_field
+
+
+# ==================== 可编码性拒绝 ====================
+
+
+def test_validate_prompt_rejects_unencodable_surrogate() -> None:
+    """含未配对代理字符的提示词经共享编码预检拒绝，文案与 field 锁定不变。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_prompt("前缀\ud800后缀")
+
+    assert exc_info.value.message == "提示词包含无法编码的字符"
+    assert exc_info.value.field == "prompt"

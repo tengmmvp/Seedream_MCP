@@ -6,6 +6,8 @@ webapp 错误状态表与错误档案及错误码槽位取值、
 路径相似建议与 CLI 端口解析的边界行为；另含 loguru exc_info 关键字、security
 标记级别与环境变量键清洗前缀的全源码静态守护，
 错误段分隔符的拼装点消费与内联字面量边界守护，
+error_text 两步坍缩形态的生产者收口守护，
+吞异常 error 日志的堆栈携带守护，
 download.py PermissionError 处理器归类守护，以及 repo-layout.md 仓库与 tests
 结构契约的静态守护。新增取值或改名时两侧须同步，本文件在各处失败即暴露漂移。
 """
@@ -70,6 +72,18 @@ _ENV_KEY_READ_EXEMPTIONS = frozenset(
 )
 
 
+@functools.cache
+def _cached_read(source_path: Path) -> str:
+    """按路径缓存源码文本；会话内源码树静态，全包扫描共用一份读取。"""
+    return source_path.read_text(encoding="utf-8")
+
+
+@functools.cache
+def _cached_parse(source_path: Path) -> ast.Module:
+    """按路径缓存语法树，消费方一律只读遍历；解析复用 _cached_read 的文本。"""
+    return ast.parse(_cached_read(source_path))
+
+
 def _static_key_text(node: ast.AST) -> tuple[str, bool]:
     """取键实参的静态文本与是否整体静态，首个动态部分截断后续文本。"""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -108,10 +122,10 @@ def _is_env_key_read(func: ast.AST) -> bool:
     return func.attr == "get" and _is_environ_access(func.value)
 
 
-def _env_key_read_sites(source: str) -> list[tuple[str, str]]:
-    """提取源码内全部环境键读取站点，含下标读取形态，返回 (读取原文, 键静态前缀)。"""
+def _env_key_read_sites(tree: ast.Module) -> list[tuple[str, str]]:
+    """提取语法树内全部环境键读取站点，含下标读取形态，返回 (读取原文, 键静态前缀)。"""
     sites: list[tuple[str, str]] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _is_env_key_read(node.func):
             if node.args:
                 prefix, _fully_static = _static_key_text(node.args[0])
@@ -402,7 +416,7 @@ def test_error_type_slot_values_registered() -> None:
     package_root = Path(seedream_mcp.__file__).resolve().parent
     offenders: list[str] = []
     for source_path in sorted(package_root.glob("**/*.py")):
-        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        tree = _cached_parse(source_path)
         offenders += [
             f"{source_path.name}: {literal}"
             for literal in _error_type_literal_sites(tree)
@@ -485,11 +499,203 @@ def test_loguru_calls_never_pass_exc_info_keyword() -> None:
     offenders: list[str] = []
     for source_path in sorted(package_root.rglob("*.py")):
         relative = source_path.relative_to(package_root).as_posix()
-        source_text = source_path.read_text(encoding="utf-8")
+        source_text = _cached_read(source_path)
         if re.search(r"\bexc_info\s*=", source_text):
             offenders.append(relative)
 
     assert offenders == []
+
+
+def _attribute_chain_segments(expr: ast.expr) -> list[str]:
+    """属性链各段名，链中调用续走其被调表达式：logger.bind(x).error 取 ['logger','bind','error']。"""
+    segments: list[str] = []
+    node: ast.expr = expr
+    while True:
+        if isinstance(node, ast.Attribute):
+            segments.append(node.attr)
+            node = node.value
+        elif isinstance(node, ast.Call):
+            node = node.func
+        else:
+            break
+    if isinstance(node, ast.Name):
+        segments.append(node.id)
+    else:
+        segments.append("<call>")
+    segments.reverse()
+    return segments
+
+
+def _is_error_level_log_call(call: ast.Call) -> bool:
+    """判定调用是否 logger 变体的 error 级日志调用，含 self.logger 与 module_logger。"""
+    func = call.func
+    if not isinstance(func, ast.Attribute) or func.attr != "error":
+        return False
+    return any(
+        segment == "logger" or segment.endswith("_logger")
+        for segment in _attribute_chain_segments(func)[:-1]
+    )
+
+
+def _error_log_call_carries_stack(call: ast.Call) -> bool:
+    """error 调用链相邻一层是否经 opt(exception=...) 携带堆栈；opt 后再接 bind 等中间层不计。"""
+    node: ast.expr | None = call.func
+    while isinstance(node, ast.Attribute):
+        inner = node.value
+        if isinstance(inner, ast.Call):
+            inner_func = inner.func
+            if (
+                isinstance(inner_func, ast.Attribute)
+                and inner_func.attr == "opt"
+                and any(keyword.arg == "exception" for keyword in inner.keywords)
+            ):
+                return True
+        node = inner
+    return False
+
+
+def _handler_reraises(handler: ast.ExceptHandler) -> bool:
+    """处理器体内是否重新上抛；嵌套函数与 lambda 作用域内的 raise 不外抛，不计。"""
+    stack: list[ast.AST] = list(handler.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Raise):
+            return True
+        stack.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _names_derived_from_caught_name(handler: ast.ExceptHandler) -> set[str]:
+    """收集 except 块内由捕获名单跳赋值的变量名（var = f(exc) 形态）。
+
+    嵌套函数与 lambda 内的赋值不外抛作用域，不计；多重中转变量超出轻量判定面。
+    """
+    caught = handler.name
+    if caught is None:
+        return set()
+    derived: set[str] = set()
+    stack: list[ast.AST] = list(handler.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        if (
+            isinstance(target, ast.Name)
+            and value is not None
+            and any(isinstance(child, ast.Name) and child.id == caught for child in ast.walk(value))
+        ):
+            derived.add(target.id)
+        stack.extend(ast.iter_child_nodes(node))
+    return derived
+
+
+def _stackless_error_logs_consuming_exception(handler: ast.ExceptHandler) -> list[ast.Call]:
+    """提取吞异常继续走且实参消费异常的裸 error 级日志调用。
+
+    判定面三条件齐备才计入：处理器无重新上抛（栈由最终捕获方落盘）、日志未经
+    opt(exception=...) 携带堆栈、实参或关键字引用捕获名或其单跳派生变量
+    （静态文案不涉及丢栈）。
+    """
+    if handler.name is None or _handler_reraises(handler):
+        return []
+    consumed_names = {handler.name} | _names_derived_from_caught_name(handler)
+    return [
+        call
+        for call in (node for node in ast.walk(handler) if isinstance(node, ast.Call))
+        if _is_error_level_log_call(call)
+        and not _error_log_call_carries_stack(call)
+        and any(
+            isinstance(child, ast.Name) and child.id in consumed_names for child in ast.walk(call)
+        )
+    ]
+
+
+def test_swallowed_error_logs_carry_exception_stack() -> None:
+    """吞异常继续走的 error 级日志必须经 opt(exception=True) 携带堆栈。
+
+    只捕获不重新上抛时日志是堆栈的唯一落点，裸 logger.error(str(e)) 把排障
+    信息降级为单行消息；判定面限定消费捕获名及其单跳派生变量的形态，零误报。
+    """
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    offenders: list[str] = []
+    for source_path in sorted(package_root.rglob("*.py")):
+        relative = source_path.relative_to(package_root).as_posix()
+        tree = _cached_parse(source_path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ExceptHandler):
+                offenders += [
+                    f"{relative}: 第 {call.lineno} 行"
+                    for call in _stackless_error_logs_consuming_exception(node)
+                ]
+
+    assert offenders == [], (
+        "吞异常的 error 日志未携带堆栈，须改 logger.opt(exception=True).error 或重新上抛: "
+        f"{offenders}"
+    )
+
+
+def test_stackless_error_log_extraction_targets_swallowing_handlers_only() -> None:
+    """提取面命中吞异常且消费捕获名或其派生变量的裸 error 日志，上抛与携带堆栈形态不误报。"""
+    source = (
+        "try:\n"
+        "    scan(path)\n"
+        "except Exception as e:\n"
+        "    logger.error('扫描失败: {}', e)\n"
+        "try:\n"
+        "    scan(path)\n"
+        "except Exception as e:\n"
+        "    logger.opt(exception=True).error('扫描失败: {}', e)\n"
+        "try:\n"
+        "    scan(path)\n"
+        "except Exception as e:\n"
+        "    logger.error('扫描失败: {}', e)\n"
+        "    raise\n"
+        "try:\n"
+        "    scan(path)\n"
+        "except Exception as e:\n"
+        "    self.logger.error('扫描失败 {}', f'{path}: {e}')\n"
+        "try:\n"
+        "    scan(path)\n"
+        "except OSError as e:\n"
+        "    module_logger.error('扫描失败，静态文案')\n"
+        "try:\n"
+        "    scan(path)\n"
+        "except Exception as e:\n"
+        "    def inner():\n"
+        "        raise RuntimeError(e)\n"
+        "    logger.error('扫描失败: {}', e)\n"
+        "try:\n"
+        "    scan(path)\n"
+        "except Exception as e:\n"
+        "    message = format(e)\n"
+        "    logger.error('扫描失败: {}', message)\n"
+        "try:\n"
+        "    scan(path)\n"
+        "except Exception as e:\n"
+        "    message = format(e)\n"
+        "    logger.opt(exception=True).error('扫描失败: {}', message)\n"
+        "try:\n"
+        "    scan(path)\n"
+        "except Exception as e:\n"
+        "    message = '静态文案'\n"
+        "    logger.error('扫描失败: {}', message)\n"
+    )
+    tree = ast.parse(source)
+    handlers = [node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)]
+
+    assert [
+        call.lineno
+        for handler in handlers
+        for call in _stackless_error_logs_consuming_exception(handler)
+    ] == [4, 17, 27, 32]
 
 
 def test_cpu_offload_threshold_single_definition_in_executors() -> None:
@@ -507,35 +713,33 @@ def test_parallel_request_count_single_definition_in_conventions() -> None:
         relative = source_path.relative_to(package_root).as_posix()
         if relative == "definitions/conventions.py":
             continue
-        source_text = source_path.read_text(encoding="utf-8")
+        source_text = _cached_read(source_path)
         if re.search(r"^MAX_PARALLEL_REQUEST_COUNT\s*=", source_text, re.MULTILINE):
             offenders.append(relative)
 
     assert offenders == []
 
 
-# 段分隔符单源的十四个消费点：模块相对路径与函数名，任一回归为内联字面量即漂移。
+# 段分隔符单源的十二个消费点：模块相对路径与函数名，任一回归为内联字面量即漂移。
 _SEGMENT_JOINER_CONSUMER_SITES: tuple[tuple[str, str], ...] = (
     ("utils/core/errors.py", "format_error_for_user"),
-    ("tools/pipeline/_execute.py", "execute_generation_handler"),
+    ("utils/core/errors.py", "failure_message_with_guidance"),
     ("server/_registration.py", "_validation_error_message"),
     ("tools/pipeline/results.py", "aggregate_parallel_generation_results"),
     ("webapp/_responses.py", "images_root_unavailable_error"),
-    ("tools/handlers/browse_images.py", "build_browse_fallback_result"),
     ("tools/handlers/browse_images.py", "_build_empty_browse_result"),
     ("utils/io/path.py", "read_scope_denial_message"),
     ("utils/core/validators.py", "capability_gate_error"),
     ("config/_builder.py", "_build_config_unlocked_body"),
     ("config/_model.py", "_validate_api_endpoint"),
-    ("config/_model.py", "_first_invalid_request_state_key_message"),
-    ("config/sources.py", "_decode_request_state_key_entries"),
+    ("config/sources.py", "_request_state_key_rule_error"),
     ("config/sources.py", "_read_env_values"),
 )
 
 
 def _function_body_uses_name(module_relative: str, function_name: str, name: str) -> bool:
     """判定模块内目标函数体是否引用给定名字。"""
-    tree = ast.parse((_SRC_ROOT / module_relative).read_text(encoding="utf-8"))
+    tree = _cached_parse(_SRC_ROOT / module_relative)
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -546,14 +750,179 @@ def _function_body_uses_name(module_relative: str, function_name: str, name: str
 
 
 def test_error_segment_joiner_consumed_at_assembly_sites() -> None:
-    """十四处多段错误与提示文案拼装点统一消费 sanitizers 的段分隔符常量，回归字面量即漂移。"""
+    """十二处多段错误与提示文案拼装点统一消费段分隔符常量或组装原语，回归字面量即漂移。"""
     offenders = [
         f"{module_relative}: {function_name}"
         for module_relative, function_name in _SEGMENT_JOINER_CONSUMER_SITES
-        if not _function_body_uses_name(module_relative, function_name, "ERROR_TEXT_SEGMENT_JOINER")
+        if not (
+            _function_body_uses_name(module_relative, function_name, "ERROR_TEXT_SEGMENT_JOINER")
+            or _function_body_uses_name(module_relative, function_name, "assemble_error_segments")
+        )
     ]
 
-    assert offenders == [], f"拼装点未消费 ERROR_TEXT_SEGMENT_JOINER: {offenders}"
+    assert offenders == [], f"拼装点未消费段分隔符常量或组装原语: {offenders}"
+
+
+# joiner 名字引用的收敛终态：仅剩 sanitizers 的定义与 errors 的组装原语两处；
+# 其余模块引用 joiner 名字即绕开组装原语的漂移。
+_SEGMENT_JOINER_NAME_MODULES_ALLOWED = frozenset(
+    {
+        "utils/core/errors.py",
+        "utils/core/sanitizers.py",
+    }
+)
+
+
+def test_error_segment_joiner_name_confined_to_allowed_modules() -> None:
+    """段分隔符名字引用收敛于允许清单，新调用点不得绕开组装原语直引常量。"""
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    offenders: list[str] = []
+    for source_path in sorted(package_root.rglob("*.py")):
+        module_relative = source_path.relative_to(package_root).as_posix()
+        if module_relative in _SEGMENT_JOINER_NAME_MODULES_ALLOWED:
+            continue
+        tree = _cached_parse(source_path)
+        if any(
+            isinstance(node, ast.Name) and node.id == "ERROR_TEXT_SEGMENT_JOINER"
+            for node in ast.walk(tree)
+        ):
+            offenders.append(module_relative)
+
+    assert offenders == [], f"允许清单外模块引用 ERROR_TEXT_SEGMENT_JOINER: {sorted(offenders)}"
+
+
+# 错误消息构造器的调用名注册表：异常类与错误载荷构造器，message 实参与组装原语
+# 的段实参须为静态字符串、error_text/ErrorText 构造或经名传递；f-string、加法
+# 拼接、format 与 % 格式化形态均为待迁移插值。
+_ERROR_MESSAGE_CONSTRUCTOR_NAMES = frozenset(
+    {
+        "SeedreamMCPError",
+        "SeedreamConfigError",
+        "SeedreamAPIError",
+        "SeedreamValidationError",
+        "SeedreamTimeoutError",
+        "SeedreamNetworkError",
+        "DownloadError",
+        "FileManagerError",
+        "AutoSaveError",
+        "PrepareInflightExhaustedError",
+        "ToolError",
+        "MCPError",
+        "ResourceNotFoundError",
+        "ArgumentTypeError",
+        "SymlinkRejectedError",
+        "NonRegularFileError",
+        "assemble_error_segments",
+        "build_error_dict",
+        "build_error_structured",
+        "WebErrorInfo",
+        "respond_structured_error",
+        "_replace",
+    }
+)
+
+
+# 错误消息结构化迁移的待迁移模块棘轮：2026-11 全域迁移完成，终态为空——全仓
+# 构造器实参不得出现插值形态（builtins 的 ValueError 等不入注册表，其迁移产物按
+# error_text 构造形态天然合规）。
+_ERROR_TEXT_PENDING_MODULES: frozenset[str] = frozenset()
+
+
+def _is_interpolated_message_expression(node: ast.AST) -> bool:
+    """判定直接实参形态是否为插值构造：f-string、加法拼接、format 调用与 % 格式化。
+
+    只判直接实参层：error_text 调用内部的常量组合模板不在判定面，变量中介的
+    插值（先赋值后传入）不在 AST 判定能力内，由评审与出口幂等净化兜底。
+    """
+    if isinstance(node, ast.JoinedStr):
+        return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+        return True
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    )
+
+
+def test_error_messages_constructed_without_interpolation() -> None:
+    """错误消息构造器实参不得为插值表达式：动态值须经 error_text 分类参数进入。
+
+    允许清单为迁移棘轮：域迁移波次逐模块剔除，终态清单为空；清单外新增插值
+    构造即漂移。
+    """
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    offenders: list[str] = []
+    for source_path in sorted(package_root.rglob("*.py")):
+        module_relative = source_path.relative_to(package_root).as_posix()
+        if module_relative in _ERROR_TEXT_PENDING_MODULES:
+            continue
+        tree = _cached_parse(source_path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if _call_tail_name(node) not in _ERROR_MESSAGE_CONSTRUCTOR_NAMES:
+                continue
+            if any(
+                _is_interpolated_message_expression(arg)
+                for arg in (
+                    *node.args,
+                    *(keyword.value for keyword in node.keywords if keyword.arg == "message"),
+                )
+            ):
+                offenders.append(f"{module_relative}:{node.lineno}")
+    assert offenders == [], f"错误消息插值构造（待迁移清单外）: {sorted(offenders)}"
+
+
+def _direct_error_text_collapse_sites(tree: ast.Module) -> list[str]:
+    """提取 error_text(...) 调用结果直接链 .raw_text()/.safe_text() 的站点。"""
+    sites: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr in ("raw_text", "safe_text")):
+            continue
+        if isinstance(func.value, ast.Call) and _call_tail_name(func.value) == "error_text":
+            sites.append(f"第 {node.lineno} 行 .{func.attr}()")
+    return sites
+
+
+def test_error_text_collapse_funneled_through_producers() -> None:
+    """全源码无 error_text(...) 直接链 .raw_text()/.safe_text() 的两步坍缩残留。
+
+    构造即坍缩的站点统一经 raw_error_text/safe_error_text 生产者收口，通道语义
+    随生产者单点声明；需要 ErrorText 载荷的场景（异常直收、段拼接、边界渲染）
+    仍走 error_text 工厂，不在本守护判定面内。
+    """
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    offenders: list[str] = []
+    for source_path in sorted(package_root.rglob("*.py")):
+        relative = source_path.relative_to(package_root).as_posix()
+        tree = _cached_parse(source_path)
+        offenders += [f"{relative}: {site}" for site in _direct_error_text_collapse_sites(tree)]
+
+    assert offenders == [], (
+        "error_text(...).raw_text()/.safe_text() 须改用 raw_error_text/safe_error_text 生产者: "
+        f"{offenders}"
+    )
+
+
+def test_error_text_collapse_extraction_targets_direct_chains_only() -> None:
+    """提取面只命中直链坍缩形态：载荷用途（变量中介、异常实参、段拼接）不入面。"""
+    source = (
+        "a = error_text(t, x=as_text(v)).raw_text()\n"
+        "b = error_text(t, x=as_text(v)).safe_text()\n"
+        "payload = error_text(t, x=as_text(v))\n"
+        "c = payload.raw_text()\n"
+        "d = fail(error_text(t, x=as_text(v)))\n"
+        "e = assemble_error_segments(payload, error_text(t, x=as_text(v)))\n"
+    )
+
+    assert _direct_error_text_collapse_sites(ast.parse(source)) == [
+        "第 1 行 .raw_text()",
+        "第 2 行 .safe_text()",
+    ]
 
 
 # 判定保留的内联「；」站点：静态散文、枚举与事实并列的句内标点，非段装配。
@@ -663,7 +1032,7 @@ def test_error_segment_joiner_inline_literals_confined_to_exemptions() -> None:
         relative = source_path.relative_to(package_root).as_posix()
         if relative == "utils/core/sanitizers.py":
             continue  # 常量定义站点，值本身即「；」。
-        for snippet in _inline_segment_joiner_sites(source_path.read_text(encoding="utf-8")):
+        for snippet in _inline_segment_joiner_sites(_cached_read(source_path)):
             site = f"{relative}: {snippet}"
             if site not in _INLINE_JOINER_EXEMPTIONS:
                 offenders.append(site)
@@ -707,7 +1076,7 @@ def test_security_marked_logs_are_warning_level() -> None:
     pattern = re.compile(r"\.bind\(security=True\)\s*\.\s*(\w+)\(")
     offenders: list[str] = []
     for source_path in sorted(package_root.rglob("*.py")):
-        source_text = source_path.read_text(encoding="utf-8")
+        source_text = _cached_read(source_path)
         for match in pattern.finditer(source_text):
             if match.group(1) != "warning":
                 relative = source_path.relative_to(package_root).as_posix()
@@ -722,7 +1091,7 @@ def test_env_key_reads_covered_by_host_scrub_prefixes() -> None:
     offenders: list[str] = []
     for source_path in sorted(package_root.rglob("*.py")):
         relative = source_path.relative_to(package_root).as_posix()
-        for render, prefix in _env_key_read_sites(source_path.read_text(encoding="utf-8")):
+        for render, prefix in _env_key_read_sites(_cached_parse(source_path)):
             if prefix.startswith(HOST_ENV_SCRUB_PREFIXES):
                 continue
             if f"{relative}:{render}" in _ENV_KEY_READ_EXEMPTIONS:
@@ -755,7 +1124,7 @@ def test_env_key_site_extraction_covers_quote_and_composition_forms(
     source: str, expected_prefix: str
 ) -> None:
     """键提取对引号拼写、f-string/拼接与下标读取形态不敏感，纯动态键解出空前缀。"""
-    sites = _env_key_read_sites(source)
+    sites = _env_key_read_sites(ast.parse(source))
 
     assert [prefix for _render, prefix in sites] == [expected_prefix]
 
@@ -769,7 +1138,7 @@ def test_env_key_site_extraction_ignores_unrelated_reads() -> None:
         "entry = values['SEEDREAM_X']"
     )
 
-    assert _env_key_read_sites(source) == []
+    assert _env_key_read_sites(ast.parse(source)) == []
 
 
 def test_download_permission_error_handlers_are_classified() -> None:
@@ -1094,7 +1463,7 @@ def _scan_module_edges() -> dict[str, dict[str, set[str]]]:
         if is_package:
             parts = parts[:-1]
         name = ".".join(parts)
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = _cached_parse(path)
         buckets: dict[str, set[str]] = {"runtime": set(), "type_checking": set(), "function": set()}
 
         def record(node: ast.Import | ast.ImportFrom, kind: str) -> None:
@@ -1159,7 +1528,7 @@ def _lazy_export_edges() -> set[tuple[str, str]]:
         ("seedream_mcp.tools", "tools/__init__.py"),
     ):
         path = _SRC_ROOT / rel_path
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = _cached_parse(path)
         for node in tree.body:
             if isinstance(node, ast.AnnAssign):
                 if not (
@@ -1280,7 +1649,7 @@ def test_import_module_confined_to_facades() -> None:
     for path in sorted(_SRC_ROOT.rglob("*.py")):
         if "webapp" in path.parts and "static" in path.parts:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = _cached_parse(path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue

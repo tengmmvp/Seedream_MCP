@@ -1748,7 +1748,8 @@ async def test_decode_rewrite_fail_twice_restarts_and_reraises(
     body = gzip.compress(_DECODE_BODY)
     part = tmp_path / "out.png.part"
     part.write_bytes(body)
-    resume = _ResumeState()
+    manager = DownloadManager()
+    resume = _ResumeState(manager.max_file_size)
     resume.path = part
     resume.head_bytes = body[:SNIFF_HEAD_BYTES_FLOOR]
     resume.offset = len(body)
@@ -1768,7 +1769,6 @@ async def test_decode_rewrite_fail_twice_restarts_and_reraises(
 
     monkeypatch.setattr(_ResumeState, "restart", _counting_restart)
     monkeypatch.setattr(os, "write", _failing_rewrite_write)
-    manager = DownloadManager()
 
     with pytest.raises(RetryableDownloadError, match="临时文件已毁") as excinfo:
         await manager._decode_compressed_resume(resume)

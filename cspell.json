@@ -231,6 +231,7 @@
     "svgs",
     "surrogateescape",
     "surrogatepass",
+    "stackless",
     "starlette",
     "staticmethod",
     "steppable",

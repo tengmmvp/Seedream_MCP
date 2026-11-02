@@ -26,7 +26,7 @@ from _lib.download_fakes import (
     _png_success_response,
 )
 from _lib.os_fakes import _install_fsync_counter
-from _lib.time_fakes import _assert_due_flips_at_window_edges
+from _lib.time_fakes import _assert_due_flips_at_window_edges, _install_dual_clock
 
 # 1x1 透明 PNG 的 base64 编码
 _PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -91,7 +91,9 @@ async def test_save_image_returns_failure_on_download_error(
     manager = AutoSaveManager(base_dir=tmp_path)
     try:
 
-        async def fake_download(url, save_path, headers=None, fsync=False):  # type: ignore[no-untyped-def]
+        async def fake_download(  # type: ignore[no-untyped-def]
+            url, save_path, headers=None, fsync=False, max_file_size=None
+        ):
             raise DownloadError("网络错误")
 
         monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
@@ -155,13 +157,58 @@ async def test_save_image_reports_sniffed_final_path(
     assert result.markdown_ref.endswith(".png)")
 
 
+async def test_save_image_enforces_instance_limit_with_injected_manager(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """注入异上限下载管理器时本实例限额穿入下载流中检查点，超限在流中被拒。
+
+    下载管理器自持上限放宽到 1MB 而实例上限为 100 字节：无声明总量的超限响应
+    在流式累计检查点按两上限较小者（100）拒绝，不落盘不改名，按保存失败降级
+    保留原始 URL；Base64 路径仍按本实例上限在解码前拒绝。
+    """
+    from base64 import b64encode
+
+    oversized = _PNG_BYTES + b"x" * 200
+    download_manager = DownloadManager(max_file_size=1_000_000)
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                status=200,
+                headers={"content-type": "image/png"},
+                content_chunks=[oversized],
+            )
+        ]
+    )
+    _patch_download_network(monkeypatch, download_manager, session)
+    manager = AutoSaveManager(
+        base_dir=tmp_path, max_file_size=100, download_manager=download_manager
+    )
+
+    async with manager:
+        result = await manager.save_image("https://example.com/big.png", prompt="超限")
+
+        assert result.success is False
+        assert result.original_url == "https://example.com/big.png"
+        # 232 字节为流式累计检查点读数：无声明总量的响应只有该检查点给出实际字节数。
+        assert "过大" in (result.error or "")
+        assert "232" in (result.error or "")
+        # 流中被拒先于落盘与改名：目标文件与续传临时文件均不存在。
+        assert not list(tmp_path.rglob("*.png"))
+        assert not list(tmp_path.rglob("*.part"))
+
+        b64_result = await manager.save_base64_image(b64encode(b"x" * 200).decode(), prompt="超限")
+
+    assert b64_result.success is False
+    assert "过大" in (b64_result.error or "")
+
+
 async def test_maybe_cleanup_throttle_shared_per_base_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """节流按 base_dir 跨请求共享：同目录仅触发一次，不同目录各自触发。"""
     from seedream_mcp.utils.io import save as auto_save_module
 
-    auto_save_module._cleanup_last_run.clear()
+    auto_save_module._cleanup_gate.clear()
     cleanup_calls: list[int] = []
 
     def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
@@ -205,7 +252,7 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
     """
     from seedream_mcp.utils.io import save as auto_save_module
 
-    auto_save_module._cleanup_last_run.clear()
+    auto_save_module._cleanup_gate.clear()
     cleanup_calls: list[int] = []
 
     def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
@@ -214,9 +261,9 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
 
     # 预置过期键占满容量上限，目标目录居链首，写入不移动位置时恰为被逐出的链首键；
     # 负间隔产生与代码同基准（time.monotonic）的已过期时间戳。
-    auto_save_module._cleanup_last_run.mark(str(tmp_path), -7200.0)
-    for i in range(auto_save_module._CLEANUP_LAST_RUN_MAX_ENTRIES - 1):
-        auto_save_module._cleanup_last_run.mark(f"old-{i}", -7200.0)
+    auto_save_module._cleanup_gate.mark(str(tmp_path), -7200.0)
+    for i in range(auto_save_module._CLEANUP_GATE_MAX_ENTRIES - 1):
+        auto_save_module._cleanup_gate.mark(f"old-{i}", -7200.0)
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
     assert manager._cleanup_file_manager is not None
@@ -257,7 +304,7 @@ async def test_maybe_cleanup_sweeps_orphan_part_with_cleanup_disabled(
 
     from seedream_mcp.utils.io import save as auto_save_module
 
-    auto_save_module._cleanup_last_run.clear()
+    auto_save_module._cleanup_gate.clear()
     stale_part = tmp_path / "tmpabc123.png.part"
     stale_part.write_bytes(b"x" * 30)
     stale_time = (datetime.now() - timedelta(days=2)).timestamp()
@@ -288,9 +335,10 @@ async def test_maybe_cleanup_failure_backoff_throttles_retry(
     """
     import time as time_module
 
+    from seedream_mcp.utils.core import throttles as throttles_module
     from seedream_mcp.utils.io import save as auto_save_module
 
-    auto_save_module._cleanup_last_run.clear()
+    auto_save_module._cleanup_gate.clear()
     calls: list[int] = []
 
     def failing_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
@@ -319,7 +367,156 @@ async def test_maybe_cleanup_failure_backoff_throttles_retry(
         backoff = auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
         base_key = str(manager.file_manager.base_dir)
         _assert_due_flips_at_window_edges(
-            monkeypatch, auto_save_module._cleanup_last_run, base_key, t_before, t_after, backoff
+            monkeypatch,
+            throttles_module,
+            auto_save_module._cleanup_gate,
+            base_key,
+            t_before,
+            t_after,
+            backoff,
+        )
+    finally:
+        await manager.close()
+
+
+async def test_cleanup_persistent_failure_backoff_escalates_and_caps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """单文件持续锁定（逐项失败每轮复现）时重试间隔按 2 的幂放大并封顶完整节流间隔。
+
+    旧行为任一 error 恒写 60 秒退避，锁存留期间每个退避窗口后都全量重扫整树并
+    在同一文件再失败；放大后重扫频率收敛到正常清理档。首败仍为最短退避，
+    配额驱逐待处理时的尽快重试语义保留。
+    """
+    from seedream_mcp.utils.core import throttles as throttles_module
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+    _, mono = _install_dual_clock(monkeypatch, throttles_module)
+    calls: list[int] = []
+
+    def failing_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        calls.append(days)
+        return {"deleted_files": 0, "deleted_size": 0, "errors": ["删除文件失败 locked.png"]}
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        assert manager._cleanup_file_manager is not None
+        monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", failing_cleanup)
+
+        now = 1000.0
+        mono[0] = now
+        for index, window in enumerate((60, 120, 240, 480, 960, 1920, 3600, 3600)):
+            await manager._maybe_cleanup()
+            await auto_save_module.drain_background_cleanup_tasks()
+            assert len(calls) == index + 1
+            # 退避窗口内清理门未到期，不触发全目录重扫。
+            mono[0] = now + window - 1.0
+            await manager._maybe_cleanup()
+            await auto_save_module.drain_background_cleanup_tasks()
+            assert len(calls) == index + 1
+            now += window + 1.0
+            mono[0] = now
+    finally:
+        await manager.close()
+
+
+async def test_cleanup_failure_streak_resets_on_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """清理成功清零连续失败计数，后续失败从最短退避重新起算。
+
+    两连败已放大到 120 秒档后一次成功回归完整节流间隔，清零后再败回到
+    60 秒，不继承放大间隔。
+    """
+    from seedream_mcp.utils.core import throttles as throttles_module
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+    outcomes: list[dict[str, Any]] = [
+        {"deleted_files": 0, "deleted_size": 0, "errors": ["删除文件失败 x"]},
+        {"deleted_files": 0, "deleted_size": 0, "errors": ["删除文件失败 x"]},
+        {"deleted_files": 0, "deleted_size": 0, "errors": []},
+        {"deleted_files": 0, "deleted_size": 0, "errors": ["删除文件失败 x"]},
+    ]
+    pending = list(outcomes)
+
+    def scripted_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        del days, max_total_bytes
+        return pending.pop(0)
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        assert manager._cleanup_file_manager is not None
+        monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", scripted_cleanup)
+
+        _, mono = _install_dual_clock(monkeypatch, throttles_module)
+        cleanup_key = str(manager._cleanup_file_manager.base_dir)
+        now = 1000.0
+        for expected_window in (60, 120, 3600, 60):
+            mono[0] = now
+            await manager._maybe_cleanup()
+            await auto_save_module.drain_background_cleanup_tasks()
+            # 本轮过后的到期窗口：两连败放大到 120，成功回归完整节流并清零计数，
+            # 再败从最短退避重新起算。
+            mono[0] = now + expected_window - 1.0
+            assert not auto_save_module._cleanup_gate.due(cleanup_key)
+            mono[0] = now + expected_window + 1.0
+            assert auto_save_module._cleanup_gate.due(cleanup_key)
+            now = mono[0]
+        assert not pending
+    finally:
+        await manager.close()
+
+
+async def test_cleanup_gate_evicts_least_recently_used(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """清理门的容量驱逐按最近使用序，活跃失败根的退避放大档不因新键回退。
+
+    驱逐若不随写入刷新位置（纯插入序），最早写入但持续在败的键在新键写入时被
+    整条移除，失败计数清零使退避档回退 60 秒重新放大；写入移到最近使用端后被
+    逐出的是真正最久未用的键，四连败根在容量驱逐压力下仍按 480 秒档续算。
+    """
+    from seedream_mcp.utils.core import throttles as throttles_module
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        assert manager._cleanup_file_manager is not None
+        _, mono = _install_dual_clock(monkeypatch, throttles_module)
+        gate = auto_save_module._cleanup_gate
+        target_key = str(manager._cleanup_file_manager.base_dir)
+
+        # 目标键最早写入并两连败；其余键随后写满容量，两种序下目标键均居链首
+        # （最久未用端）。
+        for _ in range(2):
+            await manager._apply_cleanup_failure_backoff(target_key)
+        filler_keys = [
+            f"{tmp_path}-filler-{i}" for i in range(auto_save_module._CLEANUP_GATE_MAX_ENTRIES - 1)
+        ]
+        for key in filler_keys:
+            await manager._apply_cleanup_failure_backoff(key)
+        # 目标键三败写入移到最近使用端（链尾）。
+        await manager._apply_cleanup_failure_backoff(target_key)
+
+        # 容量已满，新键写入触发驱逐：被逐出的是最久未使用的首个占位键。
+        await manager._apply_cleanup_failure_backoff(f"{tmp_path}-newcomer")
+        assert filler_keys[0] not in gate
+        assert target_key in gate
+
+        # 目标键再败续算第四档（60 * 2^3 = 480 秒），计数未因驱逐压力回退到 60 秒档。
+        now = mono[0]
+        await manager._apply_cleanup_failure_backoff(target_key)
+        _assert_due_flips_at_window_edges(
+            monkeypatch,
+            throttles_module,
+            auto_save_module._cleanup_gate,
+            target_key,
+            now,
+            now,
+            480.0,
         )
     finally:
         await manager.close()

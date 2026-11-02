@@ -28,8 +28,10 @@ async def test_save_image_oserror_degrades_to_filesystem_error_tier(
     """下载抛 OSError 时归文件系统错误档：warning 日志、错误前缀与 URL 回退。"""
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
 
-    async def failing_download(url: str, save_path: Path, fsync: bool = False) -> dict[str, Any]:
-        del url, save_path, fsync
+    async def failing_download(
+        url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+    ) -> dict[str, Any]:
+        del url, save_path, fsync, max_file_size
         raise OSError(28, "simulated no space left")
 
     monkeypatch.setattr(manager.download_manager, "download_image", failing_download)
@@ -53,8 +55,10 @@ async def test_save_image_unknown_error_degrades_to_unknown_tier(
     """下载抛未知异常时归未知错误档：error 日志与未知错误前缀，不落入文件系统档。"""
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
 
-    async def buggy_download(url: str, save_path: Path, fsync: bool = False) -> dict[str, Any]:
-        del url, save_path, fsync
+    async def buggy_download(
+        url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+    ) -> dict[str, Any]:
+        del url, save_path, fsync, max_file_size
         raise RuntimeError("simulated decoder bug")
 
     monkeypatch.setattr(manager.download_manager, "download_image", buggy_download)
