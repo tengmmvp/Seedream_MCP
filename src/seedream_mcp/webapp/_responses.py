@@ -32,8 +32,16 @@ from ..tools.outputs import (
     dump_strict_json_bytes as dump_strict_json_bytes,
 )
 from ..utils.core.errors import (
+    ErrorText,
     SeedreamConfigError,
+    as_plain,
+    as_plain_list,
+    assemble_error_segments,
+    base_detail_error_text,
+    error_text,
     iter_error_profiles,
+    raw_error_text,
+    render_boundary_error_text,
     validation_error_user_message,
 )
 from ..utils.core.executors import (
@@ -43,11 +51,7 @@ from ..utils.core.executors import (
     should_offload_to_cpu_pool,
 )
 from ..utils.core.logs import get_logger
-from ..utils.core.sanitizers import (
-    ERROR_TEXT_SEGMENT_JOINER,
-    sanitize_assembled_text,
-    utf8_value_leaf_length,
-)
+from ..utils.core.sanitizers import utf8_value_leaf_length
 from ..utils.io.path import (
     READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
     images_root_relative,
@@ -71,10 +75,14 @@ WEB_JSON_HEADERS = {"cache-control": "no-store", "x-content-type-options": "nosn
 
 
 class WebErrorInfo(NamedTuple):
-    """端点自有错误的载体，HTTP 状态码随错误定义携带。"""
+    """端点自有错误的载体，HTTP 状态码随错误定义携带。
+
+    message 收 str 或 ErrorText，两臂经 render_boundary_error_text 同口径渲染
+    （全套净化、不截断）：flat 信封与结构化 build_error_dict 出口一致。
+    """
 
     type: str
-    message: str
+    message: str | ErrorText
     http_status: int
 
     async def as_response(self, tool_name: str) -> Response:
@@ -84,7 +92,7 @@ class WebErrorInfo(NamedTuple):
 
 # 端点自有错误码单表：需登记状态表的错误码定义收口于此，调用点只消费常量；动态文案码
 # 以表项为骨架展开——invalid_json 与 images_root_unavailable 在表项文案后追加详情，
-# invalid_path 整体替换表项文案。不入表的诊断码在调用点内联构造，状态随定义携带。
+# invalid_path 整体替换表项文案。不入表的诊断码在调用点构造，状态随定义携带。
 INVALID_JSON_INFO = WebErrorInfo("invalid_json", "请求体不是合法 JSON", 400)
 INVALID_REQUEST_INFO = WebErrorInfo("invalid_request", "请求体须为 JSON 对象", 400)
 INVALID_PATH_INFO = WebErrorInfo("invalid_path", "无效的图片路径", 400)
@@ -128,7 +136,12 @@ def _merge_error_type_status(
     """合并档案与端点自有两段状态表，撞键即抛 ValueError，防按合并顺序静默覆盖。"""
     conflicts = sorted(set(profile_status) & set(endpoint_status))
     if conflicts:
-        raise ValueError(f"错误档案与端点自有错误码撞键，须单侧改名: {conflicts}")
+        raise ValueError(
+            raw_error_text(
+                "错误档案与端点自有错误码撞键，须单侧改名: {conflicts}",
+                conflicts=as_plain_list(conflicts),
+            )
+        )
     return {**profile_status, **endpoint_status}
 
 
@@ -151,9 +164,9 @@ ERROR_TYPE_STATUS: dict[str, int] = _merge_error_type_status(
 
 
 def flat_error_json(error: WebErrorInfo) -> JSONResponse:
-    """扁平错误信封响应，形态与传输层中间件一致，message 经幂等净化。"""
+    """扁平错误信封响应，形态与传输层中间件一致，message 经边界统一渲染。"""
     return JSONResponse(
-        {"error": error.type, "error_description": sanitize_assembled_text(error.message)},
+        {"error": error.type, "error_description": render_boundary_error_text(error.message)},
         status_code=error.http_status,
         headers=WEB_JSON_HEADERS,
     )
@@ -187,26 +200,34 @@ async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], WebE
         return {}, SERVICE_UNAVAILABLE_INFO
     # 深嵌套触发 RecursionError，超长整数字面量抛非 JSONDecodeError 的 ValueError，同归 400。
     except (ValueError, RecursionError) as exc:
-        return {}, INVALID_JSON_INFO._replace(message=f"{INVALID_JSON_INFO.message}: {exc}")
+        return {}, INVALID_JSON_INFO._replace(
+            message=base_detail_error_text(INVALID_JSON_INFO.message, exc)
+        )
     if not isinstance(body, dict):
         return {}, INVALID_REQUEST_INFO
     return body, None
 
 
 def invalid_path_error(exc: ValueError) -> WebErrorInfo:
-    """路径校验拒绝的 WebErrorInfo，拒绝原因透传校验异常的文案。"""
+    """路径校验拒绝的 WebErrorInfo，拒绝原因透传校验异常的契约文案。"""
     return INVALID_PATH_INFO._replace(message=str(exc))
 
 
 def images_root_unavailable_error(exc: Exception) -> WebErrorInfo:
     """图片目录解析失败的 WebErrorInfo，携带配置指引，生成、图库与文件端点共用。"""
-    message = getattr(exc, "message", None) or str(exc)
+    detail_text = getattr(exc, "message", None) or str(exc)
+    # 段终止由组装原语在段边界承担，用户通道净化由出口的边界渲染承担。
     return IMAGES_ROOT_UNAVAILABLE_INFO._replace(
-        message=(
-            f"{IMAGES_ROOT_UNAVAILABLE_INFO.message}: {message}"
-            f"{ERROR_TEXT_SEGMENT_JOINER}可配置 {READ_SCOPE_AUTH_ENV_HINT}"
+        message=assemble_error_segments(
+            base_detail_error_text(IMAGES_ROOT_UNAVAILABLE_INFO.message, detail_text),
+            error_text("可配置 {hint}", hint=as_plain(READ_SCOPE_AUTH_ENV_HINT)),
         )
     )
+
+
+def open_failed_error(code: str, base_message: str, status: int, exc: Exception) -> WebErrorInfo:
+    """打开失败的诊断 WebErrorInfo，基底文案拼接异常详情，files 原图与 meta 静态页共用。"""
+    return WebErrorInfo(code, base_detail_error_text(base_message, exc), status)
 
 
 async def resolve_web_images_root() -> Path | WebErrorInfo:
@@ -351,7 +372,9 @@ _WEB_PROJECTIONS: Mapping[str, Callable[[dict[str, Any]], None]] = {
 }
 
 
-async def respond_structured_error(tool_name: str, error_type: str, message: str) -> Response:
+async def respond_structured_error(
+    tool_name: str, error_type: str, message: str | ErrorText
+) -> Response:
     """经输出族映射构造失败结构化结果并回 JSON 响应，状态码按状态表查得。"""
     structured = build_error_structured(tool_name, error_type, message)
     projection = _WEB_PROJECTIONS.get(tool_name)
@@ -429,7 +452,8 @@ class _NoFollowFileResponse(FileResponse):
     截断改断连、错误状态剥离 Range。读取走上游 open 时刻才生产的复制品 fd，
     其开关归上游发送循环的 async with，正常与异常路径均由其 finally 关闭；
     原句柄为响应独占，__call__ 收尾同步兜底关闭，句柄对象自身的 closed 幂等
-    簿记使关闭无双重释放与号码误回收。
+    簿记使关闭无双重释放与号码误回收；复制品 fd 交出后随上游文件对象关闭，
+    响应为单次使用，二次调用 __call__ 响亮报错而非复用已关 fd 号。
     """
 
     chunk_size = 512 * 1024
@@ -451,6 +475,7 @@ class _NoFollowFileResponse(FileResponse):
             stat_result=stat_result,
         )
         self._handle = handle
+        self._called = False
 
     @classmethod
     def _parse_ranges(cls, range_: str, file_size: int) -> list[tuple[int, int]]:
@@ -461,6 +486,11 @@ class _NoFollowFileResponse(FileResponse):
         return ranges
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self._called:
+            # 复制品 fd 已随首次调用的上游文件对象关闭，重放会把回收中的 fd 号
+            # 交回 open()，串流其他文件或 EBADF，均为静默错数据，改响亮报错。
+            raise RuntimeError("_NoFollowFileResponse 为单次使用响应，禁止二次调用")
+        self._called = True
         # RFC 9110 §14.2：Range 仅适用于成功表示；错误状态页剥离 Range 头，整体按原状态应答。
         if self.status_code >= 400:
             headers = scope.get("headers", [])

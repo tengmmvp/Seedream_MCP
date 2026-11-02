@@ -2,8 +2,9 @@
 
 路径安全为形态与边界校验：空/绝对/前导分隔符/上跳段拒绝、扩展名白名单、
 resolve_against_base（与 browse 核心共用解析组合，盘符相对与 win32 冒号分量等
-形态随 normalize_path 单源拒绝）的界内判定；存在性由各端点自拒——缩略图自留
-常规文件判定归 404，原图靠打开序列同口径拒绝；违规 400、未命中 404。
+形态随 normalize_path 单源拒绝）的界内判定；存在性由各端点自拒——缩略图由
+缓存链路的单次 no-follow stat 常规文件判定归 404，原图靠打开序列同口径拒绝；
+违规 400、未命中 404。
 图片目录解析与路径校验为同步文件系统操作，整体经 asyncio.to_thread
 下沉至工作线程；缩略图经落盘缓存免除重复解码，
 未命中解码受进程级信号量限流；原图以预开 no-follow 句柄为读源，
@@ -104,15 +105,14 @@ async def web_thumbnail(request: Request) -> Response:
 
     解码失败与文件不存在分档：文件缺失 404，存在但无法生成缩略图（损坏、
     像素超限、stat 瞬时失败或共享在途瞬态失败）422，CPU 卸载池关闭的退出竞态 500，
-    监控与排障可按状态码区分；目录与断链等非常规文件形态由端点自留的常规文件
-    判定按缺失口径归 404。
+    监控与排障可按状态码区分；目录、断链与符号链接等非常规文件形态由缓存链路
+    进入解码前的单次 no-follow stat 常规文件判定按缺失口径归 404，端点不另做
+    存在性预检。
     """
     resolved = await _resolve_request_path(request)
     if isinstance(resolved, Response):
         return resolved
     image_path, images_root = resolved
-    if not await asyncio.to_thread(image_path.is_file):
-        return _image_not_found()
 
     try:
         data = await cached_thumbnail_bytes(image_path, images_root)
@@ -152,7 +152,7 @@ async def web_image(request: Request) -> Response:
     except OSError as exc:
         # 权限与 IO 类打开失败保留 500 诊断信号，不折叠为缺失。
         return _responses.endpoint_error_json(
-            _responses.WebErrorInfo("image_open_failed", f"图片打开失败: {exc}", 500)
+            _responses.open_failed_error("image_open_failed", "图片打开失败", 500, exc)
         )
     if opened is None:
         return _image_not_found()

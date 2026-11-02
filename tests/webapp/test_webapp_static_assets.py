@@ -3,17 +3,20 @@
 wheel 与 sdist 的打包清单由 CI 侧断言另行锁定，本文件守护源码树形态：
 入口页、404 页、五个前端 JS 模块齐备，且入口页引用的静态相对路径全部可解析。
 前端 JS 的解析、消费骨架、分页、超时与善后口径以结构锚点契约逐域守护；前端
-回退常量与 accept 列表同服务端推导对账；静态直出响应头的缓存口径亦在此守护。
+回退常量、toolConfig 参考图规则与 accept 列表同服务端推导对账；静态直出响应头
+的缓存口径亦在此守护。
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
 from _lib.web_fixtures import (
+    _assert_imported_from,
     build_web_app,
     function_body,
     prepare_static_dir,
@@ -23,6 +26,13 @@ from _lib.web_fixtures import (
 )
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.outputs.sanitize import _REQUEST_FAILED_TYPE
+from seedream_mcp.tools.schemas import (
+    MULTI_IMAGE_MIN_ITEMS,
+    ImageToImageInput,
+    MultiImageFusionInput,
+    SequentialGenerationInput,
+    _SingleImageInput,
+)
 from seedream_mcp.utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS_ORDERED
 from seedream_mcp.utils.model.capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 from seedream_mcp.webapp.constants import (
@@ -45,10 +55,7 @@ _JS_MODULES = ("api.js", "generate.js", "gallery.js", "main.js", "refs.js")
 
 def _assert_imported_from_api(source: str, *names: str) -> None:
     """断言指定符号经统一导入块引自 api.js，不私有复制。"""
-    block = re.search(r'import \{[^}]*\} from "\./api\.js";', source)
-    assert block is not None, "缺 api.js 导入块"
-    for name in names:
-        assert name in block.group(0), f"未从 api.js 引入 {name}"
+    _assert_imported_from(source, "api.js", *names)
 
 
 # 字符串字面量优先整体归组，注释（// 与块注释）命中后剔除，见 _js_code_without_comments。
@@ -317,6 +324,28 @@ def test_generate_js_parse_contract() -> None:
         assert message in source, f"失败分流文案丢失: {message}"
 
 
+def test_generate_max_images_explicit_zero_survives_assembly() -> None:
+    """组图 max_images 显式 0 原样透传：空串与非有限值（NaN/±Infinity）省略键。
+
+    Number 结果为 ±Infinity（如输入 1e999）时键照传会被 JSON.stringify 折成
+    null，后端 int|None 把 null 当未传按参考数派生批次，垃圾值被静默接受
+    （显式 0 与 16 会被拒，Infinity 不会）；Number(...) || undefined 的真值
+    兜底则把用户显式输入的 0 折成缺省，交后端 ge=1 拒绝的通道消失。
+    """
+    generate_js = read_js_module_source("generate.js")
+    build = function_body(generate_js, r"function buildRequestBody\(.*?^}")
+    code = _js_code_without_comments(build)
+    branch_at = code.index("if (state.tool === TOOL_SEQUENTIAL_GENERATION) {")
+    branch, _ = _balanced_brace_block(
+        code, branch_at + len("if (state.tool === TOOL_SEQUENTIAL_GENERATION) ")
+    )
+    assert '=== ""' in branch, "组图数量缺空串判别，留空不再省略键"
+    assert "Number.isFinite(" in branch, "组图数量缺非有限判别，±Infinity 漏拦"
+    assert "Number.isNaN(" not in branch, "组图数量回退 NaN-only 判别，±Infinity 漏拦"
+    assert "body.max_images" in branch, "组图分支未装配 max_images"
+    assert not re.search(r"\|\|\s*undefined", branch), "组图数量真值兜底回归，显式 0 被折成缺省"
+
+
 def test_generate_config_rerender_resets_paging_via_gallery_domain() -> None:
     """配置重渲染的格式恢复失败路径经 resetGalleryPaging 复位分页。
 
@@ -324,9 +353,7 @@ def test_generate_config_rerender_resets_paging_via_gallery_domain() -> None:
     收敛 gallery 域。
     """
     source = read_js_module_source("generate.js")
-    assert re.search(
-        r'import \{[^}]*resetGalleryPaging[^}]*\} from "\./gallery\.js";', source
-    ), "未从 gallery.js 引入分页复位"
+    _assert_imported_from(source, "gallery.js", "resetGalleryPaging")
     render = function_body(source, r"function renderConfigInfo\(.*?^}")
     assert "resetGalleryPaging()" in render, "配置渲染路径未复位分页（清回退栈）"
 
@@ -390,9 +417,7 @@ def test_gallery_has_more_tri_state_contract() -> None:
         "state.gallery.offset = state.gallery.nextOffset" in advance
     ), "推进未消费后端 next_offset"
     assert "export function canAdvanceGallery" in gallery_js, "缺三态谓词单一属主导出"
-    assert re.search(
-        r'import \{[^}]*canAdvanceGallery[^}]*\} from "\./gallery\.js";', main_js
-    ), "点击 handler 未引入翻页谓词"
+    _assert_imported_from(main_js, "gallery.js", "canAdvanceGallery")
     assert re.search(
         r"if \(canAdvanceGallery\(\)\) \{\s*advanceGalleryOffset\(\);\s*refreshGallery\(\);\s*\}",
         main_js,
@@ -522,6 +547,43 @@ def test_gallery_pool_stop_aftercare_by_stop_reason() -> None:
     assert "markAuthExpired" in gallery_js, "缺过期终态标注"
 
 
+def test_gallery_thumbnail_timeout_marks_transient_state() -> None:
+    """缩略图取图超时落瞬时段位：只述超时不误称不可用，下次刷新自动重取。
+
+    fetchBlobUrl 内建 60 秒超时档以 TimeoutError 中止，通用 catch 曾把超时并入
+    markUnavailable 的「缩略图不可用」终态；中止类分流为超时占位文案后，
+    真实不可用（响应非 2xx 的 null 哨兵路径）才落原终态。占位标记机制单点
+    收敛到 markThumbError，三处文案分流逐一钉死，漂移即守护捕获。
+    """
+    gallery_js = read_js_module_source("gallery.js")
+    helper = re.search(r"const markThumbError = \(entry, message\) => \{[^}]*\};", gallery_js)
+    assert helper, "缺共享缩略图占位机制，守护需同步"
+    assert '"thumb-error"' in helper.group(0), "占位机制未挂失败占位形态"
+    assert "entry.img.alt = message" in helper.group(0), "占位机制未透传文案"
+    assert gallery_js.count('classList.add("thumb-error")') == 1, "占位机制未单点收敛"
+    for name, message in (
+        ("markUnavailable", '"缩略图不可用"'),
+        ("markAuthExpired", "TOKEN_EXPIRED_THUMB_MESSAGE"),
+        ("markThumbTimeout", '"缩略图加载超时，请稍后重试。"'),
+    ):
+        assert re.search(
+            rf"const {name} = \(entry\) =>\s*markThumbError\(entry, {re.escape(message)}\);",
+            gallery_js,
+        ), f"{name} 未走共享占位机制或文案漂移"
+    render = function_body(gallery_js, r"async function refreshGalleryForSeq\(.*?^}")
+    code = _js_code_without_comments(render)
+    catch_block, _ = _balanced_brace_block(
+        code, code.index("} catch (error) {") + len("} catch (error) ")
+    )
+    assert re.search(
+        r"if \(isAbortError\(error\)\) \{\s*"
+        r"if \(seq === requestSeq\) markThumbTimeout\(entry\);\s*"
+        r"return;\s*\}",
+        catch_block,
+    ), "缩略图取图超时未分流为瞬态占位，被并入不可用终态"
+    assert "markUnavailable(entry);" in catch_block, "真实不可用的终态兜底丢失"
+
+
 def test_gallery_unavailable_root_releases_thumbnail_pool() -> None:
     """图片目录不可用分支回收图库缩略图池，已渲染页不泄漏对象 URL。
 
@@ -609,9 +671,7 @@ def test_lightbox_reference_eviction_is_unconditional() -> None:
         r"state\.refs\.length > 0\s*&&\s*state\.refs\.length > limit", parker
     ), "让位循环缺终止防御或越限判定"
     assert "renderReferences();" in evictor, "腾挪后未重渲染参考图列表"
-    assert re.search(
-        r'import \{[^}]*parkRefsBeyond[^}]*\} from "\./refs\.js";', generate_js
-    ), "工具形态未引入统一让位 helper"
+    _assert_imported_from(generate_js, "refs.js", "parkRefsBeyond")
     apply = function_body(generate_js, r"export function applyToolUI\(.*?^}")
     assert "parkRefsBeyond(config.max);" in apply, "工具收缩让位未走统一 helper"
     assert (
@@ -840,6 +900,57 @@ def test_refs_fallback_ref_limit_matches_server_default() -> None:
     match = re.search(r"DEFAULT_UNKNOWN_REF_LIMIT = (\d+);", refs_js)
     assert match, "refs.js 回退参考图上限常量形态改变，守护需同步"
     assert int(match.group(1)) == SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+
+
+def test_refs_tool_config_mirrors_backend_generation_rules() -> None:
+    """refs.js toolConfig 手抄的参考图与提示词规则同后端输入模型一致。
+
+    单图基数、融合最少张数与各工具提示词可缺省性手抄自 tools/schemas.py，
+    漂移使前端放行后端必拒的组合或反向拦下合法提交；从后端导入实际约束对
+    refs.js 字面量断言，人为改任一端应红。
+    """
+    refs_js = read_js_module_source("refs.js")
+    config = function_body(refs_js, r"export function toolConfig\(.*?^}")
+
+    single = re.search(r"const SINGLE_REF_LIMIT = (\d+);", refs_js)
+    assert single, "refs.js 单图基数常量形态改变，守护需同步"
+    # 后端单图基数无具名常量，以 _SingleImageInput.image 的标量形态锁两端。
+    assert (
+        _SingleImageInput.model_fields["image"].annotation is str
+    ), "后端图生图参考图不再是单标量形态，单图基数守护需同步"
+    assert int(single.group(1)) == 1, "前端单图基数与后端 _SingleImageInput 基数失配"
+    assert (
+        "min: SINGLE_REF_LIMIT," in config and "max: SINGLE_REF_LIMIT," in config
+    ), "图生图分支未以单图基数常量约束参考图区间"
+
+    fusion = re.search(r"const FUSION_REF_MIN = (\d+);", refs_js)
+    assert fusion, "refs.js 融合最少张数常量形态改变，守护需同步"
+    assert (
+        int(fusion.group(1)) == MULTI_IMAGE_MIN_ITEMS
+    ), "前端融合最少张数与后端 MULTI_IMAGE_MIN_ITEMS 失配"
+    assert "min: FUSION_REF_MIN," in config, "融合分支未消费融合下限常量"
+
+    # promptOptional 与后端 prompt 可缺省性同向：图生图分层场景可缺省，其余必填。
+    for tool_const, model in (
+        ("TOOL_IMAGE_TO_IMAGE", ImageToImageInput),
+        ("TOOL_MULTI_IMAGE_FUSION", MultiImageFusionInput),
+        ("TOOL_SEQUENTIAL_GENERATION", SequentialGenerationInput),
+    ):
+        branch = re.search(rf"tool === {tool_const}\)\s*return \{{.*?\}};", config, re.DOTALL)
+        assert branch is not None, f"toolConfig 缺 {tool_const} 分支锚"
+        flag = re.search(r"promptOptional: (true|false)", branch.group(0))
+        assert flag is not None, f"{tool_const} 分支缺 promptOptional 声明"
+        backend_optional = type(None) in get_args(model.model_fields["prompt"].annotation)
+        assert (
+            flag.group(1) == "true"
+        ) == backend_optional, f"{tool_const} 的 promptOptional 与后端 prompt 可缺省性失配"
+
+    # 镜像值经提交前强制消费才生效，锁定两个消费点。
+    submit = function_body(
+        read_js_module_source("generate.js"), r"export async function submitGenerate\(.*?^}"
+    )
+    assert "config.promptOptional && layerChecked" in submit, "提示词前置校验未消费 promptOptional"
+    assert "state.refs.length < config.min" in submit, "提交校验未消费参考图下限"
 
 
 def test_request_failed_sentinel_matches_backend_constant() -> None:

@@ -311,8 +311,12 @@ export function buildRequestBody() {
   body.watermark = $("watermark").checked;
 
   if (state.tool === TOOL_SEQUENTIAL_GENERATION) {
-    // 留空省略键，由后端按参考图数量推导。
-    body.max_images = Number($("max-images").value) || undefined;
+    // 留空与非有限值省略键，由后端按参考图数量推导（Infinity 经 JSON 折成 null
+    // 同未传，垃圾值静默放行）；显式 0 原样透传，交后端 ge=1 拒绝。
+    const maxImagesInput = $("max-images").value.trim();
+    const maxImages = Number(maxImagesInput);
+    body.max_images =
+      maxImagesInput === "" || !Number.isFinite(maxImages) ? undefined : maxImages;
   }
   if (layerDecompositionActive()) {
     body.layer_decomposition = true;

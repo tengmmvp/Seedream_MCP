@@ -14,7 +14,7 @@ import re
 import pytest
 from starlette.requests import Request
 
-from _lib.web_fixtures import function_body, read_js_module_source
+from _lib.web_fixtures import _assert_imported_from, function_body, read_js_module_source
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.definitions.conventions import (
     IMAGE_TO_IMAGE_TOOL_NAME,
@@ -127,14 +127,13 @@ def test_frontend_reads_fields_within_build_request_body_construction() -> None:
 def test_generate_preflight_submit_snapshot_and_wire_contract() -> None:
     """提交快照与预检契约：快照先于预检，查询参数自快照构造且为无体轻请求。
 
-    提交时请求体与工具一次性快照并复用至 POST，表单不得二次读取；预检任何
-    失败回退等待预算兜底且不阻断提交；config-info 已收缩的五项原料字段在
-    前端不得再有任何引用。
+    提交时请求体与工具一次性快照并复用至 POST，表单不得二次读取；预检经
+    api.js 的 postJsonRaw 原始 JSON-POST 助手发无体轻请求，任何失败回退
+    等待预算兜底且不阻断提交；config-info 已收缩的五项原料字段在前端不得
+    再有任何引用。
     """
     generate_js = read_js_module_source("generate.js")
-    assert re.search(
-        r'import \{[^}]*postJsonRaw[^}]*\} from "\./api\.js";', generate_js
-    ), "预检未复用 api.js 原始 JSON-POST 助手"
+    _assert_imported_from(generate_js, "api.js", "postJsonRaw")
     assert re.search(
         r"const tool = state\.tool;\s*"
         r"const body = buildRequestBody\(\);\s*"

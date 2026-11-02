@@ -376,32 +376,53 @@ async def test_file_endpoints_whitespace_only_path_returns_400(
     _assert_endpoint_error(response, "invalid_path", status=400)
 
 
-@pytest.mark.parametrize(("endpoint", "expected"), [("thumbnail", 1), ("image", 0)])
+@pytest.mark.parametrize(("endpoint", "expected"), [("thumbnail", (1, 0)), ("image", (0, 0))])
 async def test_file_endpoints_existence_stat_paid_once(
     web_app_with_image: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     endpoint: str,
-    expected: int,
+    expected: tuple[int, int],
 ) -> None:
-    """存在性判定每请求至多一次 is_file：原图端点的打开序列自带同口径拒绝。"""
+    """存在性判定不额外往返：缩略图仅缓存链路进入解码前的单次 stat、零 is_file
+    预检；原图端点的打开序列自带同口径拒绝，两者皆零额外判定。"""
+    from seedream_mcp.webapp import files as files_module
+
     image_path = tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png"
     real_is_file = Path.is_file
-    calls: list[str] = []
+    real_stat = Path.stat
+    real_resolve = files_module.resolve_web_relative_path
+    stat_calls: list[str] = []
+    is_file_calls: list[str] = []
 
     def _counting_is_file(self: Path) -> bool:
         if self == image_path:
-            calls.append(str(self))
+            is_file_calls.append(str(self))
         return real_is_file(self)
 
+    def _counting_stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self == image_path:
+            stat_calls.append(str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    def _resolve_then_reset_counts(rel: str, images_root: Path) -> Path:
+        # 3.12 的 Path.resolve 非 strict 尾段对目标补一次 stat（3.13+ 无），
+        # 解析阶段的计数属 pathlib 求值成本，不计入端点存在性判定。
+        resolved = real_resolve(rel, images_root)
+        stat_calls.clear()
+        is_file_calls.clear()
+        return resolved
+
     monkeypatch.setattr(Path, "is_file", _counting_is_file)
+    monkeypatch.setattr(Path, "stat", _counting_stat)
+    monkeypatch.setattr(files_module, "resolve_web_relative_path", _resolve_then_reset_counts)
 
     response = await web_get(
         web_app_with_image, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/a.png"
     )
 
     assert response.status_code == 200
-    assert len(calls) == expected
+    assert (len(stat_calls), len(is_file_calls)) == expected
 
 
 async def test_thumbnail_goes_through_cache_wrapper(
@@ -530,6 +551,43 @@ async def test_thumbnail_source_missing_mid_request_returns_404(
     )
 
     _assert_endpoint_error(response, "not_found", status=404)
+
+
+async def test_thumbnail_endpoint_symlink_swapped_after_resolve_returns_404(
+    web_app_with_image: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """越界判定通过后源图被换为指向目录外的符号链接时按缺失口径回 404，不跟随渲染链接目标。"""
+    import os
+
+    from seedream_mcp.webapp import files as files_module
+
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"secret-payload-not-for-web")
+    probe = tmp_path / "probe.png"
+    try:
+        os.symlink(secret, probe)
+    except (OSError, AttributeError):
+        pytest.skip("当前进程无法创建符号链接，Windows 需开发者模式或管理员权限")
+    probe.unlink()
+
+    real_resolve = files_module.resolve_web_relative_path
+
+    def _resolve_then_swap_symlink(rel: str, images_root: Path) -> Path:
+        # 边界校验通过后把源图替换为指向目录外的符号链接，注入换链窗口。
+        resolved = real_resolve(rel, images_root)
+        resolved.unlink()
+        os.symlink(secret, resolved)
+        return resolved
+
+    monkeypatch.setattr(files_module, "resolve_web_relative_path", _resolve_then_swap_symlink)
+
+    response = await web_get(
+        web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"
+    )
+
+    assert response.status_code == 404
+    assert b"secret-payload-not-for-web" not in response.content
+    assert secret.exists()
 
 
 async def test_thumbnail_transient_stat_failure_returns_422(
@@ -1229,6 +1287,26 @@ def _make_response(handle: IO[bytes], source: Path) -> Any:
     from seedream_mcp.webapp._responses import _NoFollowFileResponse
 
     return _NoFollowFileResponse(handle, os.stat(source), media_type="application/octet-stream")
+
+
+async def test_image_response_second_call_raises_runtime_error(tmp_path: Path) -> None:
+    """响应单次使用：重放 __call__ 响亮报错，不把已关复制品 fd 号交回 open。"""
+    source = tmp_path / "payload.bin"
+    source.write_bytes(b"y" * 8)
+    handle = open(source, "rb")
+    response = _make_response(handle, source)
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        del message
+
+    await response(_image_scope(), receive, send)
+    assert handle.closed
+
+    with pytest.raises(RuntimeError, match="单次使用"):
+        await response(_image_scope(), receive, send)
 
 
 async def test_image_response_single_cancel_settles_read_and_closes_once(

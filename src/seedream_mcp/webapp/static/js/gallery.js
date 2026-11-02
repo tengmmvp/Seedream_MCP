@@ -243,16 +243,20 @@ async function refreshGalleryForSeq(seq) {
     return { img, path: item.path };
   });
 
-  const markUnavailable = (entry) => {
+  const markThumbError = (entry, message) => {
     entry.img.classList.add("thumb-error");
-    entry.img.alt = "缩略图不可用";
+    entry.img.alt = message;
   };
 
+  const markUnavailable = (entry) => markThumbError(entry, "缩略图不可用");
+
   // 401 终态沿用失败占位形态，文案换令牌过期的重试导引。
-  const markAuthExpired = (entry) => {
-    entry.img.classList.add("thumb-error");
-    entry.img.alt = TOKEN_EXPIRED_THUMB_MESSAGE;
-  };
+  const markAuthExpired = (entry) =>
+    markThumbError(entry, TOKEN_EXPIRED_THUMB_MESSAGE);
+
+  // 超时沿用失败占位形态，文案只述超时：瞬态非终态，下次刷新自动重取。
+  const markThumbTimeout = (entry) =>
+    markThumbError(entry, "缩略图加载超时，请稍后重试。");
 
   let authStopped = false;
   // 固定 worker 消费队列，序号逐项守卫，过期请求的 blob URL 就地释放。
@@ -280,6 +284,11 @@ async function refreshGalleryForSeq(seq) {
           authStopped = true;
         }
         return false;
+      }
+      // 超时为瞬态：不误称不可用，其余条目继续消费；被取代请求不盖占位。
+      if (isAbortError(error)) {
+        if (seq === requestSeq) markThumbTimeout(entry);
+        return;
       }
       markUnavailable(entry);
     }

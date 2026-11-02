@@ -53,10 +53,19 @@ def _upload_budget_chars(max_body_size: int) -> int:
     return max(max_body_size - _UPLOAD_BUDGET_ENVELOPE_MARGIN, 0)
 
 
+# 未知模型回退档位缓存：能力表为进程级静态数据，排序一次后跨请求复用。
+_FALLBACK_PRESETS: list[str] | None = None
+
+
 def _fallback_presets() -> list[str]:
     """未知模型回退档位：取 unknown 家族的能力声明，与后端放行口径同源。"""
-    presets = get_model_capabilities(MODEL_FAMILY_UNKNOWN).allowed_presets
-    return sorted(presets, key=preset_numeric_sort_key)
+    global _FALLBACK_PRESETS
+    if _FALLBACK_PRESETS is None:
+        _FALLBACK_PRESETS = sorted(
+            get_model_capabilities(MODEL_FAMILY_UNKNOWN).allowed_presets,
+            key=preset_numeric_sort_key,
+        )
+    return _FALLBACK_PRESETS
 
 
 def _models_payload() -> list[dict[str, object]]:
@@ -154,9 +163,8 @@ async def _serve_static_page(
     try:
         opened = await asyncio.to_thread(_open_static_page, page)
     except PermissionError as exc:
-        # 与 files 图片打开失败同口径：不可读归 500 诊断响应，不并入降级文案。
         return _responses.flat_error_json(
-            _responses.WebErrorInfo("page_open_failed", f"页面打开失败: {exc}", 500)
+            _responses.open_failed_error("page_open_failed", "页面打开失败", 500, exc)
         )
     if isinstance(opened, _StaticPageOpenFailure):
         _warn_static_page_degraded(page, opened)

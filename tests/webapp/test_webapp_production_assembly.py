@@ -29,6 +29,11 @@ from seedream_mcp.definitions.conventions import (
 from seedream_mcp.server.transport import _build_streamable_app
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.sanitizers import _CONTAINER_REPR_DEPTH_LIMIT
+from seedream_mcp.utils.model.capabilities import (
+    MODEL_FAMILY_UNKNOWN,
+    get_model_capabilities,
+    preset_numeric_sort_key,
+)
 from seedream_mcp.webapp import _responses
 from seedream_mcp.webapp.constants import (
     STATIC_DIR,
@@ -37,7 +42,7 @@ from seedream_mcp.webapp.constants import (
     STATIC_SECURITY_HEADERS,
 )
 from seedream_mcp.webapp.generate import _preflight_timeout_ms
-from seedream_mcp.webapp.meta import _upload_budget_chars
+from seedream_mcp.webapp.meta import _fallback_presets, _upload_budget_chars
 
 
 def _full_load_preflight_request() -> Request:
@@ -59,6 +64,17 @@ def test_upload_budget_derivation_floors_at_zero() -> None:
     assert _upload_budget_chars(3 * 1024 * 1024) == 0
     assert _upload_budget_chars(1024 * 1024) == 0
     assert _upload_budget_chars(64 * 1024 * 1024) == 61 * 1024 * 1024
+
+
+def test_fallback_presets_sorted_once_and_reused() -> None:
+    """回退档位排序产物进程内复用，内容与逐次现排序逐字节一致。"""
+    first = _fallback_presets()
+
+    assert _fallback_presets() is first
+    assert first == sorted(
+        get_model_capabilities(MODEL_FAMILY_UNKNOWN).allowed_presets,
+        key=preset_numeric_sort_key,
+    )
 
 
 async def test_production_app_serves_web_console(
@@ -176,7 +192,8 @@ async def test_production_app_without_web_returns_404(
 async def test_origin_guard_allows_same_origin_and_rejects_cross_origin(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """无令牌 Web 部署：同源 Origin 与无 Origin 放行，跨源与畸形 Origin 被 403 拒绝。"""
+    """无令牌 Web 部署：同源 Origin（含显式默认端口归一形态）与无 Origin 放行，
+    跨源与畸形 Origin 被 403 拒绝。"""
     write_workspace_config(tmp_path)
     app = _build_streamable_app("127.0.0.1", False, "", True)
 
@@ -184,6 +201,10 @@ async def test_origin_guard_allows_same_origin_and_rejects_cross_origin(
         same_origin = await client.get(
             "/web/api/config-info",
             headers={"host": "127.0.0.1:8000", "origin": "http://127.0.0.1:8000"},
+        )
+        default_port_origin = await client.get(
+            "/web/api/config-info",
+            headers={"host": "localhost:80", "origin": "http://localhost"},
         )
         no_origin = await client.get("/web/api/config-info", headers={"host": "127.0.0.1:8000"})
         cross_origin = await client.get(
@@ -196,6 +217,7 @@ async def test_origin_guard_allows_same_origin_and_rejects_cross_origin(
         )
 
     assert same_origin.status_code == 200
+    assert default_port_origin.status_code == 200
     assert no_origin.status_code == 200
     assert cross_origin.status_code == 403
     assert cross_origin.json()["error"] == "invalid_origin"
