@@ -24,11 +24,18 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Callable, Generic, NamedTuple, TypeVar
 
-from ..core.errors import SeedreamConfigError
+from ..core.errors import (
+    SeedreamConfigError,
+    as_detail,
+    as_plain,
+    as_text,
+    assemble_error_segments,
+    error_text,
+    raw_error_text,
+)
 from ...definitions.conventions import DATA_DIR_NAME
 from ..core.logs import EarlyMessageBuffer, get_logger
 from ..core.bounded_store import store_bounded_entry
-from ..core.sanitizers import ERROR_TEXT_SEGMENT_JOINER
 
 logger = get_logger()
 
@@ -212,9 +219,13 @@ READ_SCOPE_AUTH_ENV_HINT = f"{_WORKSPACE_ROOT_ENV} 或 {_DATA_ROOT_ENV}"
 
 def read_scope_denial_message(noun: str) -> str:
     """构造越出读取范围的拒绝消息，noun 取目录或路径。"""
-    return (
-        f"{noun}不在读取范围内{ERROR_TEXT_SEGMENT_JOINER}可通过客户端工作区（MCP Roots）、"
-        f"{READ_SCOPE_AUTH_ENV_HINT} 授权该{noun}"
+    return assemble_error_segments(
+        error_text("{noun}不在读取范围内", noun=as_plain(noun)),
+        error_text(
+            "可通过客户端工作区（MCP Roots）、{env_hint} 授权该{noun}",
+            env_hint=as_plain(READ_SCOPE_AUTH_ENV_HINT),
+            noun=as_plain(noun),
+        ),
     )
 
 
@@ -393,7 +404,10 @@ def _resolve_home_root() -> Path:
         return Path.home().resolve()
     except (RuntimeError, OSError) as exc:
         raise SeedreamConfigError(
-            f"无法确定用户主目录，请配置 {READ_SCOPE_AUTH_ENV_HINT}",
+            error_text(
+                "无法确定用户主目录，请配置 {env_hint}",
+                env_hint=as_plain(READ_SCOPE_AUTH_ENV_HINT),
+            ),
         ) from exc
 
 
@@ -509,7 +523,13 @@ def _resolve_declaration(label: str, configured: str, resolve: Callable[[str], P
         # 异常原文嵌 expanduser 展开后的服务器绝对路径，仅进日志；用户消息只
         # 回显其自行配置的原始值。
         logger.error("{}配置无法解析 '{}': {}", label, configured, exc)
-        raise SeedreamConfigError(f"{label}配置无法解析: {configured}") from exc
+        raise SeedreamConfigError(
+            error_text(
+                "{label}配置无法解析: {configured}",
+                label=as_plain(label),
+                configured=as_text(configured),
+            )
+        ) from exc
 
 
 def resolve_log_file_path() -> Path:
@@ -560,7 +580,9 @@ def resolve_images_root() -> Path:
     except (OSError, RuntimeError, ValueError) as exc:
         # 链接环等 resolve 失败与显式声明同口径归配置错误，异常原文仅进日志。
         logger.error("工作区图片目录无法解析 '{}': {}", workspace_root, exc)
-        raise SeedreamConfigError(f"工作区图片目录无法解析: {workspace_root}") from exc
+        raise SeedreamConfigError(
+            error_text("工作区图片目录无法解析: {root}", root=as_text(workspace_root))
+        ) from exc
 
 
 def get_read_context() -> tuple[list[Path], Path, list[Path]]:
@@ -573,7 +595,9 @@ def get_read_context() -> tuple[list[Path], Path, list[Path]]:
     try:
         workspace_roots = get_workspace_roots()
     except SeedreamConfigError as exc:
-        logger.error("工作根目录声明链不可解析，读权限退化为仅图片目录: {}", exc.message)
+        logger.opt(exception=True).error(
+            "工作根目录声明链不可解析，读权限退化为仅图片目录: {}", exc.message
+        )
         workspace_roots = []
     scope = list(workspace_roots)
     if images_root not in scope:
@@ -731,7 +755,14 @@ def reject_unc_declaration(value: str, *, label: str, env_hint: str = "") -> Non
         SeedreamConfigError: 声明值为 UNC 形态。
     """
     if is_unc_path(value):
-        raise SeedreamConfigError(f"{label}不支持 UNC 路径: {value}{env_hint}")
+        raise SeedreamConfigError(
+            error_text(
+                "{label}不支持 UNC 路径: {value}{env_hint}",
+                label=as_plain(label),
+                value=as_text(value),
+                env_hint=as_plain(env_hint),
+            )
+        )
 
 
 def has_windows_colon_component(path: str) -> bool:
@@ -807,18 +838,22 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         # Python 3.13 起 resolve 对空字节不再抛 ValueError，改入口显式拒绝保证
         # 跨版本行为一致；判定经 has_null_byte 与 file URI 转换共用单一来源。
         if has_null_byte(path):
-            raise ValueError(f"路径含空字节: {path}")
+            raise ValueError(raw_error_text("路径含空字节: {path}", path=as_text(path)))
         path_obj = Path(path)
 
         # UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须在 resolve 前拒绝。
         if is_unc_path(str(path_obj)):
-            raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {path}")
+            raise ValueError(
+                raw_error_text("拒绝 UNC 路径以避免触发 SMB 连接: {path}", path=as_text(path))
+            )
 
         # 驱动器相对路径有 drive 无 root，base_dir 与其异盘时 pathlib 拼接丢弃
         # base_dir、resolve 落到该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝；
         # 判定经 is_drive_relative 与 file URI 转换、参考图候选定位共用单一来源。
         if is_drive_relative(path_obj):
-            raise ValueError(f"拒绝驱动器相对路径以避免绕过基目录解析: {path}")
+            raise ValueError(
+                raw_error_text("拒绝驱动器相对路径以避免绕过基目录解析: {path}", path=as_text(path))
+            )
 
         # 有根无盘符形态有 root 无 drive，is_absolute 判为 False 会被当相对路径拼
         # 基目录，但 pathlib 拼接对该形态锚定重置为基目录所在盘的盘根、落点逃出
@@ -826,7 +861,9 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         # is_windows_rooted_without_drive 共用单一来源，POSIX 该形态即合法绝对
         # 路径恒不触发。
         if is_windows_rooted_without_drive(path_obj):
-            raise ValueError(f"拒绝有根无盘符路径以避免绕过基目录解析: {path}")
+            raise ValueError(
+                raw_error_text("拒绝有根无盘符路径以避免绕过基目录解析: {path}", path=as_text(path))
+            )
 
         # Win32 命名空间打开文件时剥离最终分量尾部的点与空格，先做同口径名称归一，
         # 已验证路径字符串才与实际打开的文件名一致；仅名称级归一，不改变越界判定。
@@ -835,7 +872,12 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
             # 驱动器符与其带根形态为合法前缀，判定经 has_windows_colon_component
             # 与参考图读取链共用单一来源。
             if has_windows_colon_component(path):
-                raise ValueError(f"拒绝路径分量含冒号以避免访问 NTFS 备用数据流: {path}")
+                raise ValueError(
+                    raw_error_text(
+                        "拒绝路径分量含冒号以避免访问 NTFS 备用数据流: {path}",
+                        path=as_text(path),
+                    )
+                )
             final_name = path_obj.name
             polished_name = final_name.rstrip(". ") if final_name else final_name
             if polished_name and polished_name != final_name:
@@ -843,7 +885,12 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
             # Windows 保留设备名作最终分量会被解释为设备而非文件，判定经
             # is_windows_reserved_name 与 sanitize_filename 单一来源。
             if is_windows_reserved_name(polished_name):
-                raise ValueError(f"拒绝 Windows 保留设备名以避免被解释为设备而非文件: {path}")
+                raise ValueError(
+                    raw_error_text(
+                        "拒绝 Windows 保留设备名以避免被解释为设备而非文件: {path}",
+                        path=as_text(path),
+                    )
+                )
 
         if path_obj.is_absolute():
             return path_obj.resolve()
@@ -861,10 +908,12 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         # ENAMETOOLONG 等文件系统错误单独分支，errno 原因进入错误文案，供调用方
         # 区分拼写问题与系统级长度限制。
         logger.error("路径标准化失败 {}: {}", path, e)
-        raise ValueError(f"无效的路径格式: {path} ({e})") from e
+        raise ValueError(
+            raw_error_text("无效的路径格式: {path} ({exc})", path=as_text(path), exc=as_detail(e))
+        ) from e
     except Exception as e:
         logger.error("路径标准化失败 {}: {}", path, e)
-        raise ValueError(f"无效的路径格式: {path}") from e
+        raise ValueError(raw_error_text("无效的路径格式: {path}", path=as_text(path))) from e
 
 
 class BoundedResolution(NamedTuple):

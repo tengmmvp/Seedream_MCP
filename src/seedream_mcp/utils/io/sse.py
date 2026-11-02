@@ -15,6 +15,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ..core.errors import (
     SeedreamAPIError,
+    as_plain,
+    detail_error_text,
+    error_text,
     normalized_upstream_error_code,
     upstream_message_fragment,
 )
@@ -235,9 +238,9 @@ def _slice_parse_segment(
 class _SSEFrameBuffer:
     """SSE 分帧缓冲：在增量到达的字节流上切分空行分隔的完整事件段。
 
-    集中持有缓冲、消费偏移、续扫提示、悬置 CR 与流首 BOM 剥离标记五个分帧状态；
-    行尾统一归一为换行符以兼容 CRLF/CR，防止上游或中间代理改用 CRLF 时事件无法
-    切分致整流丢失。
+    集中持有缓冲、消费偏移、续扫提示、悬置 CR、流首 BOM 剥离标记与超限丢弃中的
+    逻辑事件标记六个分帧状态；行尾统一归一为换行符以兼容 CRLF/CR，防止上游或
+    中间代理改用 CRLF 时事件无法切分致整流丢失。
     """
 
     def __init__(self) -> None:
@@ -255,6 +258,9 @@ class _SSEFrameBuffer:
         # 流首 UTF-8 BOM 剥离标记：块粒度为网络交付，BOM 可能分块到达，判定在
         # 缓冲拼接后跨块进行。
         self._stripped_bom = False
+        # 超阈值丢弃中的逻辑事件标记：同一未终结事件分多 chunk 送达时每块都可能触发
+        # 尾部截断，仅首个 chunk 计新事件，drain 产出完整段即终结当前丢弃事件。
+        self._dropping_event = False
 
     def extend(self, chunk: bytes) -> int:
         """归一化行尾后追加块到缓冲，返回追加前的原始块长度供字节总量计账。
@@ -284,11 +290,13 @@ class _SSEFrameBuffer:
                 self._search_hint = max(self._search_hint - len(_UTF8_BOM), 0)
         return raw_len
 
-    def drain(self) -> Iterator[tuple[int, int]]:
-        """按序产出缓冲内全部完整事件段的闭开区间，直到无空行分隔符。
+    def drain(self) -> Iterator[tuple[int, int, bool]]:
+        """按序产出缓冲内全部完整事件段的闭开区间与丢弃残余标记，直到无空行分隔符。
 
         每产出一段即推进消费偏移；调用方中途停止迭代时，状态停留在最后产出的
-        段之后，剩余字节保留为未完成尾部。
+        段之后，剩余字节保留为未完成尾部。截断只发生在无分隔符的未终结尾部，
+        其后继字节延续同一事件，故丢弃进行中到达的首段即该丢弃事件的残余，
+        标记 True 交计数侧按逻辑事件守卫；该段到达即终结丢弃事件，其后属新事件。
         """
         while True:
             # 从 max(offset, search_hint - 1) 续扫 b"\n\n"，回退一字节覆盖跨块分隔符
@@ -303,7 +311,9 @@ class _SSEFrameBuffer:
             # offset 已推进至旧 search_hint 之后，重置使下次从新 offset 起扫，避免
             # 滞后提示误跳过新区间。
             self._search_hint = 0
-            yield seg_start, sep
+            dropped_remainder = self._dropping_event
+            self._dropping_event = False
+            yield seg_start, sep, dropped_remainder
 
     async def parse_segment(
         self, start: int, end: int
@@ -326,16 +336,28 @@ class _SSEFrameBuffer:
             # 内容前移致旧索引失效；剩余部分已由 drain 确认无分隔符，按当前长度刷新。
             self._search_hint = len(self._buffer)
 
-    def truncate_oversized_tail(self, threshold: int) -> int:
-        """丢弃超过 threshold 的未完成尾部事件，返回被丢弃的字节数，未超限返回 0。"""
+    def truncate_oversized_tail(self, threshold: int) -> tuple[int, bool]:
+        """丢弃超过 threshold 的未完成尾部事件，返回 (被丢弃字节数, 是否新逻辑事件的丢弃)。
+
+        同一未终结事件分多 chunk 送达时每块超限都丢弃字节，但仅首个 chunk 开启
+        新的丢弃事件，截断计数按逻辑事件而非 chunk 粒度；未超限返回 (0, False)。
+        """
         live_len = len(self._buffer) - self._offset
         if live_len <= threshold:
-            return 0
+            return 0, False
         del self._buffer[self._offset :]
         # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即
         # offset 起扫。
         self._search_hint = len(self._buffer)
-        return live_len
+        if self._dropping_event:
+            return live_len, False
+        self._dropping_event = True
+        return live_len, True
+
+    @property
+    def dropping_event(self) -> bool:
+        """超限丢弃中的逻辑事件尚未终结：流末尾残留与之同事件，不重复计数。"""
+        return self._dropping_event
 
     def close_pending_cr(self) -> None:
         """流结束时悬置的孤立 CR 字节补作换行行尾，保持行尾归一语义。"""
@@ -438,8 +460,13 @@ def _classify_sse_event(
         message_fragment = upstream_message_fragment(err.get("message"))
         raise SeedreamAPIError(
             # 错误码收窄与 message 缺失判定及截断归一经 errors 的共享辅助，
-            # 流式与非流式对同一上游载荷的诊断同口径。
-            message=message_fragment if message_fragment is not None else "流式请求失败",
+            # 流式与非流式对同一上游载荷的诊断同口径；上游片段经 detail 参数
+            # 进入结构化载荷，与 handle_api_error 同分类。
+            message=(
+                detail_error_text(message_fragment)
+                if message_fragment is not None
+                else "流式请求失败"
+            ),
             status_code=400,
             error_code=normalized_upstream_error_code(err.get("code")),
         )
@@ -474,11 +501,13 @@ async def _drain_sse_complete_events(
     # 解析本 chunk 剩余事件，上限以事件为粒度精确生效，关闭响应与截断计数由
     # 下方触顶块统一承担。
     lost_events = 0
-    for seg_start, seg_end in frames.drain():
+    for seg_start, seg_end, dropped_remainder in frames.drain():
         event, error, lost_payload = await frames.parse_segment(seg_start, seg_end)
         if event is None:
             segment_len = seg_end - seg_start
-            if lost_payload:
+            # 丢弃事件的残余段与截断计数同属一个逻辑事件，不计丢失，仅记解析失败
+            # 告警，与流末尾残留的 dropping_event 守卫同口径。
+            if lost_payload and not dropped_remainder:
                 # 单条告警合并失败原因与丢弃字节数，与流末尾残留同口径计数，缺图对调用方可见。
                 log.warning(
                     "流中段事件解析失败且携带数据负载，丢弃 {} 字节: {}",
@@ -547,8 +576,12 @@ async def _consume_sse_chunks(
                 )
                 await _close_stream_response(response)
                 raise SeedreamAPIError(
-                    f"SSE 响应流总量超限: 已接收 {processed_bytes} 字节，"
-                    f"超过上限 {total_bytes_limit} 字节{RESPONSE_BODY_LIMIT_HINT}"
+                    error_text(
+                        "SSE 响应流总量超限: 已接收 {received} 字节，超过上限 {limit} 字节{hint}",
+                        received=as_plain(processed_bytes),
+                        limit=as_plain(total_bytes_limit),
+                        hint=as_plain(RESPONSE_BODY_LIMIT_HINT),
+                    )
                 )
 
             if processed_bytes - last_progress_log_bytes >= _SSE_PROGRESS_LOG_INTERVAL_BYTES:
@@ -576,9 +609,12 @@ async def _consume_sse_chunks(
             frames.recycle(buffer_max_size)
 
             # drain 已抽干全部完整事件，未消费尾部必为单个未完成事件；超阈值丢弃该
-            # 尾部以免内存无限增长，已处理事件不会跨界错位。
-            dropped_bytes = frames.truncate_oversized_tail(event_truncate_threshold)
-            if dropped_bytes:
+            # 尾部以免内存无限增长，已处理事件不会跨界错位，计数与告警按逻辑事件
+            # 而非 chunk（首块计新事件的口径见 _dropping_event 定义）。
+            dropped_bytes, new_dropped_event = frames.truncate_oversized_tail(
+                event_truncate_threshold
+            )
+            if new_dropped_event:
                 log.warning(
                     "单个 SSE 事件超过截断阈值 ({} > {})，丢弃该不完整事件",
                     dropped_bytes,
@@ -636,8 +672,10 @@ async def _resolve_sse_trailing_segment(
         )
         return 0
     if trailing_len > 0 and lost_payload:
-        # 残留段含 data 负载但解析失败，与超阈值丢事件同口径计数，使 status
-        # 标记 partial。
+        # 残留段属超阈值丢弃中的同一逻辑事件时已计数，不重复计；否则与超阈值丢弃
+        # 事件同口径计数，使 status 标记 partial。
+        if frames.dropping_event:
+            return 0
         log.warning("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)
         return 1
     return 0

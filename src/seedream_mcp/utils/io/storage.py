@@ -19,7 +19,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..core.errors import SeedreamMCPError
+from ..core.errors import (
+    SeedreamMCPError,
+    as_detail,
+    as_text,
+    base_detail_error_text,
+    error_text,
+    raw_error_text,
+)
 from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
     SUPPORTED_IMAGE_EXTENSIONS,
@@ -70,11 +77,23 @@ _PART_SWEEP_GRACE_SECONDS = 24 * 3600
 # warning 暴露异常规模的保存目录，量级对齐 scan 的扫描条目预算。
 _CLEANUP_ENTRY_WARN_THRESHOLD = 20000
 
+# 删除文件失败文案的共用模板：路径与底层异常以分类参数进入，配额驱逐与按天
+# 清理两个删除环共享单一来源。
+_DELETE_FILE_FAILURE_TEMPLATE = "删除文件失败 {path}: {exc}"
+
 
 class FileManagerError(SeedreamMCPError):
     """文件管理相关操作失败。"""
 
     pass
+
+
+def _record_delete_failure(errors: list[str], file_path: Path, exc: Exception) -> None:
+    """删除失败写入共享错误列表并告警：配额驱逐与按天清理的删除环共用。"""
+    errors.append(
+        raw_error_text(_DELETE_FILE_FAILURE_TEMPLATE, path=as_text(file_path), exc=as_detail(exc))
+    )
+    logger.warning("删除文件失败: {} -> {}", file_path, exc)
 
 
 class FileManager:
@@ -98,15 +117,17 @@ class FileManager:
         raw_base = resolve_images_root() if base_dir is None else Path(base_dir)
         # UNC 的 resolve 会触发 SMB 认证，直连构造入口与调用方同口径在 resolve 前拒绝。
         if is_unc_path(str(raw_base)):
-            raise FileManagerError(f"拒绝 UNC 路径以避免触发 SMB 连接: {raw_base}")
+            raise FileManagerError(
+                error_text("拒绝 UNC 路径以避免触发 SMB 连接: {path}", path=as_text(raw_base))
+            )
         try:
             resolved = resolve_rejecting_cycle(raw_base)
         except (OSError, RuntimeError, ValueError) as e:
-            raise FileManagerError(f"解析保存路径时出错: {e}") from e
+            raise FileManagerError(base_detail_error_text("解析保存路径时出错", e)) from e
         # 仅拒绝指向已存在文件的路径；save_path 为调用级保存声明，位置不受限，
         # 空字节等其余路径形态由调用方 tools/pipeline/_paths 在 resolve 前拒绝。
         if resolved.exists() and not resolved.is_dir():
-            raise FileManagerError(f"保存路径不是目录: {resolved}")
+            raise FileManagerError(error_text("保存路径不是目录: {path}", path=as_text(resolved)))
         base_dir = resolved
 
         self.base_dir = base_dir
@@ -127,7 +148,9 @@ class FileManager:
         except (OSError, ValueError) as e:
             # Python 3.13 起 pathlib 对嵌入 null 字符等非法路径参数抛 ValueError
             # 而非 OSError，与解析失败一并归一为 FileManagerError。
-            raise FileManagerError(f"创建目录失败: {path} -> {e}") from e
+            raise FileManagerError(
+                error_text("创建目录失败: {path} -> {exc}", path=as_text(path), exc=as_detail(e))
+            ) from e
 
     def validate_path(self, path: Path) -> bool:
         """验证路径是否在保存目录范围内。
@@ -173,33 +196,38 @@ class FileManager:
         filename = strip_unpaired_surrogates(filename)
         filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
         filename = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", filename)
-
-        # ASCII 名字符数即 UTF-8 字节数，未超预算时下方截断是恒等变换，
-        # 批量保存热路径跳过拆分与整名编码的分配开销。
-        if not (filename.isascii() and len(filename) <= _MAX_FILENAME_LENGTH):
-            # 超长文件名截断词干并保留扩展名；超长扩展名不可能是合法后缀，
-            # 按纯词干整体截断，防止 name[:0] + ext 使截断失效。预算与扩展名长度门
-            # 均按 UTF-8 字节计量，与文件系统目录项的字节限额同口径。
-            name, ext = os.path.splitext(filename)
-            ext_bytes = len(ext.encode("utf-8"))
-            if ext_bytes > _MAX_EXTENSION_LENGTH:
-                filename = fit_utf8_budget(filename, _MAX_FILENAME_LENGTH)
-            else:
-                filename = fit_utf8_budget(name, _MAX_FILENAME_LENGTH - ext_bytes) + ext
+        filename = self._fit_filename_budget(filename)
 
         # Windows 保留设备名处理：CON.txt、NUL 等会被解释为设备而非文件，命中时在
         # 首个点前追加下划线；词干归一判定经 is_windows_reserved_name 与
         # normalize_path 单一来源。写侧全平台规避：数据目录迁移到 Windows 后
-        # 此类名字不可读，POSIX 上多一个下划线无实际代价。
+        # 此类名字不可读，POSIX 上多一个下划线无实际代价。下划线可能把总长顶破
+        # 字节预算，同口径重截保证输出恒不超上限。
         if is_windows_reserved_name(filename):
             parts = filename.split(".", 1)
             parts[0] += "_"
-            filename = ".".join(parts)
+            filename = self._fit_filename_budget(".".join(parts))
 
         if not filename.strip():
             filename = "unnamed"
 
         return filename.strip()
+
+    def _fit_filename_budget(self, filename: str) -> str:
+        """超 UTF-8 字节预算的文件名截断词干并保留扩展名，预算内恒等返回。
+
+        ASCII 名字符数即 UTF-8 字节数，未超预算时截断是恒等变换，批量保存热路径
+        跳过拆分与整名编码的分配开销；超长扩展名不可能是合法后缀，按纯词干整体
+        截断，防止 name[:0] + ext 使截断失效。预算与扩展名长度门均按 UTF-8 字节
+        计量，与文件系统目录项的字节限额同口径。
+        """
+        if filename.isascii() and len(filename) <= _MAX_FILENAME_LENGTH:
+            return filename
+        name, ext = os.path.splitext(filename)
+        ext_bytes = len(ext.encode("utf-8"))
+        if ext_bytes > _MAX_EXTENSION_LENGTH:
+            return fit_utf8_budget(filename, _MAX_FILENAME_LENGTH)
+        return fit_utf8_budget(name, _MAX_FILENAME_LENGTH - ext_bytes) + ext
 
     def generate_name_from_prompt(self, prompt: str, max_length: int = 50) -> str:
         """从提示词生成可读的文件名基础部分。
@@ -389,7 +417,7 @@ class FileManager:
         """
         save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)
         if not self.validate_path(save_path):
-            raise FileManagerError(f"路径不安全: {save_path}")
+            raise FileManagerError(error_text("路径不安全: {path}", path=as_text(save_path)))
         return save_path
 
     def save_bytes(
@@ -439,7 +467,11 @@ class FileManager:
                 "save_time": current_save_time(),
             }
         except OSError as e:
-            raise FileManagerError(f"写入文件失败: {file_path} -> {e}") from e
+            raise FileManagerError(
+                error_text(
+                    "写入文件失败: {path} -> {exc}", path=as_text(file_path), exc=as_detail(e)
+                )
+            ) from e
 
     def relative_to_base(self, file_path: Path) -> str:
         """获取文件相对于保存目录的路径。
@@ -532,8 +564,8 @@ class FileManager:
             # 目录项。
             self._prune_empty_dirs(directories)
         except Exception as e:
-            errors.append(f"清理过程失败: {e}")
-            logger.error("清理过程失败: {}", e)
+            errors.append(base_detail_error_text("清理过程失败", e).raw_text())
+            logger.opt(exception=True).error("清理过程失败: {}", e)
         return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
 
     @staticmethod
@@ -559,7 +591,13 @@ class FileManager:
                 deleted += 1
                 deleted_size += size
             except OSError as e:
-                errors.append(f"临时文件清理失败: {file_path} -> {e}")
+                errors.append(
+                    raw_error_text(
+                        "临时文件清理失败: {path} -> {exc}",
+                        path=as_text(file_path),
+                        exc=as_detail(e),
+                    )
+                )
         if deleted:
             logger.info("清扫超龄遗留临时文件 {} 个", deleted)
         return deleted, deleted_size
@@ -611,8 +649,7 @@ class FileManager:
                 deleted_size += size
                 logger.info("总量配额驱逐旧文件: {}", file_path)
             except Exception as e:
-                errors.append(f"删除文件失败 {file_path}: {e}")
-                logger.warning("删除文件失败: {} -> {}", file_path, e)
+                _record_delete_failure(errors, file_path, e)
         return deleted_files, deleted_size
 
     def _collect_all_files(
@@ -701,7 +738,13 @@ class FileManager:
                         if not is_image:
                             # .part 条目被原子重命名消失属正常轮替，不计错误以免回滚节流。
                             continue
-                        errors.append(f"获取文件信息失败 {entry_path}: {e}")
+                        errors.append(
+                            raw_error_text(
+                                "获取文件信息失败 {path}: {exc}",
+                                path=as_text(entry_path),
+                                exc=as_detail(e),
+                            )
+                        )
                         logger.warning("获取文件信息失败: {} -> {}", entry_path, e)
                         continue
                     # 符号链接与 reparse 文件目标可能在 base_dir 之外，no-follow stat 不
@@ -755,8 +798,7 @@ class FileManager:
                 deleted_size += size
                 logger.info("删除旧文件: {}", file_path)
             except Exception as e:
-                errors.append(f"删除文件失败 {file_path}: {e}")
-                logger.warning("删除文件失败: {} -> {}", file_path, e)
+                _record_delete_failure(errors, file_path, e)
         return deleted_files, deleted_size
 
     @staticmethod

@@ -40,7 +40,17 @@ from ...definitions.defaults import (
     DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
     DEFAULT_MAX_FILE_SIZE,
 )
-from ..core.errors import SeedreamMCPError
+from ..core.errors import (
+    ErrorText,
+    SeedreamMCPError,
+    as_detail,
+    as_plain,
+    as_text,
+    as_url,
+    base_detail_error_text,
+    error_text,
+    raw_error_text,
+)
 from ..core.executors import run_in_cpu_pool
 from ..core.formats import (
     FORMAT_FAMILIES,
@@ -55,6 +65,7 @@ from ..core.inflight import TransientInflightError
 from ..core.logs import get_logger
 from ..core.loop_bound import LoopKeyedInflight
 from ..core.settle import await_settled_op
+from ..core.sanitizers import sanitize_url
 from .files import (
     _cleanup_temp_file,
     _close_fd_quietly,
@@ -63,7 +74,6 @@ from .files import (
     open_no_follow_write_fd,
     open_temp_fd,
 )
-from .url import sanitize_url
 
 logger = get_logger()
 
@@ -280,6 +290,21 @@ _TERMINAL_GAI_ERRNOS = frozenset(
     if code is not None
 )
 
+# 域名解析失败文案的共用模板：主机与底层异常以分类参数进入，gaierror 与其余 OSError
+# 的解析失败经单一构造按终止性选异常类上抛。
+_DNS_RESOLVE_FAILURE_TEMPLATE = "域名解析失败: {host} ({exc})"
+
+# 域名解析结果为空文案的共用模板：主机以分类参数进入，两个上抛点共享单一来源。
+_DNS_EMPTY_RESULT_TEMPLATE = "域名解析结果为空: {host}"
+
+# 无效 URL 文案的共用模板：URL 以分类参数进入，静态校验、重定向解析与保存侧
+# 校验的上抛点共享单一来源；供 save 模块跨模块引用，公共名不带下划线前缀。
+INVALID_URL_TEMPLATE = "无效的URL: {url}"
+
+# HTTP 状态错误文案的共用模板：状态码以分类参数进入，非 200 终态的重试与终态
+# 两条路径经单一构造按终止性选异常类上抛。
+_HTTP_ERROR_TEMPLATE = "HTTP错误: {status}"
+
 
 def _url_origin(url: str) -> tuple[str, str, int]:
     """返回 URL 的请求源三元组 (scheme, host, effective_port)，供跨源判定。
@@ -295,7 +320,7 @@ def _url_origin(url: str) -> tuple[str, str, int]:
         parsed = urlparse(url)
     except ValueError as exc:
         # urlparse 对不闭合 IPv6 括号等畸形输入抛 ValueError，归一为终态无效 URL 错误。
-        raise DownloadError(f"无效的URL: {sanitize_url(url)}") from exc
+        raise DownloadError(error_text(INVALID_URL_TEMPLATE, url=as_url(url))) from exc
     scheme = (parsed.scheme or "").lower()
     host = (parsed.hostname or "").lower()
     try:
@@ -419,7 +444,9 @@ class TransientFileLockError(RetryableDownloadError):
 
 def _raise_transient_file_lock(operation: str, exc: PermissionError) -> NoReturn:
     """把瞬时持锁 PermissionError 单点转为可重试 TransientFileLockError。"""
-    raise TransientFileLockError(f"{operation}瞬时持锁，重试") from exc
+    raise TransientFileLockError(
+        error_text("{operation}瞬时持锁，重试", operation=as_plain(operation))
+    ) from exc
 
 
 class _PublicIpPinningResolver(AbstractResolver):
@@ -526,7 +553,7 @@ _RESERVED_RANGE_HEADERS = frozenset({"range", "if-range"})
 
 
 class _ResumeState:
-    """断点续传状态：跨尝试复用的临时文件与已确认字节、嗅探窗口、源校验器。
+    """断点续传状态：跨尝试复用的临时文件与已确认字节、嗅探窗口、源校验器、流中限额。
 
     offset 只计入已确认落盘的字节，失败尝试的撕裂尾部由下一趟打开时的截断修正；
     已存字节覆盖嗅探窗口且持有校验器时才发起续传，否则退回全量重下。expected_total
@@ -534,10 +561,12 @@ class _ResumeState:
     由 Content-Length 声明，416 完成态由 ``bytes */总长`` 声明或 ``bytes */*``
     补记已确认偏移）并跨尝试留存，参与短体与越界判定；offset 恰达总长即完成态，
     200 无声明总长与开放式 206 的未知总量均以流正常收尾补记总长，短体与越界交付
-    均不判完成，完成态重试不再发请求，直接重走落盘终局。
+    均不判完成，完成态重试不再发请求，直接重走落盘终局。max_file_size 为入口
+    收敛后的生效流中限额，流中累计与解码回退的上限检查点从其读取。
     """
 
     __slots__ = (
+        "max_file_size",
         "fd",
         "path",
         "offset",
@@ -547,7 +576,8 @@ class _ResumeState:
         "content_type",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, max_file_size: int) -> None:
+        self.max_file_size = max_file_size
         self.fd: int | None = None
         self.path: Path | None = None
         self.offset = 0
@@ -583,7 +613,7 @@ class _ResumeState:
         self.head_bytes = b""
 
     async def invalidate_prefix_and_raise_retryable(
-        self, response: aiohttp.ClientResponse, message: str
+        self, response: aiohttp.ClientResponse, message: str | ErrorText
     ) -> NoReturn:
         """排空响应体使连接回池，作废已存部分前缀并抛可重试错误，重试退回全量、
         不再携带注定失败的同一 Range。
@@ -635,7 +665,7 @@ async def _ensure_etag_matches_resume(
     if response_etag is not None and response_etag != resume.validator:
         await resume.invalidate_prefix_and_raise_retryable(
             response,
-            f"续传响应ETag与源校验器不符: {response_etag!r}",
+            error_text("续传响应ETag与源校验器不符: {etag}", etag=as_detail(repr(response_etag))),
         )
 
 
@@ -681,7 +711,11 @@ async def _classify_range_response(
         ):
             await resume.invalidate_prefix_and_raise_retryable(
                 response,
-                f"416 声明总长与已知总长不符: {declared_total}/{resume.expected_total}",
+                error_text(
+                    "416 声明总长与已知总长不符: {declared}/{known}",
+                    declared=as_plain(declared_total),
+                    known=as_plain(resume.expected_total),
+                ),
             )
         if declared_total is not None and declared_total >= resume.offset:
             # 声明总长不小于已确认偏移：排空响应体，总长随描述符下传，完成与违约终态共用。
@@ -693,8 +727,12 @@ async def _classify_range_response(
                 return _RangeClassification(completed=True, range_total=declared_total)
             # 区间按声明本可满足，重试请求逐字节相同：对端违约首现即终态，不烧重试预算。
             raise DownloadError(
-                f"HTTP错误: {response.status}，声明总长 {declared_total} 大于"
-                f"已确认偏移 {resume.offset}，区间应可满足"
+                error_text(
+                    "HTTP错误: {status}，声明总长 {declared} 大于已确认偏移 {offset}，区间应可满足",
+                    status=as_plain(response.status),
+                    declared=as_plain(declared_total),
+                    offset=as_plain(resume.offset),
+                )
             )
         if declared.unsatisfied:
             # ``bytes */*`` 对开放式区间即起点已达表示总长：已确认字节即完整
@@ -704,21 +742,32 @@ async def _classify_range_response(
                 # 即表示已变化：作废前缀退回全量重下。
                 await resume.invalidate_prefix_and_raise_retryable(
                     response,
-                    f"416 不可满足声明与已知总长矛盾: " f"{resume.expected_total}/{resume.offset}",
+                    error_text(
+                        "416 不可满足声明与已知总长矛盾: {known}/{offset}",
+                        known=as_plain(resume.expected_total),
+                        offset=as_plain(resume.offset),
+                    ),
                 )
             await _drain_response_quietly(response)
             await _ensure_etag_matches_resume(response, resume)
             return _RangeClassification(completed=True, range_total=resume.offset)
         # 缺失声明或声明总长倒退：已存前缀与当前表示不符，作废退回全量重下。
         await resume.invalidate_prefix_and_raise_retryable(
-            response, f"HTTP错误: {response.status}，区间不可满足，退回全量重下"
+            response,
+            error_text(
+                "HTTP错误: {status}，区间不可满足，退回全量重下",
+                status=as_plain(response.status),
+            ),
         )
     content_range = _parse_content_range(response.headers.get("content-range"))
     # Content-Range 缺失或畸形时无法定位分片起点。
     if content_range.start is None:
         await resume.invalidate_prefix_and_raise_retryable(
             response,
-            "续传响应缺少有效 content-range: " f"{response.headers.get('content-range')!r}",
+            error_text(
+                "续传响应缺少有效 content-range: {header}",
+                header=as_detail(repr(response.headers.get("content-range"))),
+            ),
         )
     # 区间与已确认偏移不符或声明总长倒退：源侧视图与已存前缀已不一致。
     if content_range.start != resume.offset or (
@@ -726,7 +775,10 @@ async def _classify_range_response(
     ):
         await resume.invalidate_prefix_and_raise_retryable(
             response,
-            f"续传响应区间与已存偏移不符: {response.headers.get('content-range')!r}",
+            error_text(
+                "续传响应区间与已存偏移不符: {header}",
+                header=as_detail(repr(response.headers.get("content-range"))),
+            ),
         )
     # 声明总长与上趟已知总长不符即表示已变化：旧前缀不得拼入新表示，与 ETag
     # 核验同口径；总长缺失或无已知总长时无法比对维持现状。
@@ -737,7 +789,11 @@ async def _classify_range_response(
     ):
         await resume.invalidate_prefix_and_raise_retryable(
             response,
-            f"续传响应声明总长与已知总长不符: {content_range.total}/{resume.expected_total}",
+            error_text(
+                "续传响应声明总长与已知总长不符: {declared}/{known}",
+                declared=as_plain(content_range.total),
+                known=as_plain(resume.expected_total),
+            ),
         )
     # 响应 ETag 与源校验器不符即表示已变化：无视 If-Range 的源站回新表示字节时，
     # 新尾部不得拼接到旧前缀。
@@ -864,10 +920,12 @@ class DownloadManager:
         except ValueError as exc:
             # urlparse 对不闭合 IPv6 括号等畸形输入抛 ValueError，归一为终态无效
             # URL 错误，validate_url 的 bool 契约不被异常逃逸破坏。
-            raise DownloadError(f"无效的URL: {sanitize_url(url)}") from exc
+            raise DownloadError(error_text(INVALID_URL_TEMPLATE, url=as_url(url))) from exc
         scheme = (result.scheme or "").lower()
         if scheme not in {"http", "https"}:
-            raise DownloadError(f"不支持的URL协议: {scheme or '<empty>'}")
+            raise DownloadError(
+                error_text("不支持的URL协议: {scheme}", scheme=as_text(scheme or "<empty>"))
+            )
 
         if not result.netloc or not result.hostname:
             raise DownloadError("URL 缺少主机名")
@@ -877,14 +935,20 @@ class DownloadManager:
 
         host = result.hostname.strip().lower()
         if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
-            raise DownloadError(f"不安全的本地主机地址: {host}")
+            raise DownloadError(error_text("不安全的本地主机地址: {host}", host=as_text(host)))
 
         # 直接 IP 地址：仅允许公网，并拒绝 6to4/Teredo 等可封装内网地址的 IPv6 段。
         try:
             ip = ipaddress.ip_address(host)
             reason = _public_ip_rejection_reason(ip)
             if reason:
-                raise DownloadError(f"不安全的IP地址({reason}): {host}")
+                raise DownloadError(
+                    error_text(
+                        "不安全的IP地址({reason}): {host}",
+                        reason=as_plain(reason),
+                        host=as_text(host),
+                    )
+                )
             return host, False
         except ValueError:
             return host, True
@@ -952,17 +1016,19 @@ class DownloadManager:
             # asyncio.TimeoutError 是内建 TimeoutError（OSError 子类）的别名，须先于
             # except OSError 捕获；超时交由 download_image 重试。
             raise
-        except socket.gaierror as exc:
-            # gaierror 是 OSError 子类，同样先于 OSError 捕获；errno 命中永久失败集合
-            # 才保持终态，瞬时故障与不可靠 errno 一律按可重试上抛。
-            if exc.errno is not None and exc.errno in _TERMINAL_GAI_ERRNOS:
-                raise DownloadError(f"域名解析失败: {host} ({exc})") from exc
-            raise RetryableDownloadError(f"域名解析失败: {host} ({exc})") from exc
         except OSError as exc:
-            raise DownloadError(f"域名解析失败: {host} ({exc})") from exc
+            # gaierror 为 OSError 子类随本句捕获：errno 命中永久失败集合的 gaierror
+            # 与其余 OSError 终态上抛，瞬时故障与不可靠 errno 的 gaierror 可重试上抛。
+            retryable = isinstance(exc, socket.gaierror) and (
+                exc.errno is None or exc.errno not in _TERMINAL_GAI_ERRNOS
+            )
+            message = error_text(
+                _DNS_RESOLVE_FAILURE_TEMPLATE, host=as_text(host), exc=as_detail(exc)
+            )
+            raise (RetryableDownloadError if retryable else DownloadError)(message) from exc
 
         if not infos:
-            raise DownloadError(f"域名解析结果为空: {host}")
+            raise DownloadError(error_text(_DNS_EMPTY_RESULT_TEMPLATE, host=as_text(host)))
 
         resolved_ips: list[str] = []
         for info in infos:
@@ -971,14 +1037,27 @@ class DownloadManager:
             try:
                 ip_obj = ipaddress.ip_address(resolved_ip)
             except ValueError as exc:
-                raise DownloadError(f"域名解析返回非法IP: {host} -> {resolved_ip}") from exc
+                raise DownloadError(
+                    error_text(
+                        "域名解析返回非法IP: {host} -> {resolved}",
+                        host=as_text(host),
+                        resolved=as_text(resolved_ip),
+                    )
+                ) from exc
             reason = _public_ip_rejection_reason(ip_obj)
             if reason:
-                raise DownloadError(f"域名解析到不安全地址({reason}): {host} -> {resolved_ip}")
+                raise DownloadError(
+                    error_text(
+                        "域名解析到不安全地址({reason}): {host} -> {resolved}",
+                        reason=as_plain(reason),
+                        host=as_text(host),
+                        resolved=as_text(resolved_ip),
+                    )
+                )
             resolved_ips.append(resolved_ip)
 
         if not resolved_ips:
-            raise DownloadError(f"域名解析结果为空: {host}")
+            raise DownloadError(error_text(_DNS_EMPTY_RESULT_TEMPLATE, host=as_text(host)))
 
         # 保序去重，维持 getaddrinfo 的可达性序；字符串排序会把不可达 IPv6 排到首位。
         return tuple(dict.fromkeys(resolved_ips))
@@ -1032,12 +1111,19 @@ class DownloadManager:
         try:
             ip_obj = ipaddress.ip_address(peer_ip)
         except ValueError as exc:
-            raise DownloadError(f"连接返回非法IP地址: {peer_ip}") from exc
+            raise DownloadError(
+                error_text("连接返回非法IP地址: {peer}", peer=as_text(peer_ip))
+            ) from exc
 
         reason = _public_ip_rejection_reason(ip_obj)
         if reason:
             raise DownloadError(
-                f"连接命中不安全地址({reason}): {peer_ip} ({sanitize_url(source_url)})"
+                error_text(
+                    "连接命中不安全地址({reason}): {peer} ({url})",
+                    reason=as_plain(reason),
+                    peer=as_text(peer_ip),
+                    url=as_url(source_url),
+                )
             )
 
     def _validate_connected_peer_ip(
@@ -1057,7 +1143,9 @@ class DownloadManager:
         """
         peer_ip = self._extract_peer_ip(response)
         if not peer_ip:
-            raise DownloadError(f"无法获取连接对端IP，拒绝下载: {sanitize_url(source_url)}")
+            raise DownloadError(
+                error_text("无法获取连接对端IP，拒绝下载: {url}", url=as_url(source_url))
+            )
 
         self._ensure_public_peer_ip(peer_ip, source_url)
 
@@ -1101,7 +1189,7 @@ class DownloadManager:
         except ValueError as exc:
             # urljoin/urlparse 对不闭合 IPv6 括号等畸形目标抛 ValueError，归一为终态
             # 无效 URL 错误。
-            raise DownloadError(f"无效的URL: {sanitize_url(location)}") from exc
+            raise DownloadError(error_text(INVALID_URL_TEMPLATE, url=as_url(location))) from exc
         if current_scheme == "https" and next_scheme != "https":
             raise DownloadError("重定向目标协议不允许降级到 https 之外")
         return next_url
@@ -1153,10 +1241,14 @@ class DownloadManager:
             cl_value = strict_http_int(content_length)
             if cl_value is None:
                 # 携带而非缺失的畸形整数按终态拒绝，宽松形态不得错误锚定总量。
-                raise DownloadError(f"非法 content-length: {content_length!r}")
+                raise DownloadError(
+                    error_text(
+                        "非法 content-length: {header}", header=as_detail(repr(content_length))
+                    )
+                )
             if not continuing:
-                if cl_value > self.max_file_size:
-                    raise DownloadError(format_file_too_large_bytes(cl_value, self.max_file_size))
+                if cl_value > resume.max_file_size:
+                    raise DownloadError(format_file_too_large_bytes(cl_value, resume.max_file_size))
                 expected_total = cl_value
         if continuing:
             range_end = classification.range_end
@@ -1165,9 +1257,9 @@ class DownloadManager:
             # 仍锚定总长，短体不得判完成。
             if range_total is not None:
                 # 覆盖前同口径执行上限校验：虚高总长不得绕过文件过大早拒。
-                if range_total > self.max_file_size:
+                if range_total > resume.max_file_size:
                     raise DownloadError(
-                        format_file_too_large_bytes(range_total, self.max_file_size)
+                        format_file_too_large_bytes(range_total, resume.max_file_size)
                     )
                 expected_total = range_total
             elif previous_total is not None:
@@ -1267,10 +1359,10 @@ class DownloadManager:
             async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
                 write_buffer += chunk
                 # 内存上限锚定已确认偏移加未刷盘缓冲，与实际占用量恒等。
-                if resume.offset + len(write_buffer) > self.max_file_size:
+                if resume.offset + len(write_buffer) > resume.max_file_size:
                     raise DownloadError(
                         format_file_too_large_bytes(
-                            resume.offset + len(write_buffer), self.max_file_size
+                            resume.offset + len(write_buffer), resume.max_file_size
                         )
                     )
                 # 累计首部字节做签名校验，省一次 open+read；窗口取各格式最小
@@ -1307,7 +1399,13 @@ class DownloadManager:
         if expected_total is not None and resume.offset < expected_total:
             # 区间上限代理一类短体响应流收尾正常但未达声明总长：按可重试上抛，
             # 已确认偏移供下一趟续传补齐。
-            raise RetryableDownloadError(f"响应体短于声明总量: {resume.offset}/{expected_total}")
+            raise RetryableDownloadError(
+                error_text(
+                    "响应体短于声明总量: {received}/{declared}",
+                    received=as_plain(resume.offset),
+                    declared=as_plain(expected_total),
+                )
+            )
         _raise_if_overshoot()
         if (
             expected_total is None
@@ -1316,7 +1414,11 @@ class DownloadManager:
         ):
             # 总长未知时分片长是唯一声明基准：实际接收短于分片按可重试短体上抛。
             raise RetryableDownloadError(
-                f"响应体短于声明分片: {resume.offset - base_offset}/{segment_expected}"
+                error_text(
+                    "响应体短于声明分片: {received}/{declared}",
+                    received=as_plain(resume.offset - base_offset),
+                    declared=as_plain(segment_expected),
+                )
             )
         if expected_total is None:
             # 无声明总长（200 无 Content-Length 或开放式 206 的 ``*`` 总量）
@@ -1433,7 +1535,7 @@ class DownloadManager:
         """终验解码回退：解压临时文件中的压缩体并接管续传状态，不受理返回 False。
 
         无视 identity 强返 gzip 或 zlib 包装 deflate 的源站在此获得挽救：原始
-        字节已全部确认，解压经 CPU 池分块流式执行并以 max_file_size 封顶输出防
+        字节已全部确认，解压经 CPU 池分块流式执行并以流中限额封顶输出防
         解压炸弹；解码异常、超限或解码字节仍非受支持图片返回 False，由调用方维持
         签名拒绝终态。成功时临时文件重写为解码字节，head_bytes/offset/
         expected_total/content_type 同步改写，扩展名与 MIME 以解码字节重新嗅探，
@@ -1455,7 +1557,7 @@ class DownloadManager:
             wbits = zlib.MAX_WBITS
         try:
             decoded = await run_in_cpu_pool(
-                _inflate_part_file_capped, path, wbits, self.max_file_size
+                _inflate_part_file_capped, path, wbits, resume.max_file_size
             )
         except (ValueError, zlib.error):
             return False
@@ -1537,8 +1639,12 @@ class DownloadManager:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= self._download_total_budget():
                         raise asyncio.TimeoutError(
-                            f"重定向链累计耗时 {elapsed:.0f} 秒已超总预算 "
-                            f"{self._download_total_budget():.0f} 秒: {sanitize_url(url)}"
+                            raw_error_text(
+                                "重定向链累计耗时 {elapsed} 秒已超总预算 {budget} 秒: {url}",
+                                elapsed=as_plain(format(elapsed, ".0f")),
+                                budget=as_plain(format(self._download_total_budget(), ".0f")),
+                                url=as_url(url),
+                            )
                         )
                     # 跳向不同源时从调用方原始头重建安全头集合；同源跳转保持当前头不变，
                     # 一旦剥离后续跳回原源也不恢复定制头。
@@ -1566,14 +1672,19 @@ class DownloadManager:
                     await _drain_response_quietly(response)
                     # 5xx 与 408/429 多为瞬时故障或限流，纳入重试避免批量下载触发限流
                     # 后自动保存静默丢弃本地副本。
-                    if response.status in (408, 429) or 500 <= response.status < 600:
-                        raise RetryableDownloadError(f"HTTP错误: {response.status}")
-                    raise DownloadError(f"HTTP错误: {response.status}")
+                    retryable = response.status in (408, 429) or 500 <= response.status < 600
+                    message = error_text(_HTTP_ERROR_TEMPLATE, status=as_plain(response.status))
+                    raise (RetryableDownloadError if retryable else DownloadError)(message)
 
                 content_type = response.headers.get("content-type", "")
                 if not _is_image_compatible_content_type(content_type):
                     await _drain_response_quietly(response)
-                    raise DownloadError(f"响应内容类型非图片: {content_type.split(';')[0].strip()}")
+                    raise DownloadError(
+                        error_text(
+                            "响应内容类型非图片: {content_type}",
+                            content_type=as_detail(content_type.split(";")[0].strip()),
+                        )
+                    )
 
                 return await self._stream_response_to_resume(
                     response,
@@ -1665,7 +1776,7 @@ class DownloadManager:
                 raise
 
             except asyncio.TimeoutError as e:
-                last_error = DownloadError(f"下载超时: {e}")
+                last_error = DownloadError(base_detail_error_text("下载超时", e))
                 logger.warning(
                     "下载超时 (尝试 {}): {} ({})",
                     attempt + 1,
@@ -1678,9 +1789,19 @@ class DownloadManager:
                 # 其余 ClientError 多为连接类瞬时故障，纳入退避重试。
                 if isinstance(e, aiohttp.InvalidUrlClientError):
                     raise DownloadError(
-                        f"无效的URL: {sanitize_url(url)} [{type(e).__name__}]"
+                        error_text(
+                            "无效的URL: {url} [{exc_type}]",
+                            url=as_url(url),
+                            exc_type=as_plain(type(e).__name__),
+                        )
                     ) from e
-                last_error = DownloadError(f"网络错误: {sanitize_url(url)} [{type(e).__name__}]")
+                last_error = DownloadError(
+                    error_text(
+                        "网络错误: {url} [{exc_type}]",
+                        url=as_url(url),
+                        exc_type=as_plain(type(e).__name__),
+                    )
+                )
                 logger.opt(exception=True).warning(
                     "网络错误 (尝试 {}): {} [{}]",
                     attempt + 1,
@@ -1692,13 +1813,15 @@ class DownloadManager:
                 # 保存目录不可写等新文件创建权限拒绝属永久性错误，重试仅徒增延迟，
                 # 直接终态抛出；已存在 .part 的读取、写入、撕裂尾截断、重开与
                 # 终局替换持锁已单点转为可重试。
-                raise DownloadError(f"权限拒绝，不可重试: {e}") from e
+                raise DownloadError(base_detail_error_text("权限拒绝，不可重试", e)) from e
 
             except OSError as e:
                 # 只读文件系统、磁盘满与配额超限等永久性错误不重试；其余瞬时 OSError 保持重试。
                 if e.errno in _PERMANENT_FS_ERRNOS:
-                    raise DownloadError(f"文件系统永久错误，不可重试: {e}") from e
-                last_error = DownloadError(f"文件系统错误: {e}")
+                    raise DownloadError(
+                        base_detail_error_text("文件系统永久错误，不可重试", e)
+                    ) from e
+                last_error = DownloadError(base_detail_error_text("文件系统错误", e))
                 logger.opt(exception=True).warning("文件系统错误 (尝试 {}): {}", attempt + 1, e)
 
             except Exception as e:
@@ -1737,6 +1860,7 @@ class DownloadManager:
         save_path: Path,
         headers: dict[str, str] | None = None,
         fsync: bool = False,
+        max_file_size: int | None = None,
     ) -> dict[str, Any]:
         """异步下载图片。
 
@@ -1750,6 +1874,8 @@ class DownloadManager:
             save_path: 保存路径，最终扩展名以字节签名嗅探结果为准。
             headers: 请求头；None 时使用内置默认头。
             fsync: 写入后、原子替换前是否对临时文件执行 os.fsync 刷入稳定存储。
+            max_file_size: 调用方的文件大小上限（字节），流中检查点按其与管理器
+                自持上限的较小者拒绝超限；None 时仅按管理器自持上限。
 
         Returns:
             下载结果字典，含 file_path、file_size、download_time、content_type 与
@@ -1784,7 +1910,12 @@ class DownloadManager:
         # 钉死 Accept-Encoding 为 identity：等量核算以传输字节对照声明总长，透明解压
         # 会改写字节口径致短体或越界误判，调用方同名头一并覆盖。
         base_headers["Accept-Encoding"] = "identity"
-        resume = _ResumeState()
+        # 流中限额取调用方与管理器自持上限的较小者：调用方口径可以更严但不放宽
+        # 管理器自持上限，注入共享下载管理器的保存方按自身上限在流中拒绝超限。
+        effective_max_file_size = (
+            self.max_file_size if max_file_size is None else min(self.max_file_size, max_file_size)
+        )
+        resume = _ResumeState(effective_max_file_size)
         try:
             return await self._download_with_retries(
                 url,

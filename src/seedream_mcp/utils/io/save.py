@@ -9,11 +9,18 @@ from __future__ import annotations
 import asyncio
 import base64
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable, NamedTuple, Sequence
 
-from ..core.errors import SeedreamMCPError, has_message_value
+from ..core.errors import (
+    ErrorText,
+    SeedreamMCPError,
+    as_plain,
+    as_url,
+    base_detail_error_text,
+    error_text,
+    has_message_value,
+)
 from ..core.executors import CpuOffloadPoolClosedError, run_in_cpu_pool, should_offload_size
-from ..core.sanitizers import CONTROL_CHARS_PATTERN, sanitize_data_text, sanitize_error_text
 from ...definitions.defaults import (
     DEFAULT_CLEANUP_DAYS,
     DEFAULT_DATE_FOLDER,
@@ -38,9 +45,14 @@ from ..core.formats import (
 )
 from ..core.logs import get_logger
 from ..core.loop_bound import loop_bound_semaphore
-from ..core.throttles import ThrottleRegistry
-from .download import DownloadManager, DownloadError
-from .url import sanitize_url
+from ..core.sanitizers import (
+    CONTROL_CHARS_PATTERN,
+    sanitize_data_text,
+    sanitize_error_text,
+    sanitize_url,
+)
+from ..core.throttles import BoundedExpiryRegistry
+from .download import INVALID_URL_TEMPLATE, DownloadError, DownloadManager
 from .storage import FileManager, FileManagerError, current_save_time, get_file_manager
 
 logger = get_logger()
@@ -48,14 +60,69 @@ logger = get_logger()
 
 # 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描。
 _CLEANUP_MIN_INTERVAL_SECONDS = 3600
-# 清理失败后的重试退避秒数：失败时把节流门改写为该秒数后的到期，使失败重试有独立
-# 于完整节流间隔的下限，高频保存下持续失败的清理不再每次调用都触发全目录扫描。
+# 清理失败后的最短重试间隔：首败把清理门改写为该秒数后的到期，连续失败按次
+# 放大（封顶见下），失败重试有独立于完整节流间隔的下限。
 _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS = 60
-# 按清理根目录节流清理，跨请求共享；不同清理根独立，互不抑制。
-# 注册表设容量上限，避免异常多变的清理根使键无界增长耗尽内存。
-_CLEANUP_LAST_RUN_MAX_ENTRIES = 16
-_cleanup_last_run: ThrottleRegistry[str] = ThrottleRegistry(_CLEANUP_LAST_RUN_MAX_ENTRIES)
-# 保护 _cleanup_last_run 的检查与写入，避免并发请求同时通过节流检查重复触发清理。
+# 清理失败重试间隔的放大封顶：连续失败按 2 的幂放大重试间隔并封顶于完整节流
+# 间隔，单文件持续锁定（如杀软占用）下的全目录重扫频率收敛到正常清理档。
+_CLEANUP_FAILURE_BACKOFF_CEILING_SECONDS = _CLEANUP_MIN_INTERVAL_SECONDS
+# 连续失败计数封顶：取退避首达放大封顶的最小连续失败数（60*2^(n-1) >= 3600
+# 的最小 n，本组常量下为 7），封顶后移位消耗 O(1)，连续失败更久的退避档不再
+# 变化。
+_CLEANUP_FAILURE_STREAK_CAP = (
+    -(-_CLEANUP_FAILURE_BACKOFF_CEILING_SECONDS // _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS) - 1
+).bit_length() + 1
+
+
+class _CleanupGateEntry(NamedTuple):
+    """清理门的单键状态：下次到期时间戳与连续失败计数。"""
+
+    expires_at: float
+    failure_streak: int
+
+
+class _CleanupGate(BoundedExpiryRegistry[str, _CleanupGateEntry]):
+    """按清理根聚合到期时间与失败退避的单一门结构。
+
+    到期时间戳与连续失败计数同键同条目，容量驱逐原子作用于整条状态，不存在
+    只改一侧的残留路径；自身不加锁，检查与写入的原子性由调用方的外部锁保证。
+    """
+
+    def record_failure(self, key: str) -> None:
+        """连续失败计数加一并把到期改写为按 2 的幂放大的退避，封顶完整节流间隔。"""
+        streak = min(self._streak(key) + 1, _CLEANUP_FAILURE_STREAK_CAP)
+        backoff = min(
+            _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS << (streak - 1),
+            _CLEANUP_FAILURE_BACKOFF_CEILING_SECONDS,
+        )
+        self._write(key, _CleanupGateEntry(self._now() + backoff, streak))
+
+    def record_success(self, key: str) -> None:
+        """清理成功清零失败计数；到期时间戳与使用序保持 mark 时的推进。"""
+        entry = self._entries.get(key)
+        if entry is not None:
+            # 就地清零而非经 _write：成功不凭空为未登记键建到期条目。
+            self._entries[key] = _CleanupGateEntry(entry.expires_at, 0)
+
+    def _entry_expiry(self, entry: _CleanupGateEntry) -> float:
+        """条目到期时间戳即首字段。"""
+        return entry.expires_at
+
+    def _entry_for(self, key: str, expires_at: float) -> _CleanupGateEntry:
+        """推进到期保全既有失败计数。"""
+        return _CleanupGateEntry(expires_at, self._streak(key))
+
+    def _streak(self, key: str) -> int:
+        """取键的当前连续失败计数，未登记为 0。"""
+        entry = self._entries.get(key)
+        return entry.failure_streak if entry is not None else 0
+
+
+# 按清理根目录节流清理，跨请求共享；不同清理根独立，互不抑制。清理门设容量
+# 上限，避免异常多变的清理根使键无界增长耗尽内存。
+_CLEANUP_GATE_MAX_ENTRIES = 16
+_cleanup_gate = _CleanupGate(_CLEANUP_GATE_MAX_ENTRIES)
+# 保护 _cleanup_gate 的检查与写入，避免并发请求同时通过节流检查重复触发清理。
 _cleanup_lock = asyncio.Lock()
 # 在途的后台清理任务，供进程级退出清理 drain_background_cleanup_tasks 等待完成。
 _cleanup_tasks: set[asyncio.Task[None]] = set()
@@ -67,9 +134,9 @@ def reset_cleanup_state() -> None:
     asyncio.Lock 首次 acquire 后绑定当时的事件循环，pytest-asyncio 每用例新建
     循环，跨循环复用旧锁会在 acquire 时报错，故重建 _cleanup_lock 并清空状态。
     """
-    global _cleanup_lock, _cleanup_last_run, _cleanup_tasks
+    global _cleanup_lock, _cleanup_gate, _cleanup_tasks
     _cleanup_lock = asyncio.Lock()
-    _cleanup_last_run = ThrottleRegistry(_CLEANUP_LAST_RUN_MAX_ENTRIES)
+    _cleanup_gate = _CleanupGate(_CLEANUP_GATE_MAX_ENTRIES)
     _cleanup_tasks = set()
 
 
@@ -124,7 +191,7 @@ def _build_markdown_alt(alt_text: str | None) -> str:
     return escaped or "Generated Image"
 
 
-def _pixel_limit_rejection(path: Path) -> str | None:
+def _pixel_limit_rejection(path: Path) -> ErrorText | None:
     """读取图像头尺寸判定是否超过下载落盘像素上限 MAX_IMAGE_PIXELS，返回拒绝原因或 None。
 
     只读头部不解码像素，供工作线程调用；显式校验防止数 KB 的伪造尺寸头图片落盘后
@@ -142,14 +209,19 @@ def _pixel_limit_rejection(path: Path) -> str | None:
     except Image.DecompressionBombError:
         # 头声明像素超过 2 倍上限时 PIL 在打开阶段即抛错，具体尺寸不可得，仍按
         # 像素超限口径拒绝，交由外层删除已落盘文件并降级。
-        return f"图像像素超过保存上限 {MAX_IMAGE_PIXELS}，已删除落盘文件并放弃保存"
+        return error_text(
+            "图像像素超过保存上限 {limit}，已删除落盘文件并放弃保存",
+            limit=as_plain(MAX_IMAGE_PIXELS),
+        )
     # 畸形头在部分 PIL 插件抛 ValueError，捕获集与 validation 的解码包装同口径。
     except (UnidentifiedImageError, ValueError, OSError, SyntaxError):
         return None
     if width * height > MAX_IMAGE_PIXELS:
-        return (
-            f"图像像素 {width}x{height} 超过保存上限 {MAX_IMAGE_PIXELS}，"
-            "已删除落盘文件并放弃保存"
+        return error_text(
+            "图像像素 {width}x{height} 超过保存上限 {limit}，已删除落盘文件并放弃保存",
+            width=as_plain(width),
+            height=as_plain(height),
+            limit=as_plain(MAX_IMAGE_PIXELS),
         )
     return None
 
@@ -265,10 +337,18 @@ async def _run_save_with_degradation(
     except OSError as e:
         # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底。
         logger.warning("{}文件系统错误: {}{}", log_label, log_context, e)
-        return AutoSaveResult(success=False, original_url=original_url, error=f"文件系统错误: {e}")
+        return AutoSaveResult(
+            success=False,
+            original_url=original_url,
+            error=base_detail_error_text("文件系统错误", e).raw_text(),
+        )
     except Exception as e:
         logger.opt(exception=True).error("{}未知错误: {}{}", log_label, log_context, e)
-        return AutoSaveResult(success=False, original_url=original_url, error=f"未知错误: {e}")
+        return AutoSaveResult(
+            success=False,
+            original_url=original_url,
+            error=base_detail_error_text("未知错误", e).raw_text(),
+        )
 
 
 def _entry_url(data: dict[str, Any]) -> str:
@@ -309,7 +389,10 @@ class AutoSaveManager:
                 可能同时存放其他文件，不属服务专有，清理与配额不得作用其上。
             download_timeout: 下载超时时间，仅自建下载管理器时生效。
             max_retries: 最大重试次数，仅自建下载管理器时生效。
-            max_file_size: 最大文件大小，本实例自持；自建下载管理器时同时作为其上限。
+            max_file_size: 最大文件大小，URL 与 Base64 两条保存路径统一按本实例
+                上限校验；URL 路径经调用方限额穿入下载流中检查点生效（注入共享
+                下载管理器时与其自持上限取较小者），自建下载管理器时同时作为
+                其下载侧上限。
             max_concurrent: 最大并发下载数。
             date_folder: 是否按日期创建文件夹。
             cleanup_days: 自动清理天数，0 表示不按天清理。
@@ -367,27 +450,29 @@ class AutoSaveManager:
         清理入口不受清理策略开关影响：.part 孤儿清扫在 auto-save 启用时始终执行，
         两项清理策略均显式关闭的部署下遗留临时文件同样被回收；按天清理与配额驱逐
         仍按各自开关门控。清理边界不可用（_cleanup_file_manager 为 None）时整体
-        跳过。节流门经注册表 due/mark 查门与推进，失败改写为短退避到期；锁内完成
-        检查与占位，并发请求不会同时进入清理。
+        跳过。节流与失败退避状态收敛于 _cleanup_gate 单一门结构，经 due/mark 查门
+        与推进，失败改写为退避到期（首败最短、连续失败按次放大）；锁内完成检查与
+        占位，并发请求不会同时进入清理。
         """
         if self._cleanup_file_manager is None:
             return
         cleanup_key = str(self._cleanup_file_manager.base_dir)
         async with _cleanup_lock:
-            if not _cleanup_last_run.due(cleanup_key):
+            if not _cleanup_gate.due(cleanup_key):
                 return
-            _cleanup_last_run.mark(cleanup_key, _CLEANUP_MIN_INTERVAL_SECONDS)
-        # 后台执行清理，不阻塞当前请求返回；失败改写为短退避到期供下次重试。
+            _cleanup_gate.mark(cleanup_key, _CLEANUP_MIN_INTERVAL_SECONDS)
+        # 后台执行清理，不阻塞当前请求返回；失败改写退避到期供下次重试。
         task = asyncio.create_task(self._run_cleanup_in_background(cleanup_key))
         _cleanup_tasks.add(task)
         task.add_done_callback(_cleanup_tasks.discard)
 
     async def _run_cleanup_in_background(self, cleanup_key: str) -> None:
-        """在后台线程执行清理，失败时改写为短退避到期。
+        """在后台线程执行清理，失败时改写为退避到期，无错误时清零失败计数。
 
         run_cleanup_policies 宽捕获扫描级与逐项错误并收入 errors 而非上抛，逐项
-        失败同样改写短退避到期：目录可能仍超限，下次保存应按退避秒数重试而非等待
-        完整节流间隔。
+        失败同样改写退避到期：目录可能仍超限，下次保存应尽快重试而非等待完整
+        节流间隔；连续失败经 _apply_cleanup_failure_backoff 按次放大间隔，首次
+        重试仍为最短退避。
         """
         if self._cleanup_file_manager is None:
             return
@@ -405,15 +490,19 @@ class AutoSaveManager:
         if errors:
             await self._apply_cleanup_failure_backoff(cleanup_key)
             logger.warning("自动清理部分失败: {}", errors)
+            return
+        async with _cleanup_lock:
+            _cleanup_gate.record_success(cleanup_key)
 
     async def _apply_cleanup_failure_backoff(self, cleanup_key: str) -> None:
-        """清理失败后把节流门改写为短退避到期，使失败重试有独立节流下限。
+        """清理连续失败时把清理门到期改写为按次指数放大的退避。
 
-        下次调用须再等待退避秒数方可重试，避免高频保存下持续失败的清理退化为
-        每次保存都扫描目录。
+        首次失败仍取最短退避，配额驱逐可能待处理时的尽快重试不被推迟；持续失败
+        的每次重试都付全目录扫描代价，间隔按 2 的幂放大并封顶于完整节流间隔，
+        不再每个退避窗口全量重扫整树。
         """
         async with _cleanup_lock:
-            _cleanup_last_run.mark(cleanup_key, _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS)
+            _cleanup_gate.record_failure(cleanup_key)
 
     def _extension_from_mime(self, mime: str | None) -> str:
         """根据 MIME 类型推断文件扩展名，未知类型回退默认图片扩展名。"""
@@ -447,7 +536,7 @@ class AutoSaveManager:
             logger.info("开始自动保存图片: {}", sanitize_url(url))
 
             if not self.download_manager.validate_url(url):
-                raise AutoSaveError(f"无效的URL: {sanitize_url(url)}")
+                raise AutoSaveError(error_text(INVALID_URL_TEMPLATE, url=as_url(url)))
 
             # 创建保存路径；该操作内含 mkdir 与 resolve，移出事件循环线程执行。
             save_path = await asyncio.to_thread(
@@ -459,8 +548,10 @@ class AutoSaveManager:
                 date_folder=self.date_folder,
             )
 
+            # 本实例上限作为调用方限额穿入下载流中检查点：注入共享下载管理器时其
+            # 自持上限可能与本实例分叉，取较小者使超限仍按本实例上限在流中被拒。
             download_result = await self.download_manager.download_image(
-                url, save_path, fsync=self.fsync
+                url, save_path, fsync=self.fsync, max_file_size=self.max_file_size
             )
 
             # 字节签名嗅探可能修正扩展名，实际落盘路径以下载结果的 file_path 为准；
@@ -533,7 +624,7 @@ class AutoSaveManager:
                     BASE64_WHITESPACE_PATTERN.sub("", payload), validate=True
                 )
         except Exception as e:
-            raise AutoSaveError(f"Base64解码失败: {e}") from e
+            raise AutoSaveError(base_detail_error_text("Base64解码失败", e)) from e
 
         if len(content_bytes) > self.max_file_size:
             raise AutoSaveError(

@@ -17,6 +17,7 @@ from mcp.shared.message import ServerMessageMetadata
 from mcp.types import REQUEST_TIMEOUT, ListRootsRequest, ListRootsResult
 from mcp.types.version import is_version_at_least
 
+from ..core.errors import as_plain, base_detail_error_text, safe_error_text
 from ..core.logs import get_logger
 from .path import (
     apply_workspace_roots,
@@ -175,8 +176,13 @@ async def read_session_roots_or_raise(ctx: Any, session: Any) -> ListRootsResult
         return await _request_session_roots(ctx, session)
     except Exception as exc:
         if _is_roots_read_timeout(exc):
-            raise ToolError(f"读取 MCP Roots 超时（{_ROOTS_LIST_TIMEOUT_SECONDS:g} 秒）") from exc
-        raise ToolError(f"读取 MCP Roots 失败: {exc}") from exc
+            raise ToolError(
+                safe_error_text(
+                    "读取 MCP Roots 超时（{seconds} 秒）",
+                    seconds=as_plain(format(_ROOTS_LIST_TIMEOUT_SECONDS, "g")),
+                )
+            ) from exc
+        raise ToolError(base_detail_error_text("读取 MCP Roots 失败", exc).safe_text()) from exc
 
 
 def resource_roots_via_input_required(ctx: Any) -> bool:

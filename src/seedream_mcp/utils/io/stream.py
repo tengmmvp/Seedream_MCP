@@ -13,6 +13,8 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+from ..core.inflight import clone_shared_exception
+
 
 class StreamDeadlineExceeded(Exception):
     """限时读取会话命中截止，已无更多数据块可产。"""
@@ -74,7 +76,8 @@ class StreamSession:
         截止命中为会话级终局闩锁：单会话单一 deadline，超时后会话应整体丢弃，不带 deadline 重入续读。
         """
         if isinstance(self._terminal, BaseException):
-            raise self._terminal
+            # 重入抛独立克隆：重抛共享实例会向其 __traceback__ 叠帧，跨重入互染。
+            raise clone_shared_exception(self._terminal)
         if self._terminal is _STREAM_ENDED:
             return None
         if self._terminal is _DEADLINE_EXCEEDED:

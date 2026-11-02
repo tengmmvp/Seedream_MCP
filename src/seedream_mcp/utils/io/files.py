@@ -25,6 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import IO
 
+from ..core.errors import as_plain, raw_error_text
 from ..core.settle import await_settled_op
 from .path import ResolveResultCache, resolve_rejecting_cycle
 
@@ -96,7 +97,11 @@ def _open_no_follow_fallback(
     """
     pre_st = os.lstat(path_str)
     if stat.S_ISLNK(pre_st.st_mode):
-        raise SymlinkRejectedError(errno.ELOOP, f"拒绝{action}符号链接", path_str)
+        raise SymlinkRejectedError(
+            errno.ELOOP,
+            raw_error_text("拒绝{action}符号链接", action=as_plain(action)),
+            path_str,
+        )
     fd = os.open(path_str, flags)
     try:
         post_st = os.fstat(fd)
@@ -105,7 +110,11 @@ def _open_no_follow_fallback(
         raise
     if post_st.st_ino != pre_st.st_ino or post_st.st_dev != pre_st.st_dev:
         os.close(fd)
-        raise SymlinkRejectedError(errno.ELOOP, f"打开期间最终分量被替换，拒绝{action}", path_str)
+        raise SymlinkRejectedError(
+            errno.ELOOP,
+            raw_error_text("打开期间最终分量被替换，拒绝{action}", action=as_plain(action)),
+            path_str,
+        )
     return fd, post_st
 
 
@@ -147,7 +156,11 @@ def _open_no_follow_fd(path: PathLike, flags: int, *, action: str) -> tuple[int,
             fd = os.open(str(path), open_flags)
         except OSError as exc:
             if exc.errno in (errno.ELOOP, errno.EMLINK):
-                raise SymlinkRejectedError(errno.ELOOP, f"拒绝{action}符号链接", str(path)) from exc
+                raise SymlinkRejectedError(
+                    errno.ELOOP,
+                    raw_error_text("拒绝{action}符号链接", action=as_plain(action)),
+                    str(path),
+                ) from exc
             raise
         try:
             stat_result = os.fstat(fd)
@@ -158,7 +171,11 @@ def _open_no_follow_fd(path: PathLike, flags: int, *, action: str) -> tuple[int,
         fd, stat_result = _open_no_follow_fallback(str(path), open_flags, action=action)
     if not stat.S_ISREG(stat_result.st_mode):
         os.close(fd)
-        raise NonRegularFileError(errno.EINVAL, f"拒绝{action}非常规文件", str(path))
+        raise NonRegularFileError(
+            errno.EINVAL,
+            raw_error_text("拒绝{action}非常规文件", action=as_plain(action)),
+            str(path),
+        )
     return fd, stat_result
 
 

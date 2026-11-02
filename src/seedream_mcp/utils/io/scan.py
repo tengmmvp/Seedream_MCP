@@ -724,7 +724,7 @@ def find_images_in_directory(
     try:
         dir_path = Path(directory).resolve()
     except Exception as e:
-        logger.error("搜索图片文件失败 {}: {}", directory, e)
+        logger.opt(exception=True).error("搜索图片文件失败 {}: {}", directory, e)
         return []
 
     return _scan_resolved_directory(
@@ -883,7 +883,7 @@ def _scan_resolved_directory(
     except Exception as e:
         # Python 3.12 的 is_dir 对非忽略集 errno 的 stat 失败上抛，与 resolve
         # 失败同口径降级为空结果而非上抛。
-        logger.error("搜索图片文件失败 {}: {}", directory, e)
+        logger.opt(exception=True).error("搜索图片文件失败 {}: {}", directory, e)
         return images
 
     target_extensions = set(extensions) if extensions else SUPPORTED_IMAGE_EXTENSIONS
@@ -1034,6 +1034,6 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
                 break
 
     except Exception as e:
-        logger.error("生成路径建议失败: {}", e)
+        logger.opt(exception=True).error("生成路径建议失败: {}", e)
 
     return suggestions
