@@ -445,11 +445,11 @@ Seedream 5.0 pro / Seedream 5.0 flash 最多支持传入 10 张参考图；Seedr
 
 - `opaque`：不透明背景模式，生成常规的实体背景图。
 
-<div data-tips="true" data-tips-type="warning" data-tips-is-title="true">使用限制</div>
+<div data-tips="true" data-tips-type="warning" data-tips-is-title="true">透明背景模式使用要求</div>
 
 - <div data-tips="true" data-tips-type="warning">仅支持图生图场景，且只支持输入 <strong>1 张带透明通道</strong>的图片；</div>
 
-- <div data-tips="true" data-tips-type="warning">透明背景模式下，输出图片默认为 <code>png</code> 格式，若同时配置 <code>output_format</code> 为 <code>jpeg</code>，将触发报错；</div>
+- <div data-tips="true" data-tips-type="warning">输出图片默认为 <code>png</code> 格式，若同时配置 <code>output_format</code> 为 <code>jpeg</code>，将触发报错；</div>
 
 - <div data-tips="true" data-tips-type="warning">若传入了不支持透明通道的文件格式（如 <code>jpeg</code>），将触发报错。</div>
 
@@ -589,13 +589,15 @@ Seedream 5.0 pro / Seedream 5.0 flash 最多支持传入 10 张参考图；Seedr
 
 - 图层拆分场景，额外返回每个图层的叠放顺序（`z_index`）、名称（`name`）、描述（`description`）、边界框坐标（`bounding_box`）。
 
+**公共字段**
+
 **url** `string` | 图片 URL
 
 `data.url`
 
 图片 URL，当 `response_format` 指定为 `url` 时返回。该链接将在生成后 **24 小时内失效**，请务必及时保存图像。
 
-推荐配置火山引擎 TOS 提供的数据订阅功能，将您的模型推理产物自动转存到自己的 TOS 桶中，便于长期备份或二次加工。详细介绍请参见 [TOS 数据订阅](https://docs.volcengine.com/docs/6349/1366744)。
+推荐配置火山引擎 TOS 提供的数据订阅功能，将您的模型推理产物自动转存到自己的 TOS 桶中，便于长期备份或二次加工。详细介绍请参见 [TOS 数据订阅](https://docs.volcengine.com/docs/TorchObjectStorage/Datasubscription-5?lang=zh)。
 
 **b64_json** `string` | 图片 Base64 数据
 
@@ -625,7 +627,7 @@ Seedream 5.0 pro / Seedream 5.0 flash 最多支持传入 10 张参考图；Seedr
 
 - `Seedream 5.0 flash`
 
-**图层拆分场景**
+**特殊字段（图层拆分场景）**
 
 **z_index<mark><sup>new</sup></mark>** `integer` | 图层叠放顺序
 
@@ -673,7 +675,6 @@ Seedream 5.0 pro / Seedream 5.0 flash 最多支持传入 10 张参考图；Seedr
 
 - <div data-tips="true" data-tips-type="tip"><code>bounding_box</code> 表示图层在待拆分图中的相对位置与宽高比，等比缩放至输出底图坐标系后的坐标。</div>
   - <div data-tips="true" data-tips-type="tip">若需将图层还原到输出底图中，建议优先使用 <code>absolute</code> 坐标。</div>
-
   - <div data-tips="true" data-tips-type="tip">若需将图层还原到任意自定义的画布中，可使用 <code>normalized</code> 坐标。</div>
 
 **模型支持**：
@@ -738,7 +739,7 @@ Seedream 5.0 pro / Seedream 5.0 flash 最多支持传入 10 张参考图；Seedr
 
 <div data-tips="true" data-tips-type="warning">将输出图层缩放至 <code>w × h</code>，再放置到目标画布的 <code>(x, y)</code> 位置。归一化坐标为整数，换算后可能存在取整误差。</div>
 
-**组图生成场景**
+**特殊字段（组图生成场景）**
 
 **error** `object` | 单图错误信息
 
