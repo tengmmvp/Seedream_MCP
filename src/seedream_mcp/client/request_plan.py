@@ -149,11 +149,11 @@ async def serialize_request_body(
     serializer: Callable[[dict[str, Any]], bytes],
     request_data: dict[str, Any],
 ) -> bytes:
-    """出站请求体序列化的单一派发点，共享计划与直连两条路径共用。
+    """出站请求体序列化的单一派发点。
 
     多 MB base64 参考图载荷的序列化经 CPU 卸载专用池执行，不与默认执行器的
     延迟敏感短任务同池排队。序列化前无现成字节长度，以 UTF-8 字节口径的载荷
-    规模估计对照下沉阈值，与镜像构建门控同口径，CJK 文本不因字符计数偏小而
+    规模估计对照卸载阈值，与镜像构建门控同口径，CJK 文本不因字符计数偏小而
     漏卸载；低于阈值同步执行省线程往返。
     """
     if should_offload_to_cpu_pool(request_data, value_leaf_cost=utf8_value_leaf_length):

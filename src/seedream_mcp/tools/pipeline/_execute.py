@@ -177,7 +177,7 @@ async def _auto_save_generation_images(
 
             if auto_save_results:
                 result = update_result_with_auto_save(result, auto_save_results, saveable_indices)
-                # 合并改写了 data，重新提取供展示与结构化输出复用。
+                # 合并改写了 data，重新提取。
                 images = extract_images(result)
             await safe_report_progress(ctx, progress=PROGRESS_AUTOSAVE_DONE, message="自动保存完成")
         except Exception as exc:
@@ -199,9 +199,9 @@ def _format_generation_outputs(
     saveable_indices: list[int],
 ) -> tuple[str, dict[str, Any]]:
     """结果格式化阶段：生成响应文本与 structuredContent。"""
-    # usage 与图片列表同口径一次净化，文本与结构化两出口共用同一结果。
+    # usage 与图片列表同口径一次净化。
     sanitized_usage = _sanitize_usage_or_empty(result)
-    # 失败消息与 usage 同模式一次计算，两出口共用同一判定产物。
+    # 失败消息与 usage 同模式一次计算。
     failure_message = (
         _failure_message_for_result(result) if response_reports_failure(result) else None
     )
@@ -324,7 +324,7 @@ async def execute_generation_handler(
             )
 
             is_generation_failed = response_reports_failure(result)
-            # 图片列表提取一次供自动保存与格式化阶段复用，避免重复提取。
+            # 图片列表提取一次，避免重复提取。
             images = extract_images(result)
             result, images, auto_save_results, saveable_indices, auto_save_error = (
                 await _auto_save_generation_images(
@@ -339,7 +339,7 @@ async def execute_generation_handler(
                 )
             )
 
-            # 单一显式净化步骤：净化一次返回新列表，文本与结构化两出口共用同一结果；
+            # 单一显式净化步骤：净化一次返回新列表。
             # 净化幂等，下游意外重复净化恒等无害。大批量净化下沉工作线程。
             sanitized_images = await asyncio.to_thread(_sanitize_image_errors, images)
 
@@ -353,8 +353,7 @@ async def execute_generation_handler(
                 saveable_indices=saveable_indices,
             )
         except Exception as exc:
-            # 用户文案与归约档案各算一次，日志、失败消息与结构化错误三出口共用，
-            # 免对同一异常重复执行净化管线与档案解析。
+            # 用户文案与归约档案各算一次，免对同一异常重复执行净化管线与档案解析。
             user_facing = format_error_for_user(exc)
             profile = resolve_error_profile(exc)
             log_tiered_failure(

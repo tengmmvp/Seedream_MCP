@@ -1,4 +1,4 @@
-"""HTTP 整数头与 query 的严格解析：transport、download、client 的 _http 与 webapp 预检共用单源。"""
+"""HTTP 整数头与 query 的严格解析。"""
 
 from __future__ import annotations
 

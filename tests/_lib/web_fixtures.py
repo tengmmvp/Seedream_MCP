@@ -6,11 +6,9 @@ web_asgi_client 与 web_get 供 webapp 与传输 e2e 测试文件发起回环 AS
 web_post_raw 以原始请求体 POST 供请求体解析分支用例，_assert_structured_failure
 断言 browse 与 generate 端点共享的结构化失败信封；
 drive_asgi_messages 直驱响应对象收集全部 ASGI 消息，asgi_start_headers 与
-asgi_body_bytes 自消息列取值，供绕过传输栈直调响应对象的用例共享；路由状态
-隔离 fixture 见 conftest 的 clean_web_routes；read_js_module_source 读取前端
-JS 模块源文本、function_body 以列首 } 结构锚点取函数体源文本、
-_assert_imported_from 断言符号经导入块引自指定兄弟模块，供静态资源契约
-断言共用。
+asgi_body_bytes 自消息列取值；路由状态隔离 fixture 见 conftest 的 clean_web_routes；
+read_js_module_source 读取前端 JS 模块源文本、function_body 以列首 } 结构锚点取函数体源文本、
+_assert_imported_from 断言符号经导入块引自指定兄弟模块。
 """
 
 from __future__ import annotations
@@ -190,7 +188,7 @@ def make_images_root_unresolvable(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
 
 def prepare_static_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """以 tmp 目录顶替静态资源目录，写入 index 页、脚本与 404 页供各用例消费。"""
+    """以 tmp 目录顶替静态资源目录，写入 index 页、脚本与 404 页。"""
     static_dir = tmp_path / "static"
     static_dir.mkdir()
     (static_dir / "index.html").write_text("<!doctype html><title>web</title>", encoding="utf-8")
@@ -228,7 +226,7 @@ def _assert_imported_from(source: str, module: str, *names: str) -> None:
 
 
 def make_png_bytes(width: int = 8, height: int = 8) -> bytes:
-    """生成一张 PIL 可解码的 PNG 字节，供图库、文件与缩略图端点测试使用。"""
+    """生成一张 PIL 可解码的 PNG 字节。"""
     from PIL import Image
 
     buffer = io.BytesIO()

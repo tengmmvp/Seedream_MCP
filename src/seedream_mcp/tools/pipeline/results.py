@@ -290,7 +290,7 @@ def update_result_with_auto_save(
 
 
 def _effective_raw_error(result: dict[str, Any]) -> Any:
-    """假值与纯空白串的错误载荷回落未知错误，文本与结构化出口共用同一缺失口径。"""
+    """假值与纯空白串的错误载荷回落未知错误。"""
     raw_error = result.get("error")
     if not raw_error or not has_message_value(raw_error):
         return "未知错误"
@@ -306,7 +306,7 @@ def _failure_render_context(result: dict[str, Any]) -> tuple[bool, int, Any]:
 def _failure_error_message(
     raw_error: dict[str, Any], *, aggregated: bool, message_limit: int
 ) -> str:
-    """dict 失败载荷的可读消息单次序回退链，文本与结构化两出口共用同一判定。
+    """dict 失败载荷的可读消息单次序回退链。
 
     聚合格式为本侧组装的 {type, message} 结构，直取 message 按传入上限净化；上游
     dict 仅 str message 享受优先级，非 str 形态不遮蔽阶梯、先走五级阶梯（其内部
@@ -334,14 +334,14 @@ def _failure_error_message(
 
 
 def _failure_message_from_context(aggregated: bool, message_limit: int, raw_error: Any) -> str:
-    """按渲染上下文推导失败可读消息，供现算与复用上下文的两类调用方共用。"""
+    """按渲染上下文推导失败可读消息。"""
     if isinstance(raw_error, dict):
         return _failure_error_message(raw_error, aggregated=aggregated, message_limit=message_limit)
     return sanitize_error_text(normalize_message_text(raw_error))
 
 
 def _failure_message_for_result(result: dict[str, Any]) -> str:
-    """失败结果可读消息的单点计算，文本与结构化出口及流水线共用同一产物。"""
+    """失败结果可读消息的单点计算。"""
     return _failure_message_from_context(*_failure_render_context(result))
 
 

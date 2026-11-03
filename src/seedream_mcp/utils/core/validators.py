@@ -56,7 +56,7 @@ FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
 # 整数字面量的严格语法：可选正负号加 ASCII 十进制数字，全角数字与下划线分隔
 # 等 int() 宽松写法一律拒绝。
 INT_TEXT_PATTERN = re.compile(r"[+-]?[0-9]+")
-# 图像宽高比上下限，输入参考图与输出尺寸校验共用；validation 由此导入，维持单一来源。
+# 图像宽高比上下限。
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
 # 生成工具类型白名单，目前仅支持联网搜索；schemas.GenerationToolType 枚举的取值
@@ -88,7 +88,7 @@ def _parse_pixel_size(size: str) -> tuple[int, int] | None:
     return int(matched.group(1)), int(matched.group(2))
 
 
-# 整数要求拒绝文案的共用模板：字段名以分类参数进入，多处构造点共享单一来源。
+# 整数要求拒绝文案的模板：字段名以分类参数进入。
 _INTEGER_REQUIRED_TEMPLATE = "{field} 必须是整数"
 
 
@@ -249,7 +249,7 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
 
 
 def validate_watermark(watermark: Any) -> bool:
-    """验证水印参数，接受布尔或布尔字符串，返回标准化后的布尔值。
+    """验证水印参数，接受布尔或布尔字符串，返回归一后的布尔值。
 
     布尔字符串经 parse_bool 解析，解析失败转抛 SeedreamValidationError 以保持
     校验层异常类型。
@@ -271,7 +271,7 @@ def validate_watermark(watermark: Any) -> bool:
 
 
 def validate_response_format(response_format: str) -> str:
-    """验证响应格式参数，仅接受 url 或 b64_json，返回小写标准化值。"""
+    """验证响应格式参数，仅接受 url 或 b64_json，返回小写归一值。"""
     if not isinstance(response_format, str):
         raise SeedreamValidationError(
             "response_format 必须为字符串", field="response_format", value=response_format
@@ -452,7 +452,7 @@ def validate_stream(stream: bool, model_id: str) -> bool:
 def validate_max_images(max_images: Any) -> int:
     """验证最大图像数量参数，确保为 1-15 内的整数。
 
-    委托 _coerce_int_in_range 完成校验，与其他整数参数共享统一的错误格式。
+    委托 _coerce_int_in_range 完成校验。
     """
     return _coerce_int_in_range(max_images, "max_images", 1, MAX_SEQUENTIAL_TOTAL_IMAGES)
 
@@ -532,7 +532,7 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
     的 "auto" 仅校验模型支持图层拆分，不走档位与像素校验。
 
     Returns:
-        标准化尺寸值：档位为大写，auto 为小写，像素规格归一为小写 x 分隔且
+        归一后的尺寸值：档位为大写，auto 为小写，像素规格归一为小写 x 分隔且
         剥离前导零。
 
     Raises:
@@ -820,7 +820,7 @@ def resolve_effective_generation_defaults(
     default_watermark: bool,
     layer_decomposition: bool = False,
 ) -> tuple[str, bool]:
-    """合成生成参数的生效缺省，工具上下文与 client 公共校验共用。
+    """合成生成参数的生效缺省。
 
     图层拆分场景缺省尺寸按输入图自适应取 auto，其余缺省尺寸取配置默认值；
     水印缺省取配置默认值。
@@ -887,7 +887,7 @@ def validate_reference_image_count(
     """校验参考图数量不超过模型参考图上限，上限由能力表按 model_id 判定。
 
     Returns:
-        校验依据的模型参考图上限，供调用方复用免于重复推导。
+        校验依据的模型参考图上限。
 
     Raises:
         SeedreamValidationError: 数量超过模型参考图上限时抛出。
@@ -971,15 +971,15 @@ def resolve_sequential_max_images(
 
 
 class ValidatedCommonParams(NamedTuple):
-    """生成类工具公共参数的校验结果，供 context 与 client 共享单一校验入口。
+    """生成类工具公共参数的校验结果。
 
     Attributes:
         prompt: 校验后的提示词文本；图层拆分场景未提供提示词时为 None。
         optimize_prompt_options: 校验后的提示词优化选项，未指定时为 None。
         size: 校验后的尺寸规格。
-        watermark: 标准化后的水印开关。
-        response_format: 小写标准化后的响应格式。
-        output_format: 小写标准化后的输出格式，未指定时为 None。
+        watermark: 归一后的水印开关。
+        response_format: 小写归一后的响应格式。
+        output_format: 小写归一后的输出格式，未指定时为 None。
         stream: 校验通过后的流式输出开关。
         tools: 校验后的生成工具数组，未指定时为 None。
     """

@@ -20,7 +20,7 @@ import seedream_mcp.server as server
 from seedream_mcp.server.runtime import _locate_validation_error, _targets_argument
 from seedream_mcp.tools.schemas import PROMPT_MAX_LENGTH
 
-# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
+# lifespan 复位 fixture reset_lifespan_singletons
 
 _STYLE_PROMPTS = {
     "seedream_style_anime": "日系动漫风格",

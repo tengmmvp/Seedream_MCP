@@ -48,7 +48,7 @@ class FakeSession:
         request_read_timeout_seconds: float | None,
         metadata: Any,
     ) -> None:
-        """记录一次 send_request 的调用参数，供调用形态断言消费。"""
+        """记录一次 send_request 的调用参数。"""
         self.send_request_calls.append(
             {
                 "request": request,

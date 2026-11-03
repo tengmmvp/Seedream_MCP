@@ -54,7 +54,7 @@ from seedream_mcp.utils.core.validators import (
 )
 from seedream_mcp.utils.core import executors, sanitizers
 
-# 生成工具元数据元组：三个守护测试共用，新增生成工具漏更任一测试即失败。
+# 生成工具元数据元组：新增生成工具漏更即测试失败。
 _GENERATION_TOOL_METADATA = (
     TEXT_TO_IMAGE,
     IMAGE_TO_IMAGE,

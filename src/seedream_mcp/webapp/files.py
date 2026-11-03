@@ -1,14 +1,14 @@
 """Web 操作台文件端点：缩略图与原图，均以图片目录为边界做越界防护。
 
 路径安全为形态与边界校验：空/绝对/前导分隔符/上跳段拒绝、扩展名白名单、
-resolve_against_base（与 browse 核心共用解析组合，盘符相对与 win32 冒号分量等
+resolve_against_base（盘符相对与 win32 冒号分量等
 形态随 normalize_path 单源拒绝）的界内判定；存在性由各端点自拒——缩略图由
 缓存链路的单次 no-follow stat 常规文件判定归 404，原图靠打开序列同口径拒绝；
 违规 400、未命中 404。
 图片目录解析与路径校验为同步文件系统操作，整体经 asyncio.to_thread
 下沉至工作线程；缩略图经落盘缓存免除重复解码，
 未命中解码受进程级信号量限流；原图以预开 no-follow 句柄为读源，
-经 _responses 的共享 _NoFollowFileResponse 应答，与 meta 静态页直出同源。
+经 _responses 的共享 _NoFollowFileResponse 应答。
 """
 
 from __future__ import annotations

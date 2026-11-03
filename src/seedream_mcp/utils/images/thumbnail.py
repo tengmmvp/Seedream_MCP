@@ -255,7 +255,7 @@ def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
 
 
 def reset_thumb_sweep_gate() -> None:
-    """复位全部缓存根的清理节流门，仅供测试隔离调用。"""
+    """复位全部缓存根的清理节流门。"""
     _thumb_sweep_after.clear()
 
 

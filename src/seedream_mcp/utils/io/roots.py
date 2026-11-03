@@ -210,8 +210,7 @@ def _roots_result_to_paths(roots_result: Any) -> list[Path]:
     """将 ListRootsResult 转换为去重后的本地路径列表。
 
     各 Root 的 file:// URI 转为本地路径，UNC 形式被 _file_uri_to_path 拒绝以避免
-    触发 SMB 连接，不可解析或重复的条目跳过。会话直连与 resolver 注入两条取回
-    路径共用本转换。
+    触发 SMB 连接，不可解析或重复的条目跳过。
     """
     resolved_roots: list[Path] = []
     for root in getattr(roots_result, "roots", []):
@@ -236,7 +235,7 @@ async def workspace_roots_scope_from_result(
 
     SEP-2577 非废弃形态：工具链不经 ctx.session.list_roots 直连，由 server 工具
     签名的 Resolve 依赖按协商版本取回后注入本函数消费。roots_result 为 None 表示
-    客户端未声明 roots capability，此处不设置边界、下游回退环境变量根；取回失败
+    客户端未声明 roots capability，此处不设置边界、下游回退到环境回退根；取回失败
     在调用层报错而非在此降级，不放宽文件访问边界。file URI 转 Path 的
     resolve 属同步文件系统调用，下沉工作线程执行，与 browse 链路的目录预解析
     同一口径。
@@ -299,8 +298,7 @@ def _file_uri_to_path(uri: str) -> Path | None:
 
     candidate = Path(path_part)
     # 有根无盘符形态在 win32 锚定当前盘根而非可判定的绝对位置，与 normalize_path
-    # 同口径拒绝；判定经 is_windows_rooted_without_drive 共用单一来源，POSIX 无
-    # drive 概念，绝对路径恒放行。
+    # 同口径拒绝；POSIX 无 drive 概念，绝对路径恒放行。
     if is_windows_rooted_without_drive(candidate):
         return None
     # win32 的 nturl2path 已把 /c:ads 先行转为 c:\ads，盘符相对形态经转换不可达，

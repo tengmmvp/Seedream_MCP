@@ -1,9 +1,8 @@
 """Seedream 模型家族解析与能力声明。
 
-集中管理各模型家族的识别与能力差异，含 output_format、tools、stream、组图、参考图
-上限等维度，供 validators、config、client、schemas 等共享，避免分散的子串判定与
-能力表重复。MODEL_CAPABILITIES 等数据表是数据驱动校验的唯一数据源，新增模型只需扩展
-数据表而无需修改调用方代码。
+集中管理各模型家族的识别与能力差异，含 output_format、tools、stream、组图、参考图上限等维度，
+避免分散的子串判定与能力表重复。MODEL_CAPABILITIES 等数据表是数据驱动校验的唯一数据源，
+新增模型只需扩展数据表而无需修改调用方代码。
 """
 
 from __future__ import annotations
@@ -45,7 +44,7 @@ class ModelCapabilities:
 
     Attributes:
         family: 模型家族规范名。
-        display_name: 面向用户输出的模型展示名，供错误消息引用。
+        display_name: 面向用户输出的模型展示名。
         supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
         max_reference_images: 参考图数量上限。
         supports_layer_decomposition: 是否支持 layer_decomposition 图层拆分。
@@ -216,7 +215,7 @@ MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
 
 
 class CapabilityLabel(NamedTuple):
-    """布尔能力开关的中文标签条目，门控报错与能力快照文案的单一来源。
+    """布尔能力开关的中文标签条目。
 
     Attributes:
         zh: 中文短语。
@@ -236,8 +235,7 @@ class CapabilityLabel(NamedTuple):
         return f"{self.zh}（{self.param}）"
 
 
-# 能力开关的中文标签表，validators 的能力门控报错与 get_model_info 的能力快照
-# 标签序共用；序与快照的 capabilities 字段序一致。
+# 能力开关的中文标签表，序与能力快照的 capabilities 字段序一致。
 CAPABILITY_LABELS: tuple[CapabilityLabel, ...] = (
     CapabilityLabel(
         "图层拆分", "layer_decomposition", "supports_layer_decomposition", "layer_decomposition"
@@ -297,7 +295,7 @@ def layer_decomposition_presets() -> frozenset[str]:
 
 
 def layer_decomposition_presets_text() -> str:
-    """返回图层拆分档位并集的斜杠拼接展示串，描述文案与 docstring 占位值共用。"""
+    """返回图层拆分档位并集的斜杠拼接展示串。"""
     return "/".join(sorted(layer_decomposition_presets(), key=preset_numeric_sort_key))
 
 
@@ -317,8 +315,8 @@ def limited_reference_families_annotation() -> str:
 def preset_numeric_sort_key(preset: str) -> tuple[float, str]:
     """尺寸档位的排序键：按数值前缀升序，其次按字典序保证稳定。
 
-    字典序会把 1.5K 排在 1K 之前，与档位的数值视觉顺序相反；数值前缀无法解析的
-    档位排在末尾，不阻断排序。载荷展示与校验报错文案共用本键，两处口径一致。
+    字典序会把 1.5K 排在 1K 之前，与档位的数值视觉顺序相反。
+    数值前缀无法解析的档位排在末尾，不阻断排序。
     """
     try:
         return (float(preset.removesuffix("K")), preset)
@@ -327,7 +325,7 @@ def preset_numeric_sort_key(preset: str) -> tuple[float, str]:
 
 
 def model_payloads() -> list[dict[str, object]]:
-    """按 MODEL_ALIASES 顺序产出各模型的能力展示载荷，供资源与 Web 清单共用。
+    """按 MODEL_ALIASES 顺序产出各模型的能力展示载荷。
 
     每条目含 alias 与 model_id 及 asdict 展开的能力字段；allowed_presets 归一为
     有序列表，能力表新增字段自动进入载荷，消费方无需手工同步字段清单。

@@ -15,7 +15,7 @@ from typing import Any, Mapping
 from .errors import as_plain_list, raw_error_text
 from ...definitions.conventions import MAX_IMAGE_PIXELS
 
-# 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源。
+# 无法推断扩展名时的默认图片扩展名。
 DEFAULT_IMAGE_EXTENSION = ".jpeg"
 
 # 格式家族表：家族名 -> 族内扩展名（小写含点号，族序与族内序即展示序）。
@@ -162,14 +162,14 @@ def is_known_image_bytes(content: bytes) -> bool:
 
 
 def format_file_size_mb(size_bytes: int) -> str:
-    """将字节数格式化为 MB 字符串，保留一位小数，供校验与保存模块共享。"""
+    """将字节数格式化为 MB 字符串，保留一位小数。"""
     return f"{size_bytes / 1024 / 1024:.1f}MB"
 
 
-# PIL 解码器就绪标志，images 与 io 两组的解码前置共用。
+# PIL 解码器就绪标志。
 _decoders_ready = False
 
-# 首次覆写前留存的 PIL 默认解压阈值，测试隔离复位共用。
+# 首次覆写前留存的 PIL 默认解压阈值。
 _pil_pristine_max_image_pixels: int | None = None
 
 
@@ -194,7 +194,7 @@ def ensure_image_decoders_ready() -> None:
 
 
 def format_file_too_large(size_bytes: int, max_size: int, label: str = "文件") -> str:
-    """构造数据大小超限的用户可见文案，输入校验与保存路径共用同一格式。
+    """构造数据大小超限的用户可见文案。
 
     label 为超限主体名称，Base64 估算与解码后等调用点传入各自主体；大小与上限的
     拼接格式在此单一收口，新增校验点不得再自行拼接。
@@ -210,7 +210,7 @@ def format_file_too_large_bytes(size_bytes: int, max_size: int, label: str = "�
     return f"{label}过大: {size_bytes} 字节，最大支持{max_size} 字节"
 
 
-# base64 解码尺寸估算与解码前剥离共用的空白模式源，str 模式 \s 含 NBSP 等异形空白。
+# base64 解码尺寸估算与解码前剥离的空白模式源，str 模式 \s 含 NBSP 等异形空白。
 BASE64_WHITESPACE_PATTERN = re.compile(r"\s+")
 
 

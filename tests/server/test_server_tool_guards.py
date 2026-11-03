@@ -1,7 +1,7 @@
 """工具注册面守护测试：带参工具的 roots 依赖注解与错误结果工具名对齐注册名。
 
 两处仅靠注释或平行常量维持的注册契约在此锁定：漏写 workspace_roots 解析
-注解的工具静默回退环境根；_run_tool_pipeline 传入的工具名常量与注册名错位
+注解的工具静默回退环境回退根；_run_tool_pipeline 传入的工具名常量与注册名错位
 使 structuredContent.tool 报旧名。
 """
 
@@ -16,7 +16,7 @@ from mcp.types import CallToolResult
 
 import seedream_mcp.server as server
 
-# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供。
+# lifespan 复位 fixture reset_lifespan_singletons
 
 # 五个带参工具各触发一次构造期校验错误的输入：text_to_image、multi_image_fusion、
 # sequential_generation 用 parallelism 大于 request_count 的跨字段规则，
@@ -49,7 +49,7 @@ def _parameterized_tools() -> list[Any]:
 
 
 def test_parameterized_tools_declare_workspace_roots_resolver() -> None:
-    """带参工具的 workspace_roots 形参挂 roots 解析注解，漏写即静默回退环境根。"""
+    """带参工具的 workspace_roots 形参挂 roots 解析注解，漏写即静默回退环境回退根。"""
     tools = _parameterized_tools()
     assert len(tools) >= 5
     for tool in tools:

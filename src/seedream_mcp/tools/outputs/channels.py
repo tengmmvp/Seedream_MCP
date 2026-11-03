@@ -13,7 +13,7 @@ from typing import Final
 
 from ...utils.core.errors import as_plain, raw_error_text
 
-# 全部输出通道名常量：缩略图预览与 JSON 镜像两个 content 通道，收发两侧共用同一来源。
+# 全部输出通道名常量：缩略图预览与 JSON 镜像两个 content 通道。
 PREVIEW_CHANNEL: Final[str] = "preview"
 MIRROR_CHANNEL: Final[str] = "mirror"
 

@@ -35,7 +35,7 @@ from _lib.generation_fixtures import make_generation_context
 
 
 def _context() -> GenerationExecutionContext:
-    """构造本文件共用的最小生成执行上下文，关闭自动保存。"""
+    """构造最小生成执行上下文，关闭自动保存。"""
     return make_generation_context(enable_auto_save=False)
 
 

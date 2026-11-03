@@ -93,7 +93,7 @@ def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_save_real_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """mock 单图保存成功且落盘真实 PNG，返回其路径供断言复用。
+    """mock 单图保存成功且落盘真实 PNG，返回其路径。
 
     mock 挂在 save_image 而非 save_multiple_images：批量编排真实执行，其对
     self.save_image 的调用运行时解析命中补丁，保存动作替换为返回真实落盘的 PNG。

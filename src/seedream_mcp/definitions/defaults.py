@@ -4,16 +4,16 @@
 新增默认值按所属组落位。
 """
 
-# 并发准入：config 字段默认与 executors 池深推导回退共用。
+# 并发准入。
 DEFAULT_GENERATE_CONCURRENCY = 3
 DEFAULT_IMAGE_PREPARE_CONCURRENCY = 5
 
-# 日志：config 字段默认与 setup_logging 签名默认共用。
+# 日志。
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_LOG_ROTATION_SIZE_MB = 5
 DEFAULT_LOG_RETENTION_DAYS = 7
 
-# 自动保存：config 字段默认与 download、save 的签名默认共用。
+# 自动保存。
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 30
 DEFAULT_DOWNLOAD_MAX_RETRIES = 3
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024

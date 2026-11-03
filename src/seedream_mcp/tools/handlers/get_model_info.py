@@ -98,7 +98,7 @@ def build_model_info_description() -> str:
 
 
 def build_model_info_text(payload: dict[str, Any]) -> str:
-    """将能力快照渲染为模型可读的中文摘要，「支持/不支持」两行与工具描述共用标签序。"""
+    """将能力快照渲染为模型可读的中文摘要。"""
     caps: dict[str, Any] = payload["capabilities"]
     if payload["family"] == MODEL_FAMILY_UNKNOWN:
         lines = [f"当前模型：{payload['model_id']}（未识别家族，能力按全放行兜底）"]
@@ -130,7 +130,6 @@ async def handle_get_model_info(config: SeedreamConfig) -> CallToolResult:
             build_model_info_text(payload), structured, is_error=False
         )
     except Exception as exc:
-        # 用户文案单次计算供日志与结构化错误共用。
         user_facing = format_error_for_user(exc)
         log_tiered_failure(logger, exc, "模型信息查询失败", user_facing=user_facing)
         structured = build_error_structured(

@@ -1,8 +1,8 @@
 """Web 操作台图库浏览端点：图片目录边界校验后透传 browse 工具并收敛前端消费形态。
 
-与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务图片目录内文件，图库
-浏览同样以图片目录为界，请求目录经 resolve_against_base 与 browse 核心共用同一
-解析组合，越出图片目录在端点拒绝，解析结果透传 browse 复用，免同请求重复解析。
+与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务图片目录内文件，
+图库浏览同样以图片目录为界，请求目录经 resolve_against_base 解析，
+越出图片目录在端点拒绝，解析结果透传 browse 复用，免同请求重复解析。
 browse 条目为绝对路径，Web 层改写为图片目录相对形态供前端直接拼接为图片端点参数。
 """
 
@@ -41,7 +41,7 @@ def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
 
 
 async def _resolve_request_directory(directory: str, images_root: Path) -> BoundedResolution | None:
-    """经共享解析组合解析请求目录，供端点拒绝判定与 browse 复用。
+    """解析请求目录。
 
     形态非法时返回 None，交 browse 核心以原语义报具体原因。
     """
@@ -64,7 +64,7 @@ async def web_browse(request: Request) -> Response:
     """图库浏览端点，请求体经 BrowseImagesInput 校验后透传 browse 工具。
 
     端点各失败分支均回浏览族结构化错误，与 runner 失败结果形态一致；
-    请求体解析、参数校验与图片目录解析经 _responses.entry_preamble 与生成端点共享，
+    请求体解析、参数校验与图片目录解析经 _responses.entry_preamble，
     下沉口径与早期失败形态单点维护。
     """
     preamble = await _responses.entry_preamble(request, BROWSE_IMAGES_TOOL_NAME, BrowseImagesInput)

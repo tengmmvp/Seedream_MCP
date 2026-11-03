@@ -70,8 +70,7 @@ def _sanitize_value_tree(value: Any, sanitize_string: Callable[[Any], Any]) -> A
     """以显式栈迭代净化任意嵌套的 dict/list 树，字符串值经 sanitize_string 处理，
     dict 键压平控制字符，压平碰撞以 <dup> 后缀保留。
 
-    迭代遍历使深嵌套不触发解释器递归上限；循环引用以 <truncated:cyclic> 占位终止
-    展开。usage 净化与未知键净化共用本核心，仅字符串净化函数不同。
+    迭代遍历使深嵌套不触发解释器递归上限；循环引用以 <truncated:cyclic> 占位终止展开。
     """
     if not isinstance(value, (dict, list)):
         return _sanitize_leaf(value, sanitize_string)
@@ -153,7 +152,7 @@ def _sanitize_unknown_value(value: Any) -> Any:
 def sanitize_error_dict(
     error: dict[str, Any], *, message_limit: int = MESSAGE_OUTPUT_LIMIT
 ) -> dict[str, Any]:
-    """净化错误 dict 的各分量，返回净化后的新 dict，供全部错误出口共用。
+    """净化错误 dict 的各分量，返回净化后的新 dict。
 
     键名在拷贝入口压平控制字符（碰撞以 <dup> 后缀保留），message 与 code 归一化
     后过错误文本通道，其余键值经容器净化，凭据与 CRLF 不借旁路键穿透；
@@ -242,8 +241,7 @@ _REQUEST_FAILED_TYPE = "image_generation.request_failed"
 def message_limit_for(trusted_message: bool) -> int:
     """消息净化上限单点：本侧组装产物走防御性宽限，上游自由文本走错误通道上限。
 
-    结果聚合与图片项净化共用本判定，宽限策略调整只改此处；组装标记的判定经
-    下方 trusted_* 单点函数接入。
+    宽限策略调整只改此处。组装标记的判定经下方 trusted_* 单点函数接入。
     """
     return DATA_OUTPUT_LIMIT if trusted_message else MESSAGE_OUTPUT_LIMIT
 

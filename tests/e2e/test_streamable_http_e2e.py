@@ -50,8 +50,8 @@ def _tools_call_request(name: str, arguments: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-# 传输栈复位 fixture reset_http_app_state 由 tests/conftest.py 共享提供，
-# 在 lifespan 复位之上额外清空 streamable-http 会话管理器引用
+# 传输栈复位 fixture reset_http_app_state，
+# 在 lifespan 复位之上额外清空 streamable-http 会话管理器引用。
 
 
 async def test_e2e_valid_token_tools_list_returns_200(reset_http_app_state: None) -> None:

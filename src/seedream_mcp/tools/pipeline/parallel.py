@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from loguru import Logger
 
 
-# lifespan 共享资源取值的泛型辅助，三处资源探测共用。
+# lifespan 共享资源取值的泛型辅助。
 _T = TypeVar("_T")
 
 # 批次尾部排空进度发送的有界等待，超时后取消发送任务、放弃剩余进度

@@ -97,7 +97,7 @@ def _assemble_streamable_http_app(
     config: SeedreamConfig | None = None,
     web_enabled: bool = False,
 ) -> Any:
-    """按生产装配序构建 streamable-http 栈，供 build_transport_app 与 build_web_app 共享。
+    """按生产装配序构建 streamable-http 栈。
 
     中间件经 transport._attach_streamable_http_middleware 复用生产装配且顺序同源，
     transport_security 按绑定地址派生后与其余传输参数直传 streamable_http_app。

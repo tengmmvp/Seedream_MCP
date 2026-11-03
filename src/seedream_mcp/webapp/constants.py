@@ -85,7 +85,7 @@ STATIC_MIME_ALLOWLIST: dict[str, str] = {
 # 静态挂载封禁的页面扩展族：页面只经 meta 端点携带安全头直出，直达不出页面内容。
 STATIC_PAGE_EXTENSIONS: tuple[str, ...] = (".html", ".htm", ".xhtml")
 
-# 各 API 端点路径常量，routes 注册与测试断言共用单一来源。
+# 各 API 端点路径常量。
 WEB_API_CONFIG_INFO = f"{WEB_API_PREFIX}/config-info"
 WEB_API_GENERATE_TEXT_TO_IMAGE = f"{WEB_API_PREFIX}/generate/text-to-image"
 WEB_API_GENERATE_IMAGE_TO_IMAGE = f"{WEB_API_PREFIX}/generate/image-to-image"

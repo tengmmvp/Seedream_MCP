@@ -128,7 +128,7 @@ class ErrorText:
         return self._substitute()
 
     def safe_text(self) -> str:
-        """用户通道渲染：空值尾形终止后经截断与全套脱敏管线，产物幂等。"""
+        """用户通道渲染：空值尾形终止后经截断与全套净化管线，产物幂等。"""
         return sanitize_error_text(terminate_empty_value_credential_tails(self._substitute()))
 
     def assembled_text(self) -> str:
@@ -349,8 +349,7 @@ def response_reports_failure(result: dict[str, Any]) -> bool:
 
 
 # HTTP 错误响应与异常类型的统一归约档案：状态码与异常类到展示标题、用户建议、
-# 结构化错误码与应答状态的单点映射，handle_api_error、format_error_for_user
-# 与 _classify_generation_error_type 共用，webapp 状态表自 http_status 派生，
+# 结构化错误码与应答状态的单源映射，webapp 状态表自 http_status 派生，
 # 新增状态码或调整文案只需改这一处。
 @dataclass(frozen=True)
 class _ErrorProfile:
@@ -557,7 +556,7 @@ _UNKNOWN_PROFILE = _ErrorProfile("未知错误", "", "generation_failed", http_s
 
 
 def resolve_error_profile(error: Exception) -> _ErrorProfile:
-    """将任意异常归约为统一的错误档案，供展示标题、用户建议与结构化错误码共用。
+    """将任意异常归约为统一的错误档案。
 
     APIError 按状态码查 _HTTP_STATUS_PROFILES，其余按异常类型匹配，基类与未识别
     异常回退到各自兜底档案。

@@ -21,7 +21,7 @@ from seedream_mcp.config import ENV_FAMILY_PREFIXES, SeedreamConfig
 
 
 def _warn_sdk_private_path_missing(path: str, impact: str) -> None:
-    """SDK 私有路径缺失的统一告警，conftest 内各私有适配点共用。"""
+    """SDK 私有路径缺失的统一告警。"""
     from seedream_mcp.utils.core.logs import get_logger
 
     get_logger().warning("SDK 私有路径 {} 已变更，{}，请适配新版 MCP SDK。", path, impact)

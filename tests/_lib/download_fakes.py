@@ -275,7 +275,7 @@ def _patch_download_network(
 
 
 def _png_success_response() -> _FakeResponse:
-    """构造合法 200 PNG 响应，供重试后成功落盘路径使用。"""
+    """构造合法 200 PNG 响应。"""
     return _FakeResponse(
         status=200,
         headers={"content-type": "image/png", "content-length": str(len(_PNG_BYTES))},

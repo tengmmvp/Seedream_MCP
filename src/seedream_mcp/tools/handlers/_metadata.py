@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 def _default_start_log_values(
     context: "GenerationExecutionContext",
 ) -> tuple[Any, ...]:
-    """构造三个生成工具共享的开始日志参数元组。"""
+    """构造开始日志参数元组。"""
     return (
         len(context.prompt or ""),
         context.size,

@@ -25,12 +25,12 @@ from ..io.path import get_read_scope, resolve_images_root
 # 与 Data URI 的归一化结果是输入的纯函数，读权限隔离元组恒为空。
 PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 
-# 批内共享的读取上下文：(图片目录, 读权限列表)，供缓存键隔离与签名定位一次求值。
+# 批内共享的读取上下文：(图片目录, 读权限列表)。
 ReadContext = tuple[Path, list[Path]]
 
 
 def _current_read_context() -> tuple[tuple[str, ...], Path, list[Path]]:
-    """一次求值 (读权限字符串元组, 图片目录, 读权限列表)，供本地输入共享。
+    """一次求值 (读权限字符串元组, 图片目录, 读权限列表)。
 
     含首次 resolve 的文件系统调用，调用方在工作线程执行。
     """
@@ -96,7 +96,7 @@ class ImagePreparer:
 
     预处理结果按 (输入, 读权限, 本地文件签名) 缓存，本地文件纳入
     mtime+size 防内容替换返回陈旧编码；同一键的并发 miss 复用同一在途 task。
-    并发上限经 loop_bound 进程级信号量约束，单图与批量调用共用；
+    并发上限经 loop_bound 进程级信号量约束；
     仅实际执行预处理的调用占用并发槽位，缓存命中与在途等待在槽外完成。
     """
 
@@ -126,8 +126,7 @@ class ImagePreparer:
     ) -> LocalImageCandidate | None:
         """定位本地输入的候选文件，返回 (resolve 后物理路径, stat)。
 
-        URL、data URI 与无法定位文件的输入返回 None，缓存签名由调用方从 stat
-        派生。候选定位与 inputs 的读取路径共用 resolve_local_image_candidate，
+        URL、data URI 与无法定位文件的输入返回 None，缓存签名由调用方从 stat 派生。
         签名与读取锁定同一文件；images_root 与 read_scope 未提供时现取，批内调用传入
         共享上下文消除逐图重复求值。
 
@@ -313,7 +312,7 @@ class ImagePreparer:
         return await entry.consume(on_cancel=_transfer_slot)
 
     async def _prepare_and_cache(self, image: str, cache_key: PrepareCacheKey) -> str:
-        """执行图像预处理并写入 LRU 缓存，供单飞去重复用。
+        """执行图像预处理并写入 LRU 缓存。
 
         在途登记由创建方经完成回调按条目身份清理；创建者被取消时 task 继续运行
         直至完成，保护共享同一 task 的其他等待者，避免连带取消。

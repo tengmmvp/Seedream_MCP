@@ -136,7 +136,7 @@ function renderConfigInfo() {
   updateToolAvailability();
 }
 
-/** 图层拆分开关可见且勾选时生效；选项集、请求标志与提示词校验三处共用。 */
+/** 图层拆分开关可见且勾选时生效。 */
 function layerDecompositionActive() {
   return (
     !$("layer-field").classList.contains("collapsed") &&

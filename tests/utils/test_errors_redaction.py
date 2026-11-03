@@ -530,7 +530,7 @@ def test_sanitize_assembled_text_absorbs_bare_guidance_after_empty_value_tail() 
 
 
 class _TerminationSubSpy:
-    """记录 sub 调用的替身模式，供前置守卫的跳过行为断言复用。"""
+    """记录 sub 调用的替身模式。"""
 
     def __init__(self, real: re.Pattern[str]) -> None:
         self._real = real
@@ -1140,7 +1140,7 @@ def test_sanitize_error_text_blocks_fullwidth_separator_bypass() -> None:
 
 
 def test_sanitize_error_text_passes_through_non_strings() -> None:
-    """sanitize_error_text 对非字符串原样返回，供结构化字段安全复用。"""
+    """sanitize_error_text 对非字符串原样返回。"""
     assert sanitize_error_text(42) == 42
     assert sanitize_error_text(None) is None
 

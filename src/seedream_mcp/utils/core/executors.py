@@ -3,7 +3,7 @@
 大体量 json.loads 与 PIL 解码这类百毫秒至秒级任务，与默认执行器里的路径
 解析、mkdir 等延迟敏感短任务同池排队会放大短任务尾延迟；本模块为长任务
 提供专用线程池，进程内全部事件循环共用同一实例。load_json_bytes 为 JSON
-字节解析的阈值分派原语，Web 请求体与客户端响应解析共用。
+字节解析的阈值分派原语。
 """
 
 from __future__ import annotations
@@ -30,8 +30,7 @@ CPU_OFFLOAD_THREAD_PREFIX = "seedream-cpu-offload"
 
 # 池深封顶防止调高并发配置催生无界线程数。
 _CPU_OFFLOAD_MAX_WORKERS_CAP = 32
-# 预览解码并发的单一定义点，池深加数与 thumbnail 的解码限流信号量共用；
-# 像素上限 36MP 的单张解码最坏逾百 MB，并发 3 封顶瞬态。
+# 预览解码并发的单一定义点：像素上限 36MP 的单张解码最坏逾百 MB，并发 3 封顶瞬态。
 CPU_OFFLOAD_DECODE_SLOTS = 3
 # 池深下限兜底无准入闸的 webapp 请求体解析并发，量级取 8 核宿主上 asyncio
 # 默认执行器的池深 min(32, cpu+4)。
@@ -114,7 +113,7 @@ class CpuOffloadPoolClosedError(RuntimeError):
     """CPU 卸载池关闭使任务提交被拒或排队任务被取消时 run_in_cpu_pool 的失败形态，供调用点按类型兜底。"""
 
 
-# 下沉尺寸门槛的单一来源：低于该量级的序列化与解析在微秒级完成，线程往返得不偿失，
+# 卸载阈值的单一来源：低于该量级的序列化与解析在微秒级完成，线程往返得不偿失，
 # 64KB 起的载荷阻塞事件循环的代价才超过调度开销。
 CPU_OFFLOAD_SIZE_THRESHOLD = 64 * 1024
 
@@ -170,7 +169,7 @@ async def run_in_cpu_pool(func: Callable[..., T], /, *args: Any) -> T:
 
 
 async def load_json_bytes(raw: bytes | bytearray) -> Any:
-    """JSON 字节解析的共享分派：达卸载阈值下沉长时 CPU 专用池，池关闭原样上抛 CpuOffloadPoolClosedError。"""
+    """JSON 字节解析的共享分派：达卸载阈值下沉 CPU 卸载池，池关闭原样上抛 CpuOffloadPoolClosedError。"""
     if should_offload_size(len(raw)):
         return await run_in_cpu_pool(json.loads, raw)
     return json.loads(raw)

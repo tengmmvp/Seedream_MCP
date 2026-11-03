@@ -87,7 +87,7 @@ async def _auto_save(
     download_manager: DownloadManager | None = None,
     images: list[dict[str, Any]] | None = None,
 ) -> AutoSaveOutcome:
-    """执行 URL 与 Base64 两个自动保存入口共用的保存流程。
+    """执行 URL 与 Base64 两个自动保存入口的保存流程。
 
     Args:
         spec: 保存路径差异常量，携带取值键、保存方法名与空数据告警文案。

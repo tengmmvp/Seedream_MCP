@@ -248,7 +248,7 @@ def active_request_state_keys() -> tuple[bytes, ...] | None:
         )
     except SeedreamConfigError:
         return None
-    # 环判定与配置构建共用同一谓词，不合法值按未配置处理，避免喂给 SDK 在导入期崩溃。
+    # 不合法值按未配置处理，避免喂给 SDK 在导入期崩溃。
     if keys is not None and _first_invalid_request_state_key_message(keys) is not None:
         return None
     return keys

@@ -146,7 +146,7 @@ _DRAIN_TIMEOUT_SECONDS = 10.0
 
 
 async def drain_background_cleanup_tasks() -> None:
-    """限时等待在途的后台清理任务完成，供进程级退出清理调用。
+    """限时等待在途的后台清理任务完成。
 
     请求路径的 close 不等待清理以免阻塞返回路径；stdio 经 lifespan teardown、
     streamable-http 经退出清理间接调用本函数。任务失败已在任务内写入失败退避
@@ -313,7 +313,7 @@ async def _run_save_with_degradation(
     log_label: str,
     log_context: str,
 ) -> AutoSaveResult:
-    """执行保存操作并把各类异常统一降级为失败结果，URL 与 Base64 两条保存路径共用。
+    """执行保存操作并把各类异常统一降级为失败结果。
 
     known_errors 内的已知异常按原文透传，OSError 归为文件系统错误，其余异常归为
     未知错误。日志与返回文案由 log_label 与 log_context 拼出，log_context 为空串时
@@ -351,15 +351,9 @@ async def _run_save_with_degradation(
         )
 
 
-def _entry_url(data: dict[str, Any]) -> str:
-    """取条目 url 并收敛为 str，缺失与非 str 形态按空串处理。"""
-    value = data.get("url")
-    return value if isinstance(value, str) else ""
-
-
-def _entry_b64_json(data: dict[str, Any]) -> str:
-    """取条目 b64_json 并收敛为 str，缺失与非 str 形态按空串处理。"""
-    value = data.get("b64_json")
+def _entry_str(data: dict[str, Any], key: str) -> str:
+    """取条目字段并收敛为 str，缺失与非 str 形态按空串处理。"""
+    value = data.get(key)
     return value if isinstance(value, str) else ""
 
 
@@ -604,7 +598,7 @@ class AutoSaveManager:
 
         b64decode/sha256 均为 CPU 密集或全量遍历操作，同步实现供调用方按载荷尺寸选择执行池。
         """
-        # None 判定仅作类型收窄，缺失口径单源于 has_message_value。
+        # None 判定仅作类型收窄。
         if payload is None or not has_message_value(payload):
             raise AutoSaveError("空的Base64数据")
 
@@ -827,7 +821,7 @@ class AutoSaveManager:
         # 默认参数绑定当前项：闭包晚绑定会使全部工厂引用同一循环变量。
         factories = [
             lambda data=data: self.save_image(
-                url=_entry_url(data),
+                url=_entry_str(data, "url"),
                 prompt=data.get("prompt", ""),
                 tool_name=tool_name,
                 custom_name=data.get("custom_name"),
@@ -854,7 +848,7 @@ class AutoSaveManager:
         logger.info("开始批量保存 {} 个 Base64 图片", len(image_data))
         factories = [
             lambda data=data: self.save_base64_image(
-                b64_data=_entry_b64_json(data),
+                b64_data=_entry_str(data, "b64_json"),
                 prompt=data.get("prompt", ""),
                 tool_name=tool_name,
                 custom_name=data.get("custom_name"),

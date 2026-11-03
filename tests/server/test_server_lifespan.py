@@ -18,7 +18,7 @@ import seedream_mcp.server._registration as registration_module
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.schemas import ResponseFormat, TextToImageInput
 
-# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
+# lifespan 复位 fixture reset_lifespan_singletons
 
 
 async def test_app_lifespan_yields_config_and_client(

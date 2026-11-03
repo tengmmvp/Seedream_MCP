@@ -1,4 +1,4 @@
-"""单文件覆盖率下限校验，供 CI 与 release 工作流共用。
+"""单文件覆盖率下限校验。
 
 下限取 pyproject [tool.coverage_floors].file_coverage_min，branch 开启后为
 语句+分支合并口径；测量取 coverage.json，任一文件低于下限或无测量数据即失败退出。

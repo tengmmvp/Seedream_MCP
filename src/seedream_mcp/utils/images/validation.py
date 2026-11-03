@@ -2,7 +2,7 @@
 
 涉及 I/O 的图像校验归本模块：本地文件经 no-follow 打开并复核常规文件形态后
 读取字节，交 PIL 解码校验格式与维度，Data URI 经 base64 解码后同样校验；
-纯参数校验（尺寸、水印、prompt 等）与宽高比常量归 validators，本模块从其导入共用。
+纯参数校验（尺寸、水印、prompt 等）与宽高比常量归 validators。
 validate_image_path 组合读权限边界判定与统一规则校验。首次使用时进程级覆写
 PIL.Image.MAX_IMAGE_PIXELS 为 36M，
 嵌入本包的宿主进程须感知该副作用。
@@ -64,11 +64,11 @@ logger = get_logger()
 # 对象的内存地址，直接拼入用户可见消息会把服务器侧对象地址带给调用方。
 UNIDENTIFIED_IMAGE_MESSAGE = "无法识别的图像内容"
 
-# 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用。
+# 输入图像文件大小上限。
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024
 
 # 参考图即输入图像：最短边上限在此，总像素上限由 definitions/conventions 单一来源提供，
-# 宽高比上下限由 validators 持有共用。
+# 宽高比上下限由 validators 持有。
 MIN_IMAGE_EDGE = 15
 
 # 本地候选定位结果：(resolve 后物理路径, stat)，缓存签名计算与读取链共用同一候选。
@@ -150,8 +150,7 @@ def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> str:
 def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> str:
     """解码校验格式与维度并把 PIL 原生异常统一包装为固定文案的校验错误。
 
-    本地文件与 Data URI 两条路径共用的异常包装单一来源，透传解码得到的实际
-    格式名。
+    异常包装单一来源，透传解码得到的实际格式名。
 
     Returns:
         PIL 识别的实际格式名，如 ``PNG``。
@@ -177,7 +176,7 @@ def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> str
 
 
 def is_unidentified_image_error(exc: BaseException) -> bool:
-    """判断异常是否为 PIL.UnidentifiedImageError，供各解码失败包装分支共用。"""
+    """判断异常是否为 PIL.UnidentifiedImageError。"""
     from PIL import UnidentifiedImageError
 
     return isinstance(exc, UnidentifiedImageError)
@@ -189,7 +188,7 @@ def read_and_decode_local_image(
     field_value: str,
     format_read_error: Callable[[OSError], str | ErrorText],
 ) -> tuple[bytes, str]:
-    """no-follow 读取本地图像字节并做形态复核、限额复核、格式维度校验与出站标签一致性判定，供校验与读取两条路径复用。
+    """no-follow 读取本地图像字节并做形态复核、限额复核、格式维度校验与出站标签一致性判定。
 
     非常规文件由 files.open_no_follow_read 在打开单点拒绝。读取失败的文案由
     调用方经 format_read_error 生成；超限、格式、维度与解码失败用
@@ -261,8 +260,7 @@ def _resolve_local_image_path(file_path: str) -> Path:
             raw_error_text("拒绝 UNC 路径以避免触发 SMB 连接: {path}", path=as_text(file_path))
         )
     raw_path = Path(file_path)
-    # 盘符相对与有根无盘符形态的 pathlib 拼接会丢弃基目录重设锚点，静默逃逸
-    # 图片目录；判定与 normalize_path 共用单一来源。
+    # 盘符相对与有根无盘符形态的 pathlib 拼接会丢弃基目录重设锚点，静默逃逸图片目录。
     if is_drive_relative(raw_path):
         raise ValueError(
             raw_error_text(
@@ -307,7 +305,7 @@ def _validate_url(url: str) -> str:
 
 
 def image_candidate_stat(path: Path) -> os.stat_result | None:
-    """返回通过图片文件资格检查的 stat，供候选定位与读取路径共用同一规则。
+    """返回通过图片文件资格检查的 stat。
 
     资格规则：常规文件、扩展名在支持白名单、大小不超过 MAX_IMAGE_FILE_SIZE；
     任一不满足或 stat 失败返回 None。
@@ -333,7 +331,7 @@ def iter_local_candidates(
     绝对路径直接作为候选，相对路径以 base_dir（图片目录）拼接；候选 resolve 一次
     后按形态判定：绝对候选与读权限集合逐项比较，相对候选须落在图片目录之内，
     ``..`` 与符号链接逃逸同样被拦截。UNC 前缀的候选不 resolve，避免在 Windows
-    触发 SMB 认证。候选定位与越界判定两条路径共用本迭代器，保证判定口径一致。
+    触发 SMB 认证。
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
@@ -346,15 +344,12 @@ def iter_local_candidates(
     is_absolute = os.path.isabs(image)
     raw_path = Path(image)
     # win32 有根无盘符形态（/foo）的 pathlib 拼接锚定重置会丢弃 base_dir 落到所在
-    # 盘盘根，按输入形态前置跳过；判定经 is_windows_rooted_without_drive 与
-    # normalize_path 共用单一来源，POSIX 该形态即合法绝对路径。
+    # 盘盘根，按输入形态前置跳过。POSIX 该形态即合法绝对路径。
     if is_windows_rooted_without_drive(raw_path):
         return
     candidates = [raw_path] if is_absolute else [Path(base_dir) / image]
     for candidate in candidates:
-        # 驱动器相对形态（C:foo）pathlib 拼接会丢弃 base_dir 锚定到该盘进程 CWD，
-        # 判定经 is_drive_relative 与 normalize_path 共用单一来源，消除两条链路的
-        # 判定分叉。
+        # 驱动器相对形态（C:foo）pathlib 拼接会丢弃 base_dir 锚定到该盘进程 CWD。
         if is_drive_relative(candidate):
             continue
         # UNC 根拼接出的候选仍以 UNC 前缀开头，resolve 会触发 SMB 连接，跳过。
@@ -419,8 +414,7 @@ def resolve_local_image_candidate(
                 value=image,
             )
     # 分量含冒号是 NTFS 备用数据流形态，流名不参与越界判定，界内文件名携带流
-    # 后缀时读取命中的是同文件的另一数据流；判定与 normalize_path 共用单一来源，
-    # 参考图链与浏览、保存链拒绝口径一致。
+    # 后缀时读取命中的是同文件的另一数据流。参考图链与浏览、保存链拒绝口径一致。
     if has_windows_colon_component(image):
         raise SeedreamValidationError(
             error_text(
@@ -431,7 +425,7 @@ def resolve_local_image_candidate(
             value=image,
         )
     # 空字节在候选构造前显式拒绝：stat 对其抛 ValueError 而非 OSError，会穿透
-    # 候选资格检查归为未知错误；判定与 normalize_path 共用单一来源。
+    # 候选资格检查归为未知错误。
     if has_null_byte(image):
         raise SeedreamValidationError(
             error_text("路径含空字节: {image}", image=as_text(image)),
@@ -546,7 +540,6 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
             )
 
         if not skip_dimensions:
-            # 读取与解码校验经共享辅助，与 inputs 的读取链同一安全语义。
             read_and_decode_local_image(
                 path,
                 field_value=file_path,
@@ -580,7 +573,7 @@ def _validate_data_uri(data_uri: str) -> str:
     用户侧大小写误写不再依赖上游报错。
     """
     try:
-        # 经 formats.parse_data_uri 统一拆分，与 save 共用单一解析。
+        # 经 formats.parse_data_uri 统一拆分。
         media_type, b64, is_base64 = parse_data_uri(data_uri)
         if media_type is None or not b64:
             raise SeedreamValidationError("Data URI 格式无效", field="image", value=data_uri)

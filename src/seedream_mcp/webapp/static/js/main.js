@@ -36,7 +36,7 @@ function currentView() {
   return location.hash === "#/gallery" ? "gallery" : "generate";
 }
 
-// 令牌补齐与首次启动共用的初始化序列：配置就绪后进入工作台并补刷图库。
+// 初始化序列：配置就绪后进入工作台并补刷图库。
 async function bootstrapAfterAuth() {
   await loadConfigInfo();
   hideTokenGate();
@@ -122,7 +122,7 @@ function bindEvents() {
     refreshGallery();
   });
   $("gallery-next").addEventListener("click", () => {
-    // 推进资格与按钮禁用共用 canAdvanceGallery，复查兜底状态更新与渲染的间隙。
+    // 复查兜底状态更新与渲染的间隙。
     if (canAdvanceGallery()) {
       advanceGalleryOffset();
       refreshGallery();

@@ -361,7 +361,7 @@ def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None
 
 
 def _two_url_result() -> dict[str, Any]:
-    """构造两张可保存图片的归一化结果，供索引不对齐场景复用。"""
+    """构造两张可保存图片的归一化结果。"""
     return {
         "success": True,
         "data": [

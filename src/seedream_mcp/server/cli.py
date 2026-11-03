@@ -221,9 +221,8 @@ def validate_transport_args(args: argparse.Namespace) -> str | None:
     """校验传输相关 CLI 参数组合，返回错误消息；参数合法时返回 None。
 
     仅 streamable-http 需要校验：TLS 证书与私钥必须成对提供或同时省略；
-    --auth-token 显式提供时校验最短长度与可打印 ASCII 字符集，失败原因取自配置侧共用闸口；
-    --host 同样校验非空与可打印 ASCII 字符集，与装配期守卫共用判定谓词
-    与理由子句，参数校验期早拒。
+    --auth-token 显式提供时校验最短长度与可打印 ASCII 字符集；
+    --host 同样校验非空与可打印 ASCII 字符集，参数校验期早拒。
     """
     if args.transport != "streamable-http":
         return None

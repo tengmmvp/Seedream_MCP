@@ -274,7 +274,7 @@ def sync_cleanup() -> None:
 
 
 def _reset_lifespan_state() -> None:
-    """复位 lifespan 单例、全局配置、初始化锁与关联模块状态，仅供测试隔离调用。
+    """复位 lifespan 单例、全局配置、初始化锁与关联模块状态。
 
     重建 _shared_init_lock 避免跨事件循环复用旧锁；_global_config 一并复位避免
     跨用例残留，赋值经函数内延迟 import 取当前 config 模块对象，测试重载模块后
@@ -476,7 +476,7 @@ def _warn_rebind_failure_on_stderr(
 def locate_request_state_boundary() -> RequestStateBoundary | None:
     """返回单例 middleware 链中的 requestState boundary，探测失败返回 None。
 
-    rebind 与测试侧的 boundary 定位共用本单点，SDK 私有路径变更时只改此处。
+    SDK 私有路径变更时只改此处。
     """
     return next(
         (

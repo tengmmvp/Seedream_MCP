@@ -148,8 +148,8 @@ class SeedreamConfig:
         stream_buffer_max_size: SSE 流式响应缓冲区上限字节数。
         sse_event_max_size: 单个 SSE 事件的截断阈值字节数；None 时按缓冲区上限与
             单图 base64 最坏展开二者的较大值推导。
-        response_body_limit: 上游响应体读取总量上限字节数，三条读取路径共用；None 时
-            按 auto_save_max_file_size × 20 推导。
+        response_body_limit: 上游响应体读取总量上限字节数；
+            None 时按 auto_save_max_file_size × 20 推导。
         image_prepare_concurrency: 参考图预处理并发上限。
         prepare_cache_max: 参考图预处理结果 LRU 缓存的条目数上限。
         prepare_cache_max_bytes: 参考图预处理结果缓存的累计字节上限。
@@ -857,8 +857,7 @@ class SeedreamConfig:
                         entry=as_text(entry),
                     )
                 )
-            # 浏览器 Origin 序列化省略默认端口，默认端口与前导零端口条目永不
-            # 匹配真实头；为零与前导零的拒绝口径与 hosts 侧共用同一端口谓词。
+            # 浏览器 Origin 序列化省略默认端口，默认端口与前导零端口条目永不匹配真实头。
             netloc_parts = _decompose_netloc(parsed.netloc)
             if netloc_parts is None:
                 # 不可分解 netloc 与传输侧守卫同口径拒绝，不回退跳过端口校验。
@@ -971,7 +970,7 @@ def _first_invalid_request_state_key_message(
 ) -> ErrorText | None:
     """返回密钥环内首个不合规键的报错消息，全部合规时为 None。
 
-    同键既短又重复时按短键计；导入期预检共用本判定，环规则单源维护。
+    同键既短又重复时按短键计。
     """
     seen: set[bytes] = set()
     for index, key in enumerate(keys, start=1):

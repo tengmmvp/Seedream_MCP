@@ -36,7 +36,6 @@ const THUMBNAIL_BATCH_SIZE = 6;
 // 401 停止消费时命中与未消费缩略图的统一过期文案。
 const TOKEN_EXPIRED_THUMB_MESSAGE = "令牌已过期，重新输入后请刷新图库";
 
-// 网络异常与体读取失败共用的加载失败文案。
 const GALLERY_LOAD_FAILED_MESSAGE = "图库加载失败，请稍后重试。";
 
 // 请求序号守卫：翻页或刷新连点时，仅最后一次请求的响应可落地。
@@ -344,10 +343,7 @@ export function retreatGalleryOffset() {
   state.gallery.offset = state.gallery.backStack.pop() ?? 0;
 }
 
-/**
- * 分页状态整体置换回首页初始态，
- * 刷新按钮、筛选变更、筛选恢复失败与目录不可用分支共用。
- */
+/** 分页状态整体置换回首页初始态。 */
 export function resetGalleryPaging() {
   state.gallery = initialGalleryState();
 }

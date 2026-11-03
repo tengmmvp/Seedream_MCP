@@ -23,7 +23,7 @@ from ._model import (
     SeedreamConfig as SeedreamConfig,
 )
 
-# as 同名形态为显式再导出，测试侧经 config 单源取仓库根。
+# as 同名形态为显式再导出。
 from .sources import PROJECT_ROOT as PROJECT_ROOT  # noqa: F401
 
 __all__ = [

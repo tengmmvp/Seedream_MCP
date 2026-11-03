@@ -201,19 +201,19 @@ def _log_segment_parse_failure(log: Logger, error: str, segment_len: int) -> Non
 _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
 
 # 单条解析产物的内存开销估计：事件 dict 本体、键字符串与内层 dict 等解析产物实测
-# 约 350-450 字节，取 448 字节为保守常量。条目上限按「该值 × 条数 ≤ 字节总量限额」
-# 从同一限额派生，口径对准解析产物内存：对抗性 64 字节量级的最小合法事件滴流撑满
-# 字节限额时产物被封在与限额同量级，而非按线上字节推导时放大一个数量级以上。合法
+# 约 350-450 字节，取 448 字节为保守常量。条目上限按「该值 × 条数 ≤ 字节总量上限」
+# 从同一上限派生，口径对准解析产物内存：对抗性 64 字节量级的最小合法事件滴流撑满
+# 字节上限时产物被封在与上限同量级，而非按线上字节推导时放大一个数量级以上。合法
 # 批次至多 15 张图且单事件常在 KB 以上，远达不到该上限。
 _SSE_ITEM_OVERHEAD_BYTES = 448
 
-# 解析条目数的绝对下限：组图单请求合法产出至多 15 张图片，总量限额极小的部署按
+# 解析条目数的绝对下限：组图单请求合法产出至多 15 张图片，总量上限极小的部署按
 # 单条产物开销推导会得到误伤合法批次的过小上限，绝对下限兜底。
 _SSE_MIN_ITEMS_LIMIT = 64
 
 
 def items_limit_for(total_bytes_limit: int) -> int:
-    """从响应体总量限额派生解析条目数硬上限，SSE 与成功 JSON 路径共用。"""
+    """从响应体总量上限派生解析条目数硬上限。"""
     return max(total_bytes_limit // _SSE_ITEM_OVERHEAD_BYTES, _SSE_MIN_ITEMS_LIMIT)
 
 
@@ -227,7 +227,7 @@ _UTF8_BOM = b"\xef\xbb\xbf"
 def _slice_parse_segment(
     buffer: bytearray, start: int, end: int
 ) -> tuple[dict[str, Any] | None, str | None, bool]:
-    """在专用 CPU 池线程内切出 buffer[start:end] 事件段并解析、判定丢失负载。
+    """在 CPU 卸载池线程内切出 buffer[start:end] 事件段并解析、判定丢失负载。
 
     bytearray 切片是一次 memcpy，单事件上限约 event_truncate_threshold 量级，
     与 json.loads 及丢失判定一并下沉线程，避免在事件循环上叠加阻塞。
@@ -318,7 +318,7 @@ class _SSEFrameBuffer:
     async def parse_segment(
         self, start: int, end: int
     ) -> tuple[dict[str, Any] | None, str | None, bool]:
-        """切出闭开区间内的事件段并解析、带回失败原因与丢失负载标记，大段下沉专用 CPU 池。
+        """切出闭开区间内的事件段并解析、带回失败原因与丢失负载标记，大段下沉 CPU 卸载池。
 
         stream + b64_json 的多 MB 事件在事件循环上产生 memcpy 与解析阻塞，达到
         卸载阈值即下沉；小段保持同步处理省线程调度开销。解析失败不在段内记日志，
@@ -366,17 +366,17 @@ class _SSEFrameBuffer:
             self._pending_cr = False
 
     async def parse_tail(self, log: Logger) -> tuple[dict[str, Any] | None, bool, int]:
-        """切出未消费尾部并解析、判定丢失与返回尾部字节长度，达阈值卸载专用 CPU 池。"""
+        """切出未消费尾部并解析、判定丢失与返回尾部字节长度，达阈值卸载 CPU 卸载池。"""
         if should_offload_size(len(self._buffer) - self._offset):
             return await run_in_cpu_pool(_slice_parse_tail, self._buffer, self._offset, log)
         return _parse_tail_with_lost_flag(self._buffer[self._offset :], log)
 
 
 class _SSEItemCollector:
-    """SSE 图片条目累计器：维护条目列表与按总量限额派生的条目硬上限。
+    """SSE 图片条目累计器：维护条目列表与按总量上限派生的条目硬上限。
 
     大量小事件在字节未超限时仍可放大解析产物内存，条目上界按单条解析产物的内存
-    开销估计从同一限额派生；触顶后终止读取，流末尾残留段不再解析。
+    开销估计从同一上限派生；触顶后终止读取，流末尾残留段不再解析。
     """
 
     def __init__(self, total_bytes_limit: int) -> None:
@@ -459,9 +459,8 @@ def _classify_sse_event(
             return False, None, None
         message_fragment = upstream_message_fragment(err.get("message"))
         raise SeedreamAPIError(
-            # 错误码收窄与 message 缺失判定及截断归一经 errors 的共享辅助，
-            # 流式与非流式对同一上游载荷的诊断同口径；上游片段经 detail 参数
-            # 进入结构化载荷，与 handle_api_error 同分类。
+            # 错误码收窄与 message 缺失判定及截断归一，流式与非流式对同一上游载荷的诊断同口径。
+            # 上游片段经 detail 参数进入结构化载荷，与 handle_api_error 同分类。
             message=(
                 detail_error_text(message_fragment)
                 if message_fragment is not None
@@ -539,7 +538,7 @@ async def _consume_sse_chunks(
     collector: _SSEItemCollector,
     apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
 ) -> tuple[int, bool]:
-    """分帧消费阶段：逐块读取响应流，执行事件解析与字节、条目、单事件限额截断。
+    """分帧消费阶段：逐块读取响应流，执行事件解析与字节、条目、单事件上限截断。
 
     Returns:
         (超限或解析失败丢弃的事件数, 是否因总时长预算超限提前终止)。
@@ -643,7 +642,7 @@ def _parse_tail_with_lost_flag(
 def _slice_parse_tail(
     buffer: bytearray, start: int, log: Logger
 ) -> tuple[dict[str, Any] | None, bool, int]:
-    """在专用 CPU 池线程内切出未消费尾部并解析、判定丢失与返回长度。
+    """在 CPU 卸载池线程内切出未消费尾部并解析、判定丢失与返回长度。
 
     尾部切片是一次整段 memcpy，量级可达单事件截断阈值，与解析、丢失判定一并
     下沉线程，与 drain 路径的大事件卸载同口径。
@@ -718,9 +717,9 @@ async def parse_sse_response(
             被误截断而永久丢失。与 buffer_max_size 解耦，前者管单事件体积上限，
             后者管前缀回收频率。
         total_bytes_limit: 响应流累计接收字节总量上限，含全部事件段与不完整尾部，
-            超限时终止解析并关闭响应；单事件阈值拦不住大量小事件滴流的超限流，与
-            非流式/流式 JSON 路径共用同一限额。解析产物条目数另按该限额除以单条
-            解析产物的内存开销估计派生独立硬上限，防止产物内存放大。
+            超限时终止解析并关闭响应。单事件阈值拦不住大量小事件滴流的超限流。
+            解析产物条目数另按该上限除以单条解析产物的内存开销估计派生独立硬上限，
+            防止产物内存放大。
         log: loguru logger 实例，用于记录进度与告警。
         deadline: 解析全程的 time.monotonic 截止时间，None 表示不施加。
             读取超时按单次读操作计时，持续滴流时永不触发，截止时间封顶每次等块，
@@ -747,7 +746,7 @@ async def parse_sse_response(
         evt_usage: Any,
         evt_tools: list[dict[str, Any]] | None,
     ) -> None:
-        """记录完成事件的元信息，主循环与流末尾残留处理共用。
+        """记录完成事件的元信息。
 
         上游 completed 事件的 usage 为字符串或数字等异形时收敛为空 dict，
         与非流式 client._build_api_result 的守卫同口径，保证结果结构 usage 恒为 dict。

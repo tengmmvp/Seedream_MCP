@@ -13,8 +13,7 @@ outputSchema 并校验 structuredContent，运行时返回的 CallToolResult 原
 inputSchema 平铺契约：五个带参工具以逐字段平铺参数声明而非单一 params 嵌套模型，
 FuncMetadata 不支持单参数 BaseModel 自动展开，嵌套声明会把 inputSchema 收敛为
 一个对象字段。平铺字段的名称、类型、默认值、约束与描述镜像 tools.schemas
-的输入模型，描述与约束字面量经该模块的共享常量引用，四个生成工具语义相同参数的
-Field 默认值共用模块级 FieldInfo 常量；非空语义经签名层
+的输入模型，描述与约束字面量经该模块的共享常量引用；非空语义经签名层
 ``_NON_BLANK_PATTERN`` 等价镜像，纯空白输入在协议层即被拒绝。工具体以 locals()
 推导参数字典，排除集为签名中不属于输入模型的参数名，签名是参数字典的单一来源；
 _run_tool_pipeline 过滤 None 字段组装输入模型并委托既有 run_* 处理器，未知键立即
@@ -244,7 +243,7 @@ _CUSTOM_NAME_FIELD: str | None = Field(
     description=CUSTOM_NAME_DESCRIPTION,
 )
 
-# image 字段类型与输入模型共用 schemas 单一来源，平铺侧条目叠加非空 pattern。
+# 平铺侧条目叠加非空 pattern。
 _FLAT_IMAGE_ITEM = Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]
 _MULTI_IMAGE_FLAT_TYPE: Any = multi_image_field_type(_FLAT_IMAGE_ITEM, MULTI_IMAGE_MIN_ITEMS)
 _SEQUENTIAL_IMAGE_FLAT_TYPE: Any = sequential_image_field_type(_FLAT_IMAGE_ITEM, 1)
@@ -356,13 +355,13 @@ async def _run_tool_pipeline(
 async def _workspace_roots_dependency(
     ctx: Context[Any, Any] | None = None,
 ) -> ListRootsResult | ListRoots | None:
-    """五个工具共用的 roots 依赖解析器，SEP-2577 非废弃形态。
+    """roots 依赖解析器，SEP-2577 非废弃形态。
 
     现代修订（2026-07-28 及以后）返回 ListRoots()，SDK 在工具调用前经
     InputRequiredResult 多轮取回客户端 roots 并注入工具参数；旧修订由 resolver
     以短超时直连取回，超时或失败经 ToolError 报错不降级。未声明能力，或旧修订
     反向通道不可用时返回 None 不发起取回；无状态传输等形态下取回必失败。工具链
-    经 workspace_roots_scope_from_result 回退环境变量边界。resolver 参数对模型
+    经 workspace_roots_scope_from_result 回退到环境回退根。resolver 参数对模型
     不可见，不进入 inputSchema。
     """
     session = session_or_none(ctx)
@@ -375,7 +374,7 @@ async def _workspace_roots_dependency(
     return await read_session_roots_or_raise(ctx, session)
 
 
-# 五工具签名共用的 roots 解析注解，漏写一处即静默回退环境根。
+# roots 解析注解，漏写一处即静默回退到环境回退根。
 _ROOTS_DEPENDENCY = Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)]
 
 
@@ -745,7 +744,7 @@ def _workspace_roots_or_empty() -> list[Path]:
 
 
 async def _rendered_workspace_roots(verbose: bool, *, fallback: bool = False) -> str:
-    """取当前生效工作区根并渲染 JSON 输出，多轮各出口共用。
+    """取当前生效工作区根并渲染 JSON 输出。
 
     roots 元素经 _file_uri_to_path 或 resolve_env_workspace_root 产出，均为已
     resolve 的物理路径，verbose 的 resolved 字段直接复用；fallback 为真时附
@@ -787,14 +786,13 @@ async def workspace_roots_resource(
                 return await _rendered_workspace_roots(
                     verbose, fallback=roots_degraded(roots_result, applied_roots)
                 )
-        # 应答形态不符即丢弃并回退环境根，不重发请求空转到回合上限；边界收窄
+        # 应答形态不符即丢弃并回退到环境回退根，不重发请求空转到回合上限；边界收窄
         # 属完整性事件，按 error 记录。
         logger.error(
             "roots 多轮应答形态不符（收到 {}），丢弃后回退环境变量边界",
             type(roots_result).__name__,
         )
         return await _rendered_workspace_roots(verbose, fallback=True)
-    # 旧修订：roots/list 直连取回后与多轮形态共用结果应用与降级标记。
     roots_result = await read_session_roots_result(ctx)
     async with workspace_roots_scope_from_result(roots_result) as applied_roots:
         return await _rendered_workspace_roots(
@@ -886,8 +884,7 @@ async def skill_reference_resource(path: str) -> str:
 # 风格预设固定前缀，指引模型调用文生图工具并指明 prompt 参数来源。
 _STYLE_PROMPT_PREFIX = "请使用 text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
 
-# 四个风格 prompt 的 subject 参数共享注解，单一来源防描述漂移；长度与非空
-# 口径和工具参数侧的 prompt 约束一致。
+# 长度与非空口径和工具参数侧的 prompt 约束一致。
 _STYLE_SUBJECT_ANNOTATION = Annotated[
     str,
     Field(

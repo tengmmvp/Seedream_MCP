@@ -111,7 +111,7 @@ def override_key_for_env(env_key: str) -> str | None:
 
 
 def _env_hint_suffix(env_name: str) -> str:
-    """环境变量名提示后缀：字段名反查与 env_key 直供两条注入路径共用。"""
+    """由环境变量名直接生成提示后缀。"""
     return f"（环境变量 {env_name}）"
 
 
@@ -155,7 +155,7 @@ def _ensure_field_utf8_encodable(value: str, field_name: str) -> None:
 
 
 def _http_auth_token_invalid_reason(token: str, min_length: int) -> str | None:
-    """返回鉴权令牌的失败类别（"length" 或 "charset"），合法返回 None；CLI 与配置侧共用。"""
+    """返回鉴权令牌的失败类别（"length" 或 "charset"），合法返回 None。"""
     if len(token) < min_length:
         return "length"
     if not is_printable_ascii(token):
@@ -192,7 +192,7 @@ def normalize_model_selector(value: object) -> str:
     return MODEL_ALIASES.get(normalized, normalized)
 
 
-# 整数解析失败文案的共用模板：拒绝值以分类参数进入，parse_int 各失败分支共享单一来源。
+# 整数解析失败文案的模板：拒绝值以分类参数进入。
 _UNPARSEABLE_INT_TEMPLATE = "无法解析整数值: {value}"
 
 
@@ -240,8 +240,6 @@ class _RuntimeEnvInjection(NamedTuple):
     exclusive_keys: frozenset[str]
 
 
-# CWD .env 告警文案单源：覆盖、注入（_builder）与隐式加载（本模块）三类告警共用
-# 同一指引尾段，路径与键名经分类参数进入模板。
 _UNTRUSTED_CWD_ENV_GUIDANCE = (
     "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信"
 )
@@ -339,7 +337,7 @@ def _read_env_values(env_file: str | None) -> tuple[dict[str, str], _RuntimeEnvI
 
 
 def _value_is_set(value: object) -> bool:
-    """判定取值是否视为已设置，缺失口径单源于 errors.has_message_value。"""
+    """判定取值是否视为已设置。"""
     return has_message_value(value)
 
 
@@ -361,8 +359,7 @@ def _supplying_layer_and_value(
 ) -> tuple[_SupplyingLayer, object]:
     """判定配置值的有效供值层并返回该层值，优先级为 overrides > 系统环境变量 > env 文件 > 默认值。
 
-    各层统一以 _value_is_set 判空，空白字符串视为未设置而穿透到下一层；取值链
-    与覆盖、注入告警共用本判定。
+    各层统一以 _value_is_set 判空，空白字符串视为未设置而穿透到下一层。
     """
     if key in overrides and _value_is_set(overrides[key]):
         return "override", overrides[key]
@@ -439,8 +436,6 @@ def _pick_optional_str_tuple(
     )
 
 
-# 密钥环报错段单源：解码失败与强度不足两类报错共用同一格式要求段与生成命令段
-# （_model 经导入引用），失败类别首段各异、以「，」衔接格式要求段。
 _REQUEST_STATE_KEY_HEX_RULE_SEGMENT = "每键须为解码后不少于 {min_bytes} 字节的十六进制串"
 _REQUEST_STATE_KEYGEN_HINT_SEGMENT = "生成命令: {command}{suffix}"
 _REQUEST_STATE_KEY_NON_HEX_SEGMENT = (
@@ -471,7 +466,7 @@ def _request_state_key_rule_error(first_segment: str, **params: _TextParam) -> E
 def _decode_request_state_key_entries(
     entries: Sequence[str] | None,
 ) -> tuple[bytes, ...] | None:
-    """将密钥环条目逐条 hex 解码为字节元组，空输入归 None，供字段 picker 与导入期先行取值共用。
+    """将密钥环条目逐条 hex 解码为字节元组，空输入归 None。
 
     解码失败的错误消息给出格式要求与生成命令提示，不回显密钥内容；序号按
     有效条目计数；解码后单键字节数下限与重复键由 validate 校验。

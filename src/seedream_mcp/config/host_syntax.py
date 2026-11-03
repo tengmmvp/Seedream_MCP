@@ -1,8 +1,7 @@
 """Host 语法内核：Host 头 netloc 分解、允许列表条目分解与绑定地址合法性判定。
 
 中立语法模块，除 utils/core/sanitizers 的字符集判定与 utils/core/http_int 的
-整数解析外无项目内依赖，config 的构建期条目校验、transport 的中间件匹配与
-绑定地址守卫、cli 的参数期早拒共用同一语法与判定，形态演化在此单点维护。
+整数解析外无项目内依赖。
 """
 
 from __future__ import annotations
@@ -66,16 +65,15 @@ def _host_port_invalid_reason(port_text: str) -> str | None:
 
 
 def _is_valid_host_port(port_text: str) -> bool:
-    """Host 允许列表条目与 Host 头匹配共用的端口谓词：1-65535 且无前导零的纯 ASCII 数字。
+    """端口谓词：1-65535 且无前导零的纯 ASCII 数字。
 
     SDK 的 Host 校验为精确串比较，前导零端口虽数值合法但与客户端规范化形态不匹配，
-    按无效拒绝；拒绝口径与原因细分单源于 _host_port_invalid_reason。
+    按无效拒绝。
     """
     return _host_port_invalid_reason(port_text) is None
 
 
-# URL 序列化省略的 scheme 默认端口：transport 同源比对的端口归一与 config
-# origins 条目的默认端口拒绝共用此单一表示。
+# URL 序列化省略的 scheme 默认端口。
 DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
 
 
@@ -144,7 +142,7 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
 
 
 def bind_host_invalid_reason(host: str) -> str | None:
-    """绑定地址为空或含非可打印 ASCII 字符时返回拒绝理由子句，合法返回 None；cli 早拒与 transport 装配期守卫共用。"""
+    """绑定地址为空或含非可打印 ASCII 字符时返回拒绝理由子句，合法返回 None。"""
     if not host:
         return (
             "不能为空，空绑定地址会绑定全部接口且派生的 Host 白名单恒不匹配，"

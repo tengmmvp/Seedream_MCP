@@ -44,7 +44,7 @@ class BoundedExpiryRegistry(ABC, Generic[_RegistryKeyT, _RegistryEntryT]):
         self._write(key, self._entry_for(key, self._now() + interval))
 
     def _now(self) -> float:
-        """到期计时的单调钟读数单点，due/mark 与子类改写到期共用同一时钟。"""
+        """到期计时的单调钟读数单点。"""
         return time.monotonic()
 
     def _write(self, key: _RegistryKeyT, entry: _RegistryEntryT) -> None:

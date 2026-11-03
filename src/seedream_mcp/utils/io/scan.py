@@ -97,10 +97,9 @@ _SCAN_STALL_ZERO_PROGRESS_ROUNDS = 2
 # 谱系计数容忍线程竞态欠计，仅影响永久态收敛时序。
 STALL_PERMANENT_STREAK_THRESHOLD = 3
 
-# raw→ScanEntry 的进程级复用缓存，TTL 过期重扫免逐文件重复 resolve 与分量
-# 重建，扩窗重扫的已缓存条目零重算；缓存值同时供回显与读权限判定消费，
+# raw→ScanEntry 的进程级复用缓存，TTL 过期重扫免逐文件重复 resolve 与分量重建，
+# 扩窗重扫的已缓存条目零重算。缓存值同时供回显与读权限判定消费，
 # 符号链接改向的陈旧窗口由 TTL 封顶在扫描条目陈旧窗口的两倍。
-# 骨架与配置根缓存共用 path 的 ResolveResultCache。
 # 扫描 resolve 复用缓存的进程级条目上限：派生自扫描缓存单目录上限，恒容纳
 # 一个最大可缓存目录的全量条目。
 _RESOLVE_CACHE_TTL_SECONDS = 60.0
@@ -241,10 +240,10 @@ class _DirectoryScanCacheEntry:
 
 
 def reset_directory_scan_cache() -> None:
-    """清空目录扫描与 resolve 复用（含失败负缓存）的进程级缓存，供测试隔离与进程复位使用。
+    """清空目录扫描与 resolve 复用（含失败负缓存）的进程级缓存。
 
-    runtime._reset_lifespan_state 的复位协议经本函数登记此三处缓存；模块内
-    其余名称均为不可变常量或纯函数，无其他需要复位的可变状态。
+    runtime._reset_lifespan_state 的复位协议经本函数登记此三处缓存。
+    模块内其余名称均为不可变常量或纯函数，无其他需要复位的可变状态。
     """
     _DIRECTORY_SCAN_CACHE.clear()
     _SCAN_RESOLVE_CACHE.clear()

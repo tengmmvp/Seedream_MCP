@@ -38,10 +38,9 @@ from ..utils.core.validators import (
 )
 
 # ==================== 平铺签名共享常量 ====================
-# 以下约束与描述常量是双源镜像的单一来源，本模块的字段定义与 server/_registration.py 平铺签名
-# 同处引用，两侧等价性由 test_tool_parameter_order 锁定。
+# 以下约束与描述常量是双源镜像的单一来源。
 
-# prompt 长度界限为四个生成工具共享的产品决策，上限仅拦截异常超长输入。
+# prompt 长度界限为产品决策，上限仅拦截异常超长输入。
 PROMPT_MIN_LENGTH = 1
 PROMPT_MAX_LENGTH = 100000
 
@@ -209,7 +208,7 @@ class BackgroundMode(str, Enum):
     OPAQUE = "opaque"
 
 
-# 各枚举字段的合法值排序表，从 validators 白名单单源派生，命中判定与错误文案共用。
+# 各枚举字段的合法值排序表，从 validators 白名单单源派生。
 _RESPONSE_FORMAT_ALLOWED = sorted(VALID_RESPONSE_FORMATS)
 _OUTPUT_FORMAT_ALLOWED = sorted(VALID_OUTPUT_FORMATS)
 _GENERATION_TOOL_TYPE_ALLOWED = sorted(VALID_GENERATION_TOOL_TYPES)
@@ -290,7 +289,7 @@ MAX_IMAGE_INPUT_CHARS = MAX_IMAGE_FILE_SIZE * 2
 
 
 def _reject_blank_or_oversized_image_items(items: list[str]) -> list[str]:
-    """逐项 strip 归一后拒绝空白与超防御界条目并返回归一列表，三个带图工具的输入模型共用。"""
+    """逐项 strip 归一后拒绝空白与超防御界条目并返回归一列表。"""
     normalized: list[str] = []
     for item in items:
         stripped = item.strip()
@@ -309,7 +308,7 @@ def _reject_blank_or_oversized_image_items(items: list[str]) -> list[str]:
 
 
 def _image_count_validator(minimum: int) -> Callable[[object], object]:
-    """生成数量界外拒绝的 before-validator，上限固定为参考图张数上限，两个带图字段类型工厂共用。"""
+    """生成数量界外拒绝的 before-validator，上限固定为参考图张数上限。"""
 
     def validate_count(value: object) -> object:
         # 数量界外的中文文案先于字段约束的英文错误到达用户。
@@ -330,8 +329,7 @@ def _image_count_validator(minimum: int) -> Callable[[object], object]:
 
 
 def multi_image_field_type(item_type: Any, minimum: int) -> Any:
-    """融合 image 字段类型的单一来源：计数前置校验与数量界随类型携带，
-    平铺签名与输入模型共用，防止中文计数文案单边缺失。"""
+    """融合 image 字段类型的单一来源：计数前置校验与数量界随类型携带，防止中文计数文案单边缺失。"""
     return Annotated[
         list[item_type],
         BeforeValidator(_image_count_validator(minimum)),
@@ -376,8 +374,7 @@ class _MultiImageInput(BaseModel):
 
 
 def sequential_image_field_type(item_type: Any, minimum: int) -> Any:
-    """组图 image 字段类型的单一来源：union 骨架、列表分支数量界与计数前置校验随类型携带，
-    平铺签名与输入模型共用，防止中文计数文案单边缺失。"""
+    """组图 image 字段类型的单一来源：union 骨架、列表分支数量界与计数前置校验随类型携带，防止中文计数文案单边缺失。"""
     return Annotated[
         item_type
         | Annotated[
@@ -674,7 +671,7 @@ class SequentialGenerationInput(
 
     @property
     def effective_max_images(self) -> int:
-        """生效的生成数量上限：显式值透传，缺省按参考图张数推导，校验器与执行上下文共用。"""
+        """生效的生成数量上限：显式值透传，缺省按参考图张数推导。"""
         images = cast("list[str] | None", self.image)
         return resolve_sequential_max_images(self.max_images, len(images or []))
 
@@ -695,7 +692,7 @@ def _normalize_format_filter_item(value: object) -> object:
 class BrowseImagesInput(BaseModel):
     """本地图片浏览：浏览工作目录中的图片文件，便于选择参考图或查看已生成内容。
 
-    默认值以 ClassVar 声明为单一来源，server/_registration.py 平铺签名与本类字段同处引用。
+    默认值以 ClassVar 声明为单一来源。
     """
 
     DEFAULT_RECURSIVE: ClassVar[bool] = True
@@ -706,7 +703,7 @@ class BrowseImagesInput(BaseModel):
 
     @property
     def effective_directory(self) -> str:
-        """浏览目录缺省为 "."，浏览核心与 Web 预检共用单一缺省来源。"""
+        """浏览目录缺省为 "."。"""
         return self.directory if self.directory is not None else "."
 
     model_config = ConfigDict(
@@ -778,8 +775,7 @@ class BrowseImagesInput(BaseModel):
 class GenerationInputParams(Protocol):
     """四个生成工具输入模型共享字段的协议类型。
 
-    供生成流水线以类型化属性访问读取共享字段；各工具的具体输入模型经结构化子类型
-    自动满足本协议，无需显式继承。
+    各工具的具体输入模型经结构化子类型自动满足本协议，无需显式继承。
     """
 
     # prompt 经只读 property 声明：各工具实现为 str 或 str | None，只读协变使两类

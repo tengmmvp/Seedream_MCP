@@ -43,8 +43,7 @@ export const TOOL_MULTI_IMAGE_FUSION = "multi-image-fusion";
 export const TOOL_SEQUENTIAL_GENERATION = "sequential-generation";
 
 /**
- * 图库分页状态的首页初始态工厂：state 初始化与 gallery 域的整体复位共用，
- * 每次返回全新对象。
+ * 图库分页状态的首页初始态工厂：每次返回全新对象。
  *
  * @returns {Object} 形如 {offset, hasMore, items, nextOffset, stallPermanent,
  *   rescanFutile, backStack} 的初始分页状态；hasMore 三态透传后端 has_more，
@@ -113,7 +112,7 @@ export function currentModel() {
   );
 }
 
-/** 切换活动工具并同步高亮、选中态与焦点序，工具切换与能力回落共用。 */
+/** 切换活动工具并同步高亮、选中态与焦点序。 */
 export function setActiveTool(tool) {
   state.tool = tool;
   document.querySelectorAll("#tool-tabs button").forEach((b) => {
@@ -156,7 +155,7 @@ export function revokeObjectUrls(pool) {
   state.objectUrls[pool] = [];
 }
 
-/** 401 哨兵错误 message，抛出点与判定谓词共用。 */
+/** 401 哨兵错误 message。 */
 const UNAUTHORIZED_MESSAGE = "unauthorized";
 
 /**
@@ -183,7 +182,7 @@ export async function apiFetch(path, options = {}) {
   return response;
 }
 
-// 本服务取图与图库 browse 目录扫描共享超时档：60 秒兜底停滞请求，
+// 超时档：60 秒兜底停滞请求，
 // 介于外链取图（30 秒）与生成请求超时（生成端点 preflight 推导）之间。
 export const IMAGE_FETCH_TIMEOUT_MS = 60000;
 
@@ -251,12 +250,12 @@ function mergeAbortSignals(signal, timeoutSignal) {
   return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 }
 
-/** 401 哨兵异常判定，各捕获点共用。 */
+/** 401 哨兵异常判定。 */
 export function isUnauthorizedError(error) {
   return error.message === UNAUTHORIZED_MESSAGE;
 }
 
-/** 中止类异常判定：超时与手动中止按 name 统一识别，各捕获点共用。 */
+/** 中止类异常判定：超时与手动中止按 name 统一识别。 */
 export function isAbortError(error) {
   return error.name === "TimeoutError" || error.name === "AbortError";
 }
@@ -276,7 +275,7 @@ export async function discardBodyQuietly(response) {
   }
 }
 
-// blob 转对象 URL 并入池登记的共用尾部，入池生命周期单源。
+// blob 转对象 URL 并入池登记，入池生命周期单源。
 async function registerBlobUrl(response, pool) {
   const objectUrl = URL.createObjectURL(await response.blob());
   state.objectUrls[pool].push(objectUrl);
@@ -351,8 +350,7 @@ export function hideTokenGate() {
 
 /**
  * 失败载荷归一：error 子对象（error.type/error.message）、error_description、
- * 状态码三级回退，未知响应形态也给出可读信息；
- * 结构化端点信封（browse/generate 与文件端点统一）与传输层扁平错误共用。
+ * 状态码三级回退，未知响应形态也给出可读信息。
  *
  * @param {Object|null|undefined} payload - 已解析的响应体，非法 JSON 为 undefined。
  * @param {Response} response - 原始响应。
