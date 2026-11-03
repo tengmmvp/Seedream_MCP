@@ -1,4 +1,4 @@
-"""SeedreamClient 的 HTTP 传输与响应归一化机械：发送、重试、限额读取与错误归约。
+"""SeedreamClient 的 HTTP 传输与响应归一化机械：发送、重试、上限读取与错误归约。
 
 以 ``_ClientHTTPMixin`` 形态并入 SeedreamClient，实例属性 config、logger、
 _client、_client_lock 与 _timeout 由 SeedreamClient.__init__ 提供。
@@ -261,7 +261,7 @@ class _ClientHTTPMixin:
         键，供调用方诊断上游部分错误。
         """
         data = payload.get("data")
-        # 标量形态 data 无可消费条目，条目计数与消费口径共用 data_items。
+        # 标量形态 data 无可消费条目。
         data_count = len(data_items(data))
 
         status = payload.get("status")
@@ -339,12 +339,12 @@ class _ClientHTTPMixin:
         headers: Any,
         error_data: dict[str, Any],
     ) -> None:
-        """按状态码与错误体装配并抛出统一 API 异常，标准与流式路径共用。"""
+        """按状态码与错误体装配并抛出统一 API 异常。"""
         retry_after = self._retry_after_or_none(status_code, headers)
         raise handle_api_error(status_code, error_data, retry_after=retry_after)
 
     def _response_body_byte_limit(self) -> int:
-        """上游响应体读取总量上限，非流式 JSON、流式 JSON 与 SSE 三条路径共用。
+        """上游响应体读取总量上限。
 
         显式配置 response_body_limit 时直接生效；未配置时按
         auto_save_max_file_size × _RESPONSE_BODY_LIMIT_FACTOR 推导。
@@ -371,7 +371,7 @@ class _ClientHTTPMixin:
         return self.config.derived_sse_event_max_size()
 
     def _parsed_data_items_limit(self) -> int:
-        """成功 JSON 响应 data 条目数的硬上限，与 SSE 条目上限同口径从总量限额推导。"""
+        """成功 JSON 响应 data 条目数的硬上限，与 SSE 条目上限同口径从总量上限推导。"""
         return items_limit_for(self._response_body_byte_limit())
 
     async def _read_response_body_capped(
@@ -466,7 +466,11 @@ class _ClientHTTPMixin:
         parsed: Any = None
         if len(raw_body) <= _ERROR_JSON_PARSE_LIMIT:
             try:
-                parsed = await asyncio.to_thread(json.loads, raw_body)
+                # 上限与 CPU 卸载阈值同值：小体内联、恰达上限走池。
+                # 池关闭属服务退出窗口，原样上抛不落解析失败降级。
+                parsed = await load_json_bytes(raw_body)
+            except CpuOffloadPoolClosedError:
+                raise
             except Exception:
                 parsed = None
         if isinstance(parsed, dict):
@@ -486,12 +490,12 @@ class _ClientHTTPMixin:
                 return {"message": "响应体为空"}
             return {"message": text}
 
-        return await asyncio.to_thread(_decode_as_message)
+        return _decode_as_message()
 
     async def _raise_for_response_status(
         self, response: httpx.Response, *, deadline: float | None = None
     ) -> None:
-        """将非 200 状态码转换为统一 API 异常，流式与非流式发送路径共用。"""
+        """将非 200 状态码转换为统一 API 异常。"""
         if response.status_code == 200:
             return
 
@@ -590,9 +594,9 @@ class _ClientHTTPMixin:
         attempt_timeout_seconds: float,
         handle_response: Callable[[httpx.Response, float], Awaitable[dict[str, Any]]],
     ) -> dict[str, Any]:
-        """发送请求、检查状态码并委托回调解析响应，两条发送路径共用。
+        """发送请求、检查状态码并委托回调解析响应。
 
-        以流式发送实施总量限额，避免 client.post 先全量缓冲使 Content-Length 预检失效。
+        以流式发送实施总量上限，避免 client.post 先全量缓冲使 Content-Length 预检失效。
         attempt_timeout_seconds 为本次尝试的总时长上限，
         响应头就绪与读体的截止约束经等待路径生效，到点已就绪的数据仍可交付；
         超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
@@ -928,13 +932,12 @@ class _ClientHTTPMixin:
         return wrapped
 
     def _log_task_outcome(self, task_label: str, response: dict[str, Any]) -> None:
-        """按统一结果结构记录任务结局日志，四生成方法在 _call_api 正常返回后共用。
+        """按统一结果结构记录任务结局日志。
 
         success 仅代表收到 200 响应，软失败与部分失败以结果结构表达而非异常，
         失败与部分失败不得落「任务完成」日志，成功但携带顶层 error 的结果同样
         降级 warning；抛异常路径的失败日志由 _finalize_generation_error 承担。
         """
-        # 失败判定与用户可见 success 字段共用 response_reports_failure 单源。
         if response_reports_failure(response):
             self.logger.error("{}任务失败: {}", task_label, _outcome_error_note(response))
         elif response.get("status") == "partial":

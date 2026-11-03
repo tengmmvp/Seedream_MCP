@@ -1459,6 +1459,26 @@ async def test_error_data_from_body_oversized_body_degrades_to_message() -> None
     assert data["message"].startswith('{"error"')
 
 
+@pytest.mark.parametrize(
+    "raw_body, expected",
+    [
+        pytest.param(
+            bytearray(b'{"code": "E", "message": "m"}'),
+            {"code": "E", "message": "m"},
+            id="dict-passthrough",
+        ),
+        pytest.param(bytearray(b'"text"'), {"message": '"text"'}, id="non-object-json"),
+        pytest.param(bytearray(b"not json"), {"message": "not json"}, id="non-json-text"),
+        pytest.param(bytearray(), {"message": "响应体为空"}, id="empty"),
+    ],
+)
+async def test_error_data_from_body_form_degradation(
+    raw_body: bytearray, expected: dict[str, Any]
+) -> None:
+    """对象形态原样透传，非对象形态统一降级为 message。"""
+    assert await SeedreamClient._error_data_from_body(raw_body) == expected
+
+
 def test_normalize_api_error_passes_through_mcp_error_hierarchy() -> None:
     """SeedreamMCPError 体系内的异常原样返回，体系外异常包装为 SeedreamAPIError。"""
     client = SeedreamClient(_build_config())
@@ -1822,7 +1842,7 @@ def test_generation_method_docstrings_follow_capability_table() -> None:
 
 
 async def _await_task_capturing(task: "asyncio.Task[dict[str, Any]]") -> BaseException | None:
-    """等待任务完成并捕获异常，供关池窗口用例断言调用方实际收到的错误形态。"""
+    """等待任务完成并捕获异常。"""
     try:
         await task
     except BaseException as exc:
@@ -1937,6 +1957,40 @@ async def test_call_api_pool_closed_during_sse_parse_reports_shutdown() -> None:
         await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
 
     _assert_shutdown_error_shape(caught)
+    assert handler_calls == 1
+
+
+async def test_call_api_pool_closed_during_error_body_parse_reports_shutdown() -> None:
+    """错误体池内解析在关池窗口被取消时，呈现服务正在关闭而非解析失败降级。"""
+    handler_entered = asyncio.Event()
+    response_gate = asyncio.Event()
+    handler_calls = 0
+    # 恰达 _ERROR_JSON_PARSE_LIMIT（与卸载阈值同值）的错误体：进入 dict 解析且走池。
+    envelope = json.dumps({"message": ""}).encode()
+    error_body = json.dumps({"message": "x" * (_ERROR_JSON_PARSE_LIMIT - len(envelope))}).encode()
+    assert len(error_body) == _ERROR_JSON_PARSE_LIMIT
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal handler_calls
+        del request
+        handler_calls += 1
+        handler_entered.set()
+        await response_gate.wait()
+        return httpx.Response(500, content=error_body)
+
+    async with _client_with_mock_transport(handler) as client:
+        task = asyncio.ensure_future(client._call_api("text_to_image", {"prompt": "p"}))
+        await asyncio.wait_for(handler_entered.wait(), timeout=5)
+        async with saturate_cpu_offload_pool() as saturated:
+            response_gate.set()
+            await saturated.wait_queued()
+            shutdown_cpu_offload_executor()
+
+            caught = await _await_task_capturing(task)
+        await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
+
+    _assert_shutdown_error_shape(caught)
+    # 服务关闭属退出窗口，失败请求不进入重试。
     assert handler_calls == 1
 
 

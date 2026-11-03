@@ -1,6 +1,6 @@
-"""上游响应体读取限额域守护测试。
+"""上游响应体读取上限域守护测试。
 
-覆盖错误体独立上限与状态码重试语义、错误体 JSON 线程卸载与 message 截断、
+覆盖错误体独立上限与状态码重试语义、错误体 JSON 解析阈值分派与 message 截断、
 response_body_limit 显式配置与推导、成功体 data 条目硬上限、SSE 截断阈值边界
 与计数透传、慢滴流与头部停滞的总预算超时、末块到点打捞的完整交付、持续就绪
 流的周期性墙钟复查、错误体读取超时与传输错误的状态码归约。网络层经
@@ -18,7 +18,6 @@ from typing import Any
 import httpx
 import pytest
 
-import seedream_mcp.client._http as client_module
 from seedream_mcp.client._http import _ERROR_BODY_BYTE_LIMIT as _ERROR_BODY_CAP
 from seedream_mcp.client._http import _ERROR_JSON_PARSE_LIMIT
 from seedream_mcp.client import SeedreamClient
@@ -27,6 +26,7 @@ from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamTimeoutErro
 from seedream_mcp.utils.io.sse import items_limit_for
 
 from _lib.client_fakes import _install_mock_transport
+from _lib.cpu_offload_spy import CpuOffloadSpy
 
 
 async def test_error_body_over_independent_cap_rejected(no_sleep: None) -> None:
@@ -105,70 +105,55 @@ async def test_error_body_hint_kept_when_explicit_limit_below_cap(
         assert "SEEDREAM_RESPONSE_BODY_LIMIT" in exc_info.value.message
 
 
-async def test_error_body_json_parse_offloaded_to_thread(
+async def test_error_body_small_json_parse_runs_outside_cpu_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """错误体 json.loads 在工作线程执行，解析期间事件循环保持可调度。
-
-    对含标记的错误体注入 0.15 秒解析延迟，并在延迟前后快照心跳计数：解析若回归
-    到事件循环内执行，窗口内心跳增量为零；卸载到工作线程时事件循环持续调度，
-    增量为正。全程计数不足以守护：前置 HTTP 收发已使计数越过阈值，阻塞回归时
-    总量断言仍通过。错误体控制在 _ERROR_JSON_PARSE_LIMIT 之内，确保走完整 dict
-    解析分支而非降级为纯 message；大错误体的 message 截断由
-    test_non_json_error_body_message_truncated 锁定。
-    """
+    """低于解析上限的错误体 JSON 在事件循环线程内联解析，不付线程往返开销。"""
+    spy = CpuOffloadSpy(json.loads)
+    monkeypatch.setattr(json, "loads", spy)
     config = SeedreamConfig(api_key="k", max_retries=3)
-    body = json.dumps({"message": "x" * (_ERROR_JSON_PARSE_LIMIT // 2)}).encode()
-    assert len(body) <= _ERROR_JSON_PARSE_LIMIT
-    ticks = 0
-    parse_window_ticks: dict[str, int] = {}
-
-    class _SlowJsonModule:
-        """仅对含标记的错误体注入延迟并快照心跳计数，其余 json 属性原样透传。"""
-
-        def __init__(self, real: Any, marker: bytes) -> None:
-            self._real = real
-            self._marker = marker
-
-        def loads(self, data: Any, *args: Any, **kwargs: Any) -> Any:
-            if isinstance(data, (bytes, bytearray)) and self._marker in data:
-                parse_window_ticks["before"] = ticks
-                time.sleep(0.15)
-                parse_window_ticks["after"] = ticks
-            return self._real.loads(data, *args, **kwargs)
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._real, name)
-
-    monkeypatch.setattr(client_module, "json", _SlowJsonModule(json, b'"message"'))
+    body = json.dumps({"message": "bad prompt"}).encode()
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
         return httpx.Response(400, content=body, headers={"content-type": "application/json"})
 
-    async def _ticker() -> None:
-        nonlocal ticks
-        while True:
-            ticks += 1
-            await asyncio.sleep(0)
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError, match="请求参数错误"):
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    spy.assert_ran_outside_cpu_pool()
+
+
+async def test_error_body_json_parse_at_limit_runs_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """恰达解析上限的错误体 JSON（上限与卸载阈值同值）经专用线程池解析。
+
+    错误路径仅对不超过 _ERROR_JSON_PARSE_LIMIT 的体做 dict 解析，
+    与卸载阈值的交叠仅此边界一点。
+    越界即降级 message，截断由 test_non_json_error_body_message_truncated 锁定。
+    """
+    spy = CpuOffloadSpy(json.loads)
+    monkeypatch.setattr(json, "loads", spy)
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    envelope = json.dumps({"message": ""}).encode()
+    body = json.dumps({"message": "x" * (_ERROR_JSON_PARSE_LIMIT - len(envelope))}).encode()
+    assert len(body) == _ERROR_JSON_PARSE_LIMIT
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(400, content=body, headers={"content-type": "application/json"})
 
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
 
-        ticker = asyncio.create_task(_ticker())
-        try:
-            with pytest.raises(SeedreamAPIError, match="请求参数错误"):
-                await client._call_api("text_to_image", {"prompt": "p"})
-        finally:
-            ticker.cancel()
-            try:
-                await ticker
-            except asyncio.CancelledError:
-                pass
+        with pytest.raises(SeedreamAPIError, match="请求参数错误"):
+            await client._call_api("text_to_image", {"prompt": "p"})
 
-        assert "after" in parse_window_ticks, "含标记的错误体未经过被注入延迟的 json.loads"
-        window_delta = parse_window_ticks["after"] - parse_window_ticks["before"]
-        assert window_delta > 0, "解析延迟期间事件循环被阻塞，json.loads 未卸载到工作线程"
+    spy.assert_ran_in_cpu_pool()
 
 
 async def test_non_json_error_body_message_truncated(no_sleep: None) -> None:
