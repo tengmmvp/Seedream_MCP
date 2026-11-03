@@ -36,7 +36,7 @@ from ..core.sanitizers import fit_utf8_budget, strip_unpaired_surrogates
 from ..core.bounded_store import store_bounded_entry
 from .files import (
     atomic_replace_from_fd_sync,
-    has_reparse_attribute,
+    is_symlink_or_reparse,
 )
 from .path import (
     is_unc_path,
@@ -77,8 +77,7 @@ _PART_SWEEP_GRACE_SECONDS = 24 * 3600
 # warning 暴露异常规模的保存目录，量级对齐 scan 的扫描条目预算。
 _CLEANUP_ENTRY_WARN_THRESHOLD = 20000
 
-# 删除文件失败文案的共用模板：路径与底层异常以分类参数进入，配额驱逐与按天
-# 清理两个删除环共享单一来源。
+# 删除文件失败文案的模板：路径与底层异常以分类参数进入。
 _DELETE_FILE_FAILURE_TEMPLATE = "删除文件失败 {path}: {exc}"
 
 
@@ -89,7 +88,7 @@ class FileManagerError(SeedreamMCPError):
 
 
 def _record_delete_failure(errors: list[str], file_path: Path, exc: Exception) -> None:
-    """删除失败写入共享错误列表并告警：配额驱逐与按天清理的删除环共用。"""
+    """删除失败写入错误列表并告警。"""
     errors.append(
         raw_error_text(_DELETE_FILE_FAILURE_TEMPLATE, path=as_text(file_path), exc=as_detail(exc))
     )
@@ -131,10 +130,16 @@ class FileManager:
         base_dir = resolved
 
         self.base_dir = base_dir
+        # memo 无锁：mkdir exist_ok 与 set.add 幂等，竞态最坏重复一次调用。
+        self._ensured_dirs: set[Path] = set()
         self.ensure_directory(self.base_dir)
 
     def ensure_directory(self, path: Path) -> None:
-        """确保目录存在，不存在则递归创建。
+        """确保目录存在，不存在则递归创建；登记仅授予验证为真实目录链的路径。
+
+        memo 命中经 no-follow 复查目录链仍真实则跳过 mkdir，失效回落重建；
+        新建路径 mkdir 后同样复查，链路含符号链接/reparse（如经链接创建到
+        界外）时不登记，后续校验不因 mkdir 成功获得放行。
 
         Args:
             path: 目录路径。
@@ -142,8 +147,14 @@ class FileManager:
         Raises:
             FileManagerError: 创建目录失败时抛出。
         """
+        if path in self._ensured_dirs:
+            if self._memo_dirs_still_real(path):
+                return
+            self._ensured_dirs.discard(path)
         try:
             path.mkdir(parents=True, exist_ok=True)
+            if self._memo_dirs_still_real(path):
+                self._ensured_dirs.add(path)
             logger.debug("确保目录存在: {}", path)
         except (OSError, ValueError) as e:
             # Python 3.13 起 pathlib 对嵌入 null 字符等非法路径参数抛 ValueError
@@ -174,6 +185,29 @@ class FileManager:
             logger.warning("路径验证失败: {} -> {}", path, e)
             return False
 
+    def _memo_dirs_still_real(self, memo_dir: Path) -> bool:
+        """no-follow 复查 memo 目录链自 base_dir 起每段仍为真实目录。
+
+        链含 base_dir 自身，调用级 save_path 声明的 memo 键可能就是 base_dir。
+        外部删除、跨实例清理与符号链接/reparse 替换均判定失效；lstat 只读
+        幂等，memo 无锁结论不变。
+        """
+        try:
+            relative_parts = memo_dir.relative_to(self.base_dir).parts
+        except ValueError:
+            return False
+        for depth in range(len(relative_parts) + 1):
+            target = self.base_dir.joinpath(*relative_parts[:depth])
+            try:
+                st = os.lstat(target)
+            except OSError:
+                return False
+            if is_symlink_or_reparse(st):
+                return False
+            if not stat.S_ISDIR(st.st_mode):
+                return False
+        return True
+
     def _resolved_within_base(self, resolved_path: Path) -> bool:
         """判断已 resolve 的路径是否位于保存目录内，直接比较，不再 resolve。
 
@@ -198,20 +232,24 @@ class FileManager:
         filename = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", filename)
         filename = self._fit_filename_budget(filename)
 
-        # Windows 保留设备名处理：CON.txt、NUL 等会被解释为设备而非文件，命中时在
-        # 首个点前追加下划线；词干归一判定经 is_windows_reserved_name 与
-        # normalize_path 单一来源。写侧全平台规避：数据目录迁移到 Windows 后
-        # 此类名字不可读，POSIX 上多一个下划线无实际代价。下划线可能把总长顶破
-        # 字节预算，同口径重截保证输出恒不超上限。
+        # Windows 保留设备名处理：CON.txt、NUL 等会被解释为设备而非文件，
+        # 命中时在首个点前追加下划线。词干归一判定经 is_windows_reserved_name。
+        # 写侧全平台规避：数据目录迁移到 Windows 后此类名字不可读，POSIX 上多一个下划线
+        # 无实际代价。下划线可能把总长顶破字节预算，同口径重截保证输出恒不超上限。
         if is_windows_reserved_name(filename):
             parts = filename.split(".", 1)
             parts[0] += "_"
             filename = self._fit_filename_budget(".".join(parts))
 
-        if not filename.strip():
+        filename = filename.strip()
+        if not filename:
             filename = "unnamed"
+        # "." 与 ".." 是路径遍历保留分量，也作子目录名使用，统一替换为下划线。
+        # 剥离首尾空白后再判，防 " .. " 形态绕过。
+        if filename in {".", ".."}:
+            filename = "_"
 
-        return filename.strip()
+        return filename
 
     def _fit_filename_budget(self, filename: str) -> str:
         """超 UTF-8 字节预算的文件名截断词干并保留扩展名，预算内恒等返回。
@@ -313,6 +351,8 @@ class FileManager:
     ) -> Path:
         """在保存目录下按日期与子目录组织文件路径。
 
+        目录确保经 ensure_directory 的实例 memo 去重，同批保存不重复 mkdir。
+
         Args:
             filename: 文件名。
             subfolder: 子文件夹名称，通常为工具名。
@@ -381,7 +421,7 @@ class FileManager:
         content_hash: str | None = None,
         date_folder: bool = True,
     ) -> Path:
-        """基于已知扩展名生成保存路径，供字节签名嗅探出真实类型后使用。
+        """基于已知扩展名生成保存路径。
 
         Args:
             prompt: 生成提示词，用于派生文件名基础部分。
@@ -407,6 +447,10 @@ class FileManager:
     def _finalize_save_path(self, filename: str, tool_name: str, date_folder: bool) -> Path:
         """按日期与工具子目录组织保存路径并校验越界，返回最终保存路径。
 
+        ensure_directory 已在本调用内对整条目录链完成一次真实性校验，登记于
+        memo 的组织目录直接放行，未登记路径走完整 resolve 校验。含分隔符或
+        ``..`` 的文件名拼接后父目录偏离登记键，自动落回完整校验。
+
         Args:
             filename: 已含扩展名的唯一文件名。
             tool_name: 工具名称，用作保存子目录。
@@ -416,8 +460,9 @@ class FileManager:
             FileManagerError: 生成的保存路径越出保存目录。
         """
         save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)
-        if not self.validate_path(save_path):
-            raise FileManagerError(error_text("路径不安全: {path}", path=as_text(save_path)))
+        if save_path.parent not in self._ensured_dirs:
+            if not self.validate_path(save_path):
+                raise FileManagerError(error_text("路径不安全: {path}", path=as_text(save_path)))
         return save_path
 
     def save_bytes(
@@ -454,8 +499,7 @@ class FileManager:
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
 
-            # 原子落盘由 files 的同步骨架提供，与 download 续传终局
-            # finalize_atomic_replace 共用随机临时文件加 os.replace 的同一协议。
+            # 原子落盘由 files 的同步骨架提供。
             def _writer(fd: int) -> None:
                 with os.fdopen(fd, "wb", closefd=False) as f:
                     f.write(data)
@@ -712,10 +756,8 @@ class FileManager:
                         except OSError as e:
                             logger.warning("获取目录信息失败: {} -> {}", entry_path, e)
                             continue
-                        if stat.S_ISLNK(dir_stat.st_mode):
-                            continue
-                        if has_reparse_attribute(dir_stat):
-                            logger.warning("跳过 reparse point 目录: {}", entry_path)
+                        if is_symlink_or_reparse(dir_stat):
+                            logger.warning("跳过符号链接或 reparse point 目录: {}", entry_path)
                             continue
                         try:
                             dir_resolved = entry_path.resolve()
@@ -749,10 +791,8 @@ class FileManager:
                         continue
                     # 符号链接与 reparse 文件目标可能在 base_dir 之外，no-follow stat 不
                     # 跟随，命中即跳过；FIFO、套接字等非常规文件同样不纳入清理。
-                    if stat.S_ISLNK(entry_stat.st_mode):
-                        continue
-                    if has_reparse_attribute(entry_stat):
-                        logger.warning("跳过 reparse point 文件: {}", entry_path)
+                    if is_symlink_or_reparse(entry_stat):
+                        logger.warning("跳过符号链接或 reparse point 文件: {}", entry_path)
                         continue
                     if not stat.S_ISREG(entry_stat.st_mode):
                         continue
@@ -801,16 +841,17 @@ class FileManager:
                 _record_delete_failure(errors, file_path, e)
         return deleted_files, deleted_size
 
-    @staticmethod
-    def _prune_empty_dirs(directories: list[Path]) -> None:
+    def _prune_empty_dirs(self, directories: list[Path]) -> None:
         """按深度逆序删除已变空的子目录，使父目录在子目录删除后变空而级联得到清理。
 
-        目录删除失败仅记录警告，不计入 errors 列表。
+        目录删除失败仅记录警告，不计入 errors 列表。成功回收的目录同步移出 memo，
+        保持登记集合与磁盘一致。
         """
         for dir_path in sorted(directories, key=lambda p: len(p.parts), reverse=True):
             try:
                 if not any(dir_path.iterdir()):
                     dir_path.rmdir()
+                    self._ensured_dirs.discard(dir_path)
                     logger.info("删除空目录: {}", dir_path)
             except Exception as e:
                 logger.warning("删除目录失败: {} -> {}", dir_path, e)
@@ -843,6 +884,6 @@ def get_file_manager(base_dir: Path | None = None) -> "FileManager":
 
 
 def reset_file_manager_cache() -> None:
-    """清空 FileManager 进程级缓存，经 runtime 复位协议登记，供测试隔离调用。"""
+    """清空 FileManager 进程级缓存，经 runtime 复位协议登记。"""
     with _file_manager_cache_lock:
         _file_manager_cache.clear()

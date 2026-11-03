@@ -3,8 +3,8 @@
 提供 open_no_follow_read、open_regular_read、open_packaged_read、
 open_no_follow_write_fd、open_temp_fd、finalize_atomic_replace
 与同步落盘入口 atomic_replace_from_fd_sync，另有 has_reparse_attribute
-判定 NTFS junction 等非符号链接型 reparse point，
-供 scan 的目录扫描与 storage 的清理遍历使用。共享函数抛 OSError，
+判定 NTFS junction 等非符号链接型 reparse point，is_symlink_or_reparse
+合并符号链接与 reparse 的链接类判定。共享函数抛 OSError，
 由调用方按各自异常类型包装。
 
 残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的符号链接；
@@ -260,7 +260,7 @@ _packaged_resolve_cache = ResolveResultCache[Path](_PACKAGED_RESOLVE_CACHE_MAX)
 
 
 def reset_packaged_resolve_cache() -> None:
-    """清空打包资源解析目标的进程级缓存，供测试隔离与进程复位使用。
+    """清空打包资源解析目标的进程级缓存。
 
     runtime._reset_lifespan_state 的复位协议经本函数登记此缓存；模块内其余
     名称均为不可变常量或纯函数，无其他需要复位的可变状态。
@@ -364,6 +364,14 @@ def has_reparse_attribute(st: os.stat_result) -> bool:
     if sys.platform != "win32":
         return False
     return bool(st.st_file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def is_symlink_or_reparse(st: os.stat_result) -> bool:
+    """no-follow stat 结果为符号链接或 NTFS reparse point 时为 True。
+
+    链接类判定的共用原语，外层类型门（目录/常规文件）由调用方自持。
+    """
+    return stat.S_ISLNK(st.st_mode) or has_reparse_attribute(st)
 
 
 def atomic_replace_from_fd_sync(

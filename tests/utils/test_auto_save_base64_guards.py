@@ -429,8 +429,8 @@ async def test_save_base64_image_survives_parent_dir_recycled_between_steps(
 ) -> None:
     """路径生成后父目录被并发空目录回收时，写前重建父目录使落盘仍成功。
 
-    b64 数据无 URL 可回退，目录丢失即数据丢失；以建目录后即时删除模拟后台
-    清理与保存的竞态。
+    b64 数据无 URL 可回退，目录丢失即数据丢失；以建目录后即时回收模拟后台清理
+    与保存的竞态，回收经 _prune_empty_dirs 走真实清理通道使目录 memo 同步失效。
     """
     png_bytes = minimal_png_bytes()
     payload = base64.b64encode(png_bytes).decode()
@@ -438,7 +438,8 @@ async def test_save_base64_image_survives_parent_dir_recycled_between_steps(
 
     def _create_then_recycle(**kwargs: Any) -> Path:
         save_path = real_create(**kwargs)
-        save_path.parent.rmdir()
+        manager.file_manager._prune_empty_dirs([save_path.parent])
+        assert not save_path.parent.exists()
         return save_path
 
     monkeypatch.setattr(
@@ -452,6 +453,38 @@ async def test_save_base64_image_survives_parent_dir_recycled_between_steps(
     assert result.success is True
     assert result.local_path is not None
     assert Path(result.local_path).read_bytes() == png_bytes
+
+
+async def test_save_base64_image_recovers_when_parent_dir_removed_externally(
+    manager: AutoSaveManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """父目录被绕过清理通道的外部删除时，memo 命中复查失效并重建目录，保存仍成功。
+
+    旧行为目录 memo 不因外部删除失效，写前 mkdir 被跳过使落盘永久失败。
+    """
+    png_bytes = minimal_png_bytes()
+    payload = base64.b64encode(png_bytes).decode()
+    real_create = manager.file_manager.create_save_path_from_extension
+
+    def _create_then_remove(**kwargs: Any) -> Path:
+        save_path = real_create(**kwargs)
+        save_path.parent.rmdir()
+        return save_path
+
+    monkeypatch.setattr(
+        manager.file_manager, "create_save_path_from_extension", _create_then_remove
+    )
+
+    result = await manager.save_base64_image(
+        payload, prompt="p", custom_name="gone", tool_name="t2i"
+    )
+
+    assert result.success is True
+    assert result.local_path is not None
+    assert Path(result.local_path).read_bytes() == png_bytes
+    assert not list(tmp_path.rglob("*.part"))
 
 
 # ==================== _run_batch_save 异常处理 ====================

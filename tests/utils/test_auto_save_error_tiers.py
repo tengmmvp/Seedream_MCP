@@ -8,6 +8,7 @@ logger 档位（warning 与 error 不串档）与批量保存不中断；
 
 import asyncio
 import base64
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from seedream_mcp.utils.io.storage import FileManager, FileManagerError
 
 from _lib.cpu_offload_spy import saturate_cpu_offload_pool
 from _lib.log_fakes import capture_loguru_messages
+from _lib.os_fakes import _make_dir_link
 from _lib.png_fixtures import minimal_png_bytes
 
 
@@ -163,17 +165,21 @@ def test_ensure_directory_failure_raises_file_manager_error(tmp_path: Path) -> N
         manager.ensure_directory(blocker / "sub")
 
 
-def test_create_save_path_rejects_path_outside_base_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_create_save_path_rejects_path_outside_base_dir(tmp_path: Path) -> None:
     """生成的保存路径越出保存目录时以 FileManagerError 拒绝，不返回越界路径。
 
-    以 validate_path 置 False 建模符号链接逃逸等 resolve 后不在界内的形态。
+    日期段替换为界外目录链接后链路不可验证真实，memo 不登记，
+    保存路径 resolve 落在界外而被拒绝。
     """
+    outside = tmp_path / "outside"
+    outside.mkdir()
     manager = FileManager(base_dir=tmp_path / "images")
-    monkeypatch.setattr(manager, "validate_path", lambda path: False)
+    first = manager.create_save_path(prompt="cat", url="https://x/1.png", tool_name="t2i")
+    date_dir = first.parent.parent
+    shutil.rmtree(date_dir)
+    _make_dir_link(outside, date_dir)
 
     with pytest.raises(FileManagerError, match="路径不安全"):
         manager.create_save_path(
-            prompt="cat", url="https://x/1.png", tool_name="t2i", date_folder=True
+            prompt="cat", url="https://x/2.png", tool_name="t2i", date_folder=True
         )

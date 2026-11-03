@@ -39,6 +39,12 @@ def manager(tmp_path: Path) -> FileManager:
         ("photo_2024.png", "photo_2024.png"),
         # 中文字符保留
         ("猫咪照片.jpg", "猫咪照片.jpg"),
+        # "." 与 ".." 是路径遍历保留分量，替换为下划线不可作目录分量逃逸；
+        # 首尾空白剥离后再判，带空白的保留分量同样不可绕过。
+        (".", "_"),
+        ("..", "_"),
+        (" .", "_"),
+        (" .. ", "_"),
     ],
 )
 def test_sanitize_filename_character_rules(manager: FileManager, raw: str, expected: str) -> None:
