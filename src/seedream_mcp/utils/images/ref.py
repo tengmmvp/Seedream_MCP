@@ -24,11 +24,9 @@ def require_image_str(image: object) -> str:
 def classify_image_reference(image: str) -> Literal["url", "data_uri", "local"]:
     """判定图像输入来源类型，scheme 大小写不敏感。
 
-    http(s) 前缀不论斜杠数归入 url，单斜杠手误由统一 URL 校验给出精确报错；data:
-    前缀在 5 至 128 短窗内找逗号，逗号前头部（无逗号取同窗截断）含 ``/`` 的 MIME
-    形态判 data_uri，非图像 MIME 与无逗号截断 URI 均交 Data URI 校验给出精确
-    报错，形如 data:logo.png、data:photo,v2.png 的本地文件名不误入。逗号与头部
-    扫描仅在 data: 前缀命中时执行且封顶 128 字符，超长无逗号串不做全量扫描；
+    http(s) 前缀不论斜杠数归入 url，单斜杠手误由统一 URL 校验给出精确报错。
+    data: 前缀一律判 data_uri，交 Data URI 校验给出精确格式报错——图片引用上下文中
+    形如 data:logo.png 的输入按写坏的 Data URI 处理更贴用户意图。
     scheme 判定取前 16 字符小写窗口，最长匹配前缀 ``https:`` 为 6 字符足够覆盖。
 
     Args:
@@ -41,8 +39,5 @@ def classify_image_reference(image: str) -> Literal["url", "data_uri", "local"]:
     if prefix.startswith(("http:", "https:")):
         return "url"
     if prefix.startswith("data:"):
-        comma = image.find(",", 5, 128)
-        header = image[5:comma] if comma >= 0 else image[5:128]
-        if "/" in header:
-            return "data_uri"
+        return "data_uri"
     return "local"

@@ -13,33 +13,33 @@ from seedream_mcp.utils.images.ref import classify_image_reference
 @pytest.mark.parametrize(
     "image,expected",
     [
-        # URL：scheme 按 RFC 3986 大小写不敏感，历史回归点
+        # URL：scheme 按 RFC 3986 大小写不敏感，历史回归点。
         ("http://example.com/x.png", "url"),
         ("https://example.com/x.png", "url"),
         ("HTTP://example.com/x.png", "url"),
         ("HTTPS://example.com/x.png", "url"),
         ("HtTpS://example.com/x.png", "url"),
-        # URL：单斜杠与三斜杠手误同样归入 url，交统一 URL 校验报精确错误
+        # URL：单斜杠与三斜杠手误同样归入 url，交统一 URL 校验报精确错误。
         ("http:/example.com/x.png", "url"),
         ("https:/example.com/x.png", "url"),
         ("HTTPS:/example.com/x.png", "url"),
         ("http:///example.com/x.png", "url"),
-        # Data URI：前缀大小写不敏感
+        # Data URI：前缀大小写不敏感。
         ("data:image/png;base64,iVBORw0KGgo=", "data_uri"),
         ("Data:image/png;base64,iVBORw0KGgo=", "data_uri"),
         ("DATA:IMAGE/png;base64,", "data_uri"),
-        # Data URI：非图像 MIME 同归 data_uri，交 Data URI 校验报精确错误
+        # Data URI：非图像 MIME 同归 data_uri，交 Data URI 校验报精确错误。
         ("data:text/plain;base64,aGVsbG8=", "data_uri"),
         ("data:application/pdf;base64,aGVsbG8=", "data_uri"),
-        # Data URI：带参数 MIME 的逗号越过前缀窗口，短窗扫描覆盖 MIME 头部不漏判
+        # Data URI：带参数与点分子类型的 MIME 形态。
         ("data:image/png;charset=utf-8;base64,iVBORw0KGgo=", "data_uri"),
         ("data:image/vnd.microsoft.icon;base64,iVBORw0KGgo=", "data_uri"),
-        # Data URI：无逗号截断同归 data_uri，交 Data URI 校验报格式错误
+        # Data URI：无逗号同归 data_uri，交 Data URI 校验报格式错误。
         ("data:image/png;base64", "data_uri"),
-        # data: 开头但头部非 MIME 形态：POSIX 本地文件名不误入 Data URI 分支
-        ("data:logo.png", "local"),
-        # 含逗号的本地文件名不因逗号存在误入 Data URI 分支
-        ("data:photo,v2.png", "local"),
+        # data: 前缀的非 MIME 形态（本地文件名样）一律判 data_uri，按写坏的
+        # Data URI 交校验报格式错误。
+        ("data:logo.png", "data_uri"),
+        ("data:photo,v2.png", "data_uri"),
         # 本地路径
         ("./images/x.png", "local"),
         ("/abs/path/x.png", "local"),
@@ -59,8 +59,8 @@ def test_classify_empty_and_whitespace_treated_as_local() -> None:
 
 
 def test_classify_only_checks_prefix_window() -> None:
-    """仅拷贝前 16 字符前缀做 scheme 判定，逗号搜索与头部截断封顶 128 窗口，超长输入不做全量扫描。"""
+    """仅拷贝前 16 字符前缀做 scheme 判定，超长输入不做全量扫描。"""
     long_data_uri = "data:image/png;base64," + "A" * 100000
     assert classify_image_reference(long_data_uri) == "data_uri"
-    # 无逗号超长串的头部截断同样封顶，不做全量逗号搜索
-    assert classify_image_reference("data:" + "A" * 100000) == "local"
+    # 超长无逗号串同样仅判前缀。
+    assert classify_image_reference("data:" + "A" * 100000) == "data_uri"
