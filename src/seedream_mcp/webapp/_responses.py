@@ -26,11 +26,7 @@ from ..definitions.conventions import (
     BROWSE_IMAGES_TOOL_NAME,
     MODEL_INFO_FAILED_ERROR_TYPE,
 )
-from ..tools.outputs import (
-    build_error_dict,
-    build_error_structured,
-    dump_strict_json_bytes as dump_strict_json_bytes,
-)
+from ..tools.outputs import build_error_dict, build_error_structured
 from ..utils.core.errors import (
     ErrorText,
     SeedreamConfigError,
@@ -50,6 +46,11 @@ from ..utils.core.executors import (
     run_in_cpu_pool,
     should_offload_to_cpu_pool,
 )
+from ..utils.core.json_envelope import (
+    SECURE_JSON_HEADERS,
+    dump_strict_json_bytes as dump_strict_json_bytes,
+    flat_error_body,
+)
 from ..utils.core.logs import get_logger
 from ..utils.core.sanitizers import utf8_value_leaf_length
 from ..utils.io.path import (
@@ -67,11 +68,6 @@ PRIVATE_CACHE_HEADER = {
     "cache-control": "private, max-age=3600",
     "x-content-type-options": "nosniff",
 }
-
-
-# /web/api 全部 JSON 响应的公共安全头：no-store 防代理缓存动态状态，nosniff
-# 封堵旧浏览器 MIME 嗅探反射面。
-WEB_JSON_HEADERS = {"cache-control": "no-store", "x-content-type-options": "nosniff"}
 
 
 class WebErrorInfo(NamedTuple):
@@ -97,7 +93,7 @@ INVALID_JSON_INFO = WebErrorInfo("invalid_json", "请求体不是合法 JSON", 4
 INVALID_REQUEST_INFO = WebErrorInfo("invalid_request", "请求体须为 JSON 对象", 400)
 INVALID_PATH_INFO = WebErrorInfo("invalid_path", "无效的图片路径", 400)
 IMAGE_NOT_FOUND_INFO = WebErrorInfo("not_found", "图片不存在", 404)
-# not_found 一码两文案：API 兜底变体自文件端点表项派生，类型与状态共享单一定义。
+# not_found 一码两文案：API 兜底变体自文件端点表项派生。
 API_NOT_FOUND_INFO = IMAGE_NOT_FOUND_INFO._replace(message="接口不存在")
 THUMBNAIL_FAILED_INFO = WebErrorInfo("thumbnail_failed", "缩略图生成失败", 422)
 IMAGES_ROOT_UNAVAILABLE_INFO = WebErrorInfo("images_root_unavailable", "无法确定图片目录", 400)
@@ -109,12 +105,11 @@ SERVICE_UNAVAILABLE_INFO = WebErrorInfo(
     "service_unavailable", "CPU 卸载线程池已关闭，服务不可用", 500
 )
 
-# 端点全捕兜底的固定 WebErrorInfo，生成与图库端点共用，防文案各处漂移。
+# 端点全捕兜底的固定 WebErrorInfo，防文案各处漂移。
 INTERNAL_ERROR_INFO = WebErrorInfo("internal_error", "服务器内部错误，详情见日志", 500)
 
-# 端点自有码清单：状态表与守护测试共用的单一名单，加码只改此处。末两项为 runner
-# 失败码——browse 与 model_info 处理器经 definitions 常量构造失败，无端点构造点，
-# 仅登记状态表。
+# 端点自有码清单：加码只改此处。末两项为 runner 失败码——browse 与 model_info 处理器
+# 经 definitions 常量构造失败，无端点构造点，仅登记状态表。
 _ENDPOINT_OWN_ERRORS: tuple[WebErrorInfo, ...] = (
     INTERNAL_ERROR_INFO,
     INVALID_JSON_INFO,
@@ -163,12 +158,13 @@ ERROR_TYPE_STATUS: dict[str, int] = _merge_error_type_status(
 )
 
 
-def flat_error_json(error: WebErrorInfo) -> JSONResponse:
-    """扁平错误信封响应，形态与传输层中间件一致，message 经边界统一渲染。"""
-    return JSONResponse(
-        {"error": error.type, "error_description": render_boundary_error_text(error.message)},
+def flat_error_json(error: WebErrorInfo) -> Response:
+    """扁平错误信封响应，message 经边界统一渲染。"""
+    return Response(
+        flat_error_body(error.type, render_boundary_error_text(error.message)),
         status_code=error.http_status,
-        headers=WEB_JSON_HEADERS,
+        headers=SECURE_JSON_HEADERS,
+        media_type="application/json",
     )
 
 
@@ -182,16 +178,15 @@ def endpoint_error_json(error: WebErrorInfo) -> JSONResponse:
     return JSONResponse(
         {"success": False, "error": build_error_dict(error.type, error.message)},
         status_code=error.http_status,
-        headers=WEB_JSON_HEADERS,
+        headers=SECURE_JSON_HEADERS,
     )
 
 
 async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], WebErrorInfo | None]:
     """解析请求体为 JSON 对象，失败时返回 WebErrorInfo 由调用方包装为各自端点的结构化错误响应。
 
-    解析成本随参考图体积线性增长，达到下沉尺寸阈值的卸载长时 CPU 专用池，低于
-    阈值同步执行；池关闭取消排队解析归 service_unavailable 500，生成与图库端点
-    共用同一口径。
+    解析成本随参考图体积线性增长，达到卸载阈值时下沉 CPU 卸载池，低于
+    阈值同步执行；池关闭取消排队解析归 service_unavailable 500。
     """
     raw_body = await request.body()
     try:
@@ -214,7 +209,7 @@ def invalid_path_error(exc: ValueError) -> WebErrorInfo:
 
 
 def images_root_unavailable_error(exc: Exception) -> WebErrorInfo:
-    """图片目录解析失败的 WebErrorInfo，携带配置指引，生成、图库与文件端点共用。"""
+    """图片目录解析失败的 WebErrorInfo，携带配置指引。"""
     detail_text = getattr(exc, "message", None) or str(exc)
     # 段终止由组装原语在段边界承担，用户通道净化由出口的边界渲染承担。
     return IMAGES_ROOT_UNAVAILABLE_INFO._replace(
@@ -226,7 +221,7 @@ def images_root_unavailable_error(exc: Exception) -> WebErrorInfo:
 
 
 def open_failed_error(code: str, base_message: str, status: int, exc: Exception) -> WebErrorInfo:
-    """打开失败的诊断 WebErrorInfo，基底文案拼接异常详情，files 原图与 meta 静态页共用。"""
+    """打开失败的诊断 WebErrorInfo，基底文案拼接异常详情。"""
     return WebErrorInfo(code, base_detail_error_text(base_message, exc), status)
 
 
@@ -277,7 +272,7 @@ def structured_error_type(structured: dict[str, object]) -> str | None:
 
 
 def structured_status(structured: dict[str, object]) -> int:
-    """按结构化结果的错误类型经单源映射取 HTTP 状态码，生成与图库端点共用。"""
+    """按结构化结果的错误类型经单源映射取 HTTP 状态码。"""
     return _error_status(structured_error_type(structured))
 
 
@@ -316,7 +311,7 @@ async def runner_result_payload(tool_name: str, result: CallToolResult) -> dict[
 
 
 async def respond_structured_json(structured: dict[str, object], status: int) -> Response:
-    """以严格 JSON 构造结构化结果响应，载荷达阈值时序列化与编码下沉专用 CPU 池。"""
+    """以严格 JSON 构造结构化结果响应，载荷达阈值时序列化与编码下沉 CPU 卸载池。"""
     try:
         if should_offload_to_cpu_pool(structured, value_leaf_cost=utf8_value_leaf_length):
             payload = await run_in_cpu_pool(dump_strict_json_bytes, structured)
@@ -329,7 +324,7 @@ async def respond_structured_json(structured: dict[str, object], status: int) ->
         content=payload,
         media_type="application/json",
         status_code=status,
-        headers=WEB_JSON_HEADERS,
+        headers=SECURE_JSON_HEADERS,
     )
 
 
@@ -389,8 +384,7 @@ def converge_path_entry(
     """把条目的路径键改写为图片目录相对形态并附 web_path，越界删除该键。
 
     resolve 为 True 时先解析为物理路径再相对化（输入为任意本地路径）；False 时
-    输入须已是 resolve 后的绝对路径，做纯词法相对化。generate 与 gallery 的
-    条目收敛共用，改写规则单点维护。
+    输入须已是 resolve 后的绝对路径，做纯词法相对化。
     """
     value = item.get(key)
     if not isinstance(value, str) or not value:

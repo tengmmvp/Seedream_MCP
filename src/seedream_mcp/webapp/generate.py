@@ -56,6 +56,7 @@ from ..utils.core.errors import (
     resolve_error_profile,
 )
 from ..utils.core.http_int import strict_http_int
+from ..utils.core.json_envelope import SECURE_JSON_HEADERS
 from ..utils.core.logs import get_logger
 from ..utils.core.retry_budget import api_retry_budget_seconds
 from ..utils.core.validators import (
@@ -261,20 +262,20 @@ async def _run_web_generation(
 ) -> Response:
     """解析请求体并执行生成 runner，按结果形态映射响应。
 
-    请求体解析、输入模型校验与图片目录解析经 _responses.entry_preamble 与图库端点共享；
+    请求体解析、输入模型校验与图片目录解析经 _responses.entry_preamble；
     响应体为工具的结构化结果字典，端点自有失败分支与 runner 失败同为完整结构化结果
     供前端展示错误详情，状态码均按 error.type 经单源映射推导。
     query 参数 preflight=1 时预检在序言前返回，按 query 投影推导前端等待预算，
     download_tail 等键的投影语义见 _preflight_timeout_ms；
     大请求体并发准入与读体窗口限时由传输层准入中间件承担，许可终帧即释放；
-    解析与响应体序列化达到下沉尺寸阈值时卸载专用 CPU 池，低于阈值同步执行。
+    解析与响应体序列化达到卸载阈值时下沉 CPU 卸载池，低于阈值同步执行。
     """
     config = get_active_config()
     if request.query_params.get("preflight") == "1":
         # 预检先于序言：推导预算只需 query 投影，免上传含参考图的整请求体。
         return JSONResponse(
             {"success": True, "timeout_ms": _preflight_timeout_ms(request, config, tool_name)},
-            headers=_responses.WEB_JSON_HEADERS,
+            headers=SECURE_JSON_HEADERS,
         )
     preamble = await _responses.entry_preamble(request, tool_name, model_cls)
     if isinstance(preamble, Response):

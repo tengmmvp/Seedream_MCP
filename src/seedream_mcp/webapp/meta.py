@@ -21,6 +21,7 @@ from ..config import get_active_config
 from ..definitions.conventions import MAX_PARALLEL_REQUEST_COUNT, MAX_SEQUENTIAL_TOTAL_IMAGES
 from ..utils.core.sanitizers import CONTROL_CHARS_PATTERN
 from ..utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
+from ..utils.core.json_envelope import SECURE_JSON_HEADERS
 from ..utils.core.logs import get_logger
 from ..utils.io.files import SymlinkRejectedError, open_packaged_read
 from ..utils.model.capabilities import (
@@ -275,5 +276,5 @@ async def web_config_info(_request: Request) -> Response:
             ),
             "auto_save_enabled": config.auto_save_enabled,
         },
-        headers=_responses.WEB_JSON_HEADERS,
+        headers=SECURE_JSON_HEADERS,
     )

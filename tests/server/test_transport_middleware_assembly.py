@@ -764,7 +764,7 @@ async def _run_health_check(method: str, path: str) -> tuple[list[object], list[
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
 async def test_health_check_short_circuits_probe_methods(method: str) -> None:
-    """GET 与 HEAD /health 均短路 200；HEAD 响应头与 GET 一致，仅省略内容。"""
+    """GET 与 HEAD /health 均短路 200 并带共享安全头。HEAD 响应头与 GET 一致，仅省略内容。"""
     reached, sent = await _run_health_check(method, "/health")
 
     assert reached == []
@@ -772,6 +772,9 @@ async def test_health_check_short_circuits_probe_methods(method: str) -> None:
     assert sent[0]["status"] == 200
     headers = dict(sent[0]["headers"])
     assert headers[b"content-length"] == b"15"
+    # 安全头随 _send_asgi_json 全局并入，对 200 探针响应无害。
+    assert headers[b"cache-control"] == b"no-store"
+    assert headers[b"x-content-type-options"] == b"nosniff"
     body_msg = sent[1]
     assert body_msg["type"] == "http.response.body"
     if method == "GET":

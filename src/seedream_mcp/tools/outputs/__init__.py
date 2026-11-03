@@ -7,15 +7,14 @@ build_error_dict 与 build_error_structured 收敛各错误分支的错误结构
 build_error_tool_result 由结构化错误组装两通道同源的错误工具结果，错误出口经它收敛；
 build_structured_json_text 将 structuredContent 序列化为紧凑 JSON 的 TextContent，
 字符串值经数据通道净化、二进制载荷替换为长度占位；
-dump_compact_strict_json 是紧凑严格 JSON 的单一序列化原语，dump_strict_json_bytes
-为其 UTF-8 字节形态，Web 控制台的结构化 JSON 同源委托；
+紧凑严格 JSON 序列化原语统一位于 utils/core/json_envelope，本模块经
+dump_compact_strict_json 序列化镜像文本；
 build_structured_tool_result 把镜像块回传进 content 数组，是「摘要+镜像（+尾部块）」
 结果组装的单一构造点，镜像装配可经 output_channels_scope 按调用方关闭。
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -34,6 +33,7 @@ from ...definitions.conventions import (
 )
 from ...utils.core.errors import ErrorText, as_plain, raw_error_text, render_boundary_error_text
 from ...utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
+from ...utils.core.json_envelope import dump_compact_strict_json
 from ...utils.core.logs import get_logger
 from ...utils.core.sanitizers import (
     sanitize_data_text,
@@ -226,7 +226,7 @@ TOOL_OUTPUT_MODELS: Mapping[str, type[_BaseStructuredOutput]] = {
 
 
 def build_error_dict(error_type: str, message: str | ErrorText) -> dict[str, Any]:
-    """构建结构化错误载荷，各工具错误分支共用同一字段集。
+    """构建结构化错误载荷。
 
     message 经 render_boundary_error_text 统一渲染（ErrorText 与 str 两臂同口径：
     全套净化、不截断），长度上限由各错误通道自行维护（含恢复指引的组装消息可至
@@ -270,12 +270,12 @@ def build_error_structured(
     ).model_dump()
 
 
-# 二进制载荷键集合，镜像占位替换与卸载门控的长度计量共用。
+# 二进制载荷键集合。
 _BINARY_PAYLOAD_KEYS = frozenset({"b64_json"})
 
 
 def format_base64_placeholder(length: int) -> str:
-    """返回 b64 载荷的长度占位文案，镜像与文本摘要两通道共用同一措辞。"""
+    """返回 b64 载荷的长度占位文案。"""
     return f"Base64 数据: {length} 字符"
 
 
@@ -304,19 +304,6 @@ def _mirror_node(key: Any, value: Any) -> Any:
     raise ValueError(
         raw_error_text("镜像不支持 {type_name} 类型的值", type_name=as_plain(type(value).__name__))
     )
-
-
-def dump_compact_strict_json(value: Any) -> str:
-    """紧凑严格 JSON 序列化：非 ASCII 原文输出、分隔符省空白、非有限浮点抛 ValueError。
-
-    模型可见镜像与 Web 控制台结构化 JSON 共用本函数，序列化形态单源不漂移。
-    """
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-
-
-def dump_strict_json_bytes(value: Any) -> bytes:
-    """紧凑严格 JSON 的 UTF-8 字节形态，供下沉路径把序列化与编码一并带离事件循环。"""
-    return dump_compact_strict_json(value).encode("utf-8")
 
 
 def build_structured_json_text(structured: dict[str, Any]) -> TextContent:
@@ -430,13 +417,13 @@ async def build_structured_tool_result(
 ) -> CallToolResult:
     """组装携带 structuredContent 的工具结果，content 为「摘要 + JSON 镜像 + 尾部块」。
 
-    规范建议返回 structuredContent 的工具同时在 content 中回传序列化 JSON；本函数是
-    该不变量的单一组装点，全部工具出口共用，尾部块承载缩略图预览等内容。摘要文本
-    在装配点经 sanitize_summary_lines 按行整形：压平控制字符、剥离未配对代理，须
-    原样回显的文件名与 URL（含零宽字符）保持原文，凭据掩码由错误构造点的边界净化
-    承担。载荷尺寸估算达到卸载阈值时镜像构建的树遍历、净化与序列化下沉
-    专用 CPU 线程池执行，小载荷内联构建免线程往返；两条路径失败时
-    同样降级为无镜像结果并记录告警，is_error 取值保持不变。
+    规范建议返回 structuredContent 的工具同时在 content 中回传序列化 JSON；
+    本函数是该不变量的单一组装点，尾部块承载缩略图预览等内容。
+    摘要文本在装配点经 sanitize_summary_lines 按行整形：压平控制字符、剥离未配对代理，
+    须原样回显的文件名与 URL（含零宽字符）保持原文，凭据掩码由错误构造点的边界净化承担。
+    载荷尺寸估算达到卸载阈值时镜像构建的树遍历、净化与序列化下沉 CPU 卸载池执行，
+    小载荷内联构建免线程往返；两条路径失败时同样降级为无镜像结果并记录告警，
+    is_error 取值保持不变。
     镜像通道经 output_channels_scope 关闭的调用方跳过镜像块免付构建成本，
     摘要与 structuredContent 不受影响。
 
@@ -501,7 +488,5 @@ __all__ = [
     "build_error_tool_result",
     "build_structured_json_text",
     "build_structured_tool_result",
-    "dump_compact_strict_json",
-    "dump_strict_json_bytes",
     "format_base64_placeholder",
 ]

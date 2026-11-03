@@ -14,7 +14,6 @@ import argparse
 import asyncio
 import hmac
 import ipaddress
-import json
 import ssl
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final, cast
@@ -37,6 +36,7 @@ from ..config.host_syntax import (
 from ..config import get_active_config
 from ..utils.core.errors import SeedreamConfigError, as_plain, error_text, raw_error_text
 from ..utils.core.http_int import strict_http_int
+from ..utils.core.json_envelope import SECURE_JSON_HEADER_BYTES, flat_error_body
 from ..utils.core.logs import get_logger
 from ..utils.core.loop_bound import loop_bound_semaphore
 from ..utils.core.settle import await_settled_op, settle_detached_op
@@ -60,8 +60,8 @@ ALWAYS_EXEMPT_EXACT_PATHS: frozenset[str] = frozenset({WELL_KNOWN_MCP_PATH})
 def _strip_ipv6_brackets(host: str) -> str:
     """剥离绑定地址的方括号，非方括号与带尾随内容的形态原样返回。
 
-    方括号语法与配置侧共用 _bracket_ipv6_literal，绑定地址不含端口，仅右方括号
-    收尾的纯方括号形态剥离，其余形态按原样参与回环与通配判定。
+    绑定地址不含端口，仅右方括号收尾的纯方括号形态剥离，
+    其余形态按原样参与回环与通配判定。
     """
     if not host.startswith("[") or host.find("]") != len(host) - 1:
         return host
@@ -88,14 +88,14 @@ def _is_loopback_address_literal(address: str) -> bool:
 def is_loopback_bind_host(host: str) -> bool:
     """判定绑定地址是否为回环地址，方括号形态与等价拼写同判回环。
 
-    cli 安全校验与本模块中间件共用；getaddrinfo 把 ::01 一类等价写法解析到
+    getaddrinfo 把 ::01 一类等价写法解析到
     回环，仅按字面量集合判定会把纯回环绑定按非回环口径强制令牌与 TLS。
     """
     return _is_loopback_address_literal(_strip_ipv6_brackets(host))
 
 
 def _ensure_printable_ascii_bind_host(host: str) -> None:
-    """绑定地址守卫：空串与非可打印 ASCII 装配期拒绝，判定与文案取自 host_syntax 的共用谓词。"""
+    """绑定地址守卫：空串与非可打印 ASCII 装配期拒绝。"""
     invalid_reason = bind_host_invalid_reason(host)
     if invalid_reason is not None:
         raise SeedreamConfigError(
@@ -170,7 +170,7 @@ def _loopback_allowlists() -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(hosts), tuple(origins)
 
 
-# 回环绑定 SDK 防护的 Host/Origin 白名单，Host 元组另供 Web 全 app 守卫共用。
+# 回环绑定 SDK 防护的 Host/Origin 白名单。
 _LOOPBACK_ALLOWED_HOSTS, _LOOPBACK_ALLOWED_ORIGINS = _loopback_allowlists()
 
 
@@ -227,8 +227,8 @@ async def _send_asgi_json(
     headers: list[tuple[bytes, bytes]] = [
         (b"content-type", b"application/json"),
         (b"content-length", str(length).encode("ascii")),
-        # 鉴权失败、超限与健康探针响应禁止缓存，避免代理缓存敏感状态码响应。
-        (b"cache-control", b"no-store"),
+        # 鉴权失败、超限与健康探针等动态状态禁缓存与嗅探。
+        *SECURE_JSON_HEADER_BYTES,
     ]
     headers.extend(extra_headers)
     await send(
@@ -260,10 +260,10 @@ def _content_length_or_none(value: bytes | None) -> int | None:
 def _strip_host_port(host: bytes) -> bytes:
     """剥离 Host 头值的端口部分，IPv6 字面量如 [::1]:8000 保留方括号主机部分。
 
-    结构切分消费 host_syntax 的 netloc 分解核，端口形态共用其条目侧端口谓词
-    （非 ASCII 字节按畸形拒绝），畸形端口与不可分解形态整值返回以偏离白名单
-    条目；空端口形态（[::1]:）按 SDK 口径容忍并剥离；头值经 latin-1 解码
-    往返切片，字节保持。
+    结构切分消费 host_syntax 的 netloc 分解核，
+    畸形端口与不可分解形态整值返回以偏离白名单条目；
+    空端口形态（[::1]:）按 SDK 口径容忍并剥离；
+    头值经 latin-1 解码往返切片，字节保持。
     """
     parts = _decompose_netloc(host.decode("latin-1"))
     if parts is None:
@@ -274,25 +274,20 @@ def _strip_host_port(host: bytes) -> bytes:
     return host_region.encode("latin-1")
 
 
-def _error_body(error: str, description: str) -> bytes:
-    """构造携带 error 与 error_description 两键的错误响应体字节串，各错误发送点共用。"""
-    return json.dumps({"error": error, "error_description": description}).encode("utf-8")
-
-
 async def _send_rejection(send: Send, status: int, code: str, description: str) -> None:
-    """尽力发送 JSON 拒绝响应并附 connection: close，全部拒绝发送点共用同一信封与吞没语义。"""
+    """尽力发送 JSON 拒绝响应并附 connection: close。"""
     await _send_best_effort(
         _send_asgi_json(
             send,
             status,
-            _error_body(code, description),
+            flat_error_body(code, description),
             extra_headers=((b"connection", b"close"),),
         )
     )
 
 
 async def _reject_body_too_large(send: Send) -> None:
-    """发送 413 超限拒绝，早拒与流中判定两处共用同一错误码与描述。"""
+    """发送 413 超限拒绝。"""
     await _send_rejection(send, 413, "request_too_large", "Request body exceeds limit")
 
 
@@ -390,7 +385,7 @@ class _BearerTokenAuthMiddleware:
         await _send_asgi_json(
             send,
             401,
-            _error_body(error, description),
+            flat_error_body(error, description),
             extra_headers=(
                 (b"www-authenticate", challenge),
                 (b"connection", b"close"),
@@ -434,9 +429,8 @@ class _BodyReadPolicy:
     """单请求的读体策略对象：申报头单点解析、接收字节单点累计、超限裁决单点共享。
 
     由外层请求体上限中间件创建并经 scope 键交给内层准入层，两层复用同一申报值
-    与同一计数，不重复解析头、不重复累计字节；流中超限裁决同样经此共享，
-    内层准入见裁决即收尾归还许可，413 发出后另经裁决监听主动送达，
-    不依赖下游拉帧观察。
+    与同一计数，不重复解析头、不重复累计字节。内层准入见裁决即收尾归还许可，
+    413 发出后另经裁决监听主动送达，不依赖下游拉帧观察。
     """
 
     def __init__(self, scope: Scope) -> None:
@@ -491,7 +485,7 @@ class _LimitRequestBodyMiddleware:
     永远发不出并把任务与连接钉住。超限后的 http.request 帧仅丢弃 body、
     保留真实帧的 more_body，其余帧原样透传，下游断连轮询在真实 receive 上自然
     挂起，客户端收到 413 断开或发完终帧后请求收尾。申报解析与字节累计
-    收在本层创建的 _BodyReadPolicy，经 scope 键与内层准入层共享（机制见该类 docstring）。
+    收在本层创建的 _BodyReadPolicy。
     仅作用于 http 请求，其余流量原样透传。
     """
 
@@ -623,7 +617,7 @@ class _BodyReadAdmission:
         self._policy.verdict_listener = self._on_outer_verdict
 
     def _stop_watchdog(self) -> None:
-        """拆除看门狗定时器，终帧与各收尾路径共用。"""
+        """拆除看门狗定时器。"""
         if self.watchdog is not None:
             self.watchdog.cancel()
             self.watchdog = None
@@ -671,7 +665,7 @@ class _BodyReadAdmission:
         return pending
 
     def _mark_abandoned(self) -> None:
-        """放弃收尾共用前置：置位放弃并拆看门狗，幂等。"""
+        """放弃收尾前置：置位放弃并拆看门狗，幂等。"""
         if self.abandoned:
             return
         self.abandoned = True
@@ -748,7 +742,7 @@ class _BodyReadAdmission:
         return message
 
     async def _finalize(self) -> None:
-        """收尾单点：拆看门狗、归还许可并等待 408 脱离发送落定，正常与异常路径共用。"""
+        """收尾单点：拆看门狗、归还许可并等待 408 脱离发送落定。"""
         self._stop_watchdog()
         self._release_gate()
         if self.timeout_send is not None:
@@ -950,7 +944,9 @@ class _ErrorBoundaryMiddleware:
             logger.opt(exception=True).error("streamable-http 请求处理未捕获异常")
             if response_started:
                 raise
-            await _send_asgi_json(send, 500, _error_body("internal_error", "Internal server error"))
+            await _send_asgi_json(
+                send, 500, flat_error_body("internal_error", "Internal server error")
+            )
 
 
 class _AppHostGuardMiddleware:
@@ -1017,8 +1013,7 @@ def _split_bare_netloc(netloc: str) -> tuple[str, int | None] | None:
     结构切分消费 host_syntax 的 netloc 分解核；空端口与 WHATWG 空端口视为
     缺省的口径一致（混合空端口形态的同源比对因此放行）。userinfo、游离
     右括号、未方括号 IPv6 裸形态（多冒号，URL 序列化必加方括号）、空主机
-    与为零、超范围端口的拒绝为本侧策略（为零口径与 _host_port_invalid_reason
-    一致），_same_origin 的 Origin 与 Host 两侧共用本管线。
+    与为零、超范围端口的拒绝为本侧策略（为零口径与 _host_port_invalid_reason 一致）。
     """
     if "@" in netloc:
         return None
@@ -1431,8 +1426,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     事后追加不生效；静态挂载则在 app 构造后向活体路由表追加。仅使用 MCPServer 公开
     接口 streamable_http_app() 获取 ASGI 应用；max_request_body_size 显式传入活动配置的
     http_max_body_size，SDK 默认 4MB 远低于本项目 base64 图片输入的 64MB 上限，
-    该上限同时供 SDK 内层与本项目中间件两层消费。run_streamable_http 与生产装配
-    测试共用本函数构建同源栈。
+    该上限同时供 SDK 内层与本项目中间件两层消费。
     """
     from .runtime import mcp
 

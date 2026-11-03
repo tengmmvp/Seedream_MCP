@@ -494,6 +494,8 @@ async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
     headers = dict(start["headers"])
     assert headers[b"www-authenticate"] == b'Bearer error="invalid_token"'
     assert headers[b"content-type"] == b"application/json"
+    assert headers[b"cache-control"] == b"no-store"
+    assert headers[b"x-content-type-options"] == b"nosniff"
     assert body_msg["type"] == "http.response.body"
     body = json.loads(body_msg["body"])
     assert body["error"] == "invalid_token"

@@ -28,8 +28,6 @@ from seedream_mcp.tools.outputs import (
     _strip_result_payload_surrogates,
     build_structured_json_text,
     build_structured_tool_result,
-    dump_compact_strict_json,
-    dump_strict_json_bytes,
     format_base64_placeholder,
 )
 from seedream_mcp.tools.pipeline import output_channels_scope
@@ -39,6 +37,10 @@ from seedream_mcp.utils.core.executors import (
     CpuOffloadPoolClosedError,
     load_json_bytes,
     shutdown_cpu_offload_executor,
+)
+from seedream_mcp.utils.core.json_envelope import (
+    dump_compact_strict_json,
+    dump_strict_json_bytes,
 )
 from seedream_mcp.utils.core.sanitizers import estimate_output_length, utf8_value_leaf_length
 from seedream_mcp.tools.handlers.browse_images import handle_browse_images
