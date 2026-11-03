@@ -37,6 +37,7 @@ from ...utils.core.sanitizers import (
 from ...utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ...utils.core.logs import get_logger
 from ...utils.io.path import (
+    RELATIVE_PATH_CONFINEMENT_MESSAGE,
     get_read_context,
     get_workspace_roots,
     is_within_any,
@@ -79,7 +80,7 @@ _MAX_UNREADABLE_DIR_LISTING = 5
 # TRUNCATED 的文本通道可见标记为固定文案；SKIPPED 与 STALLED 依赖伴随信号，
 # 在 _incomplete_marker_text 内拼出。
 _TRUNCATED_MARKER_TEXT = "目录条目过多，结果可能不完整"
-# 未扫尽页的续扫导引前缀，空结果与成功两条装配通道共用。
+# 未扫尽页的续扫导引前缀。
 _CONTINUE_SCAN_HINT_TEXT = "扫描未完成，继续扫描请传 offset="
 
 
@@ -106,7 +107,7 @@ def _incomplete_marker_text(scan_result: ScanResult | None) -> str | None:
 
 @dataclass(frozen=True)
 class _BrowseRequestState:
-    """单次浏览请求的状态快照，供成功、空结果与错误分支共享取值。
+    """单次浏览请求的状态快照。
 
     Attributes:
         workspace_roots: 本次请求生效的工作区根列表，会话声明时为 MCP Roots，
@@ -222,7 +223,7 @@ def _build_browse_structured_result(
     scan_result: ScanResult | None = None,
     error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """集中构建 browse_images 的 structuredContent，成功、空结果与失败三分支共用。
+    """集中构建 browse_images 的 structuredContent。
 
     请求回显字段取自 state，差异字段经关键字参数传入。经
     ``BrowseImagesStructuredOutput`` 构造后 model_dump，使输出与声明的 outputSchema
@@ -395,8 +396,8 @@ def _build_display_entries(
         img_resolved = image_entry.resolved_path
         # as_posix 仅归一分隔符，POSIX 文件名中的字面反斜杠保持原样可回流。
         display_path = img_resolved.as_posix()
-        # 文本通道压平控制字符，防止含控制字符文件名伪造清单行；口径与 errors 的
-        # 净化共用 CONTROL_CHARS_PATTERN；结构化路径保持原样供回流。
+        # 文本通道压平控制字符，防止含控制字符文件名伪造清单行。
+        # 结构化路径保持原样供回流。
         text_path = CONTROL_CHARS_PATTERN.sub(" ", display_path)
         detail_text, details = _format_file_info(text_path, image_entry, show_details)
         lines.append(f"{idx}. {detail_text}")
@@ -504,8 +505,7 @@ async def _resolve_browse_directories(
     def _read_scope_and_resolve_dir() -> tuple[list[Path], list[Path], Path | None, str | None]:
         """求值工作区、图片目录与读权限并解析请求目录。
 
-        三类位置经 get_read_context 单点求值共享，消除本函数内对图片目录与工作区
-        的重复解析；请求目录解析经 resolve_against_base 与 Web 图库共用同一组合。
+        三类位置经 get_read_context 单点求值共享，消除本函数内对图片目录与工作区的重复解析。
         """
         workspace_roots, images_root, read_scope = get_read_context()
         if resolved_directory is not None:
@@ -528,7 +528,7 @@ async def _resolve_browse_directories(
                 workspace_roots,
                 read_scope,
                 None,
-                "相对路径仅限图片保存目录内，其他位置请使用绝对路径",
+                RELATIVE_PATH_CONFINEMENT_MESSAGE,
             )
         # 基集合只用一次，判定走 is_within_any，内部逐基现算恰宜。
         if not is_within_any(resolved_dir, read_scope):
@@ -648,7 +648,7 @@ def _continue_tail_texts(
     page: _BrowsePage,
     scan_result: ScanResult | None,
 ) -> tuple[str | None, str | None]:
-    """派生文本通道尾部的续扫导引与未完成标记，成功与空结果两条装配通道共用。
+    """派生文本通道尾部的续扫导引与未完成标记。
 
     has_more 页改走翻页引导不取导引；空页续扫偏移等于原偏移，文本同样导引
     原地重扫。
@@ -921,7 +921,7 @@ async def handle_browse_images(
             resolved_directory=resolved_directory,
         )
     except Exception as exc:
-        # 用户文案单次计算供日志与兜底装配共用，档案仅取 user_hint 判定指引叠加。
+        # 档案仅取 user_hint 判定指引叠加。
         user_facing = format_error_for_user(exc)
         log_tiered_failure(logger, exc, "浏览图片处理失败", user_facing=user_facing)
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")

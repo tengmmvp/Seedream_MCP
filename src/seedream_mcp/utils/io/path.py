@@ -55,8 +55,7 @@ def reset_workspace_roots(token: Token[tuple[Path, ...] | None]) -> None:
     _WORKSPACE_ROOTS_VAR.reset(token)
 
 
-# Windows 保留设备名清单：CON/NUL/COM1 等作最终分量时被解释为设备而非文件，
-# normalize_path 的拒绝与 storage 的文件名净化经 is_windows_reserved_name 共用。
+# Windows 保留设备名清单：CON/NUL/COM1 等作最终分量时被解释为设备而非文件。
 WINDOWS_RESERVED_NAMES = frozenset(
     {
         "CON",
@@ -89,8 +88,7 @@ def is_windows_reserved_name(name: str) -> bool:
     """判断文件名是否命中 Windows 保留设备名。
 
     Windows 解析前剥离前导点与首尾空格并取首个点前词干，CON.txt、con. 与 .CON
-    同样命中；normalize_path 与 roots 的读侧拒绝、storage 的文件名净化
-    共用本判定。
+    同样命中。
 
     Args:
         name: 待判定的文件名。
@@ -129,7 +127,7 @@ _CacheValueT = TypeVar("_CacheValueT")
 
 
 class ResolveResultCache(Generic[_CacheValueT]):
-    """带锁与可选 TTL 的 LRU 缓存，配置根、扫描条目、resolve 失败负缓存与打包资源解析目标共用骨架。
+    """带锁与可选 TTL 的 LRU 缓存。
 
     映射协议供测试的预热与断言，同样经锁与容量上限约束；TTL 为 None 时条目
     仅经 clear 与容量驱逐失效。
@@ -212,8 +210,7 @@ EnvValueProvider = Callable[[], str | None]
 _WORKSPACE_ROOT_ENV = "SEEDREAM_WORKSPACE_ROOT"
 _DATA_ROOT_ENV = "SEEDREAM_DATA_ROOT"
 
-# 读取范围授权指引的环境变量尾段，浏览与参考图读取的用户可见提示及 Web 端配置
-# 指引共用，env 改名时单点维护。
+# 读取范围授权指引的环境变量尾段，env 改名时单点维护。
 READ_SCOPE_AUTH_ENV_HINT = f"{_WORKSPACE_ROOT_ENV} 或 {_DATA_ROOT_ENV}"
 
 
@@ -227,6 +224,10 @@ def read_scope_denial_message(noun: str) -> str:
             noun=as_plain(noun),
         ),
     )
+
+
+# 相对路径仅限图片目录的策略提示。
+RELATIVE_PATH_CONFINEMENT_MESSAGE = "相对路径仅限图片保存目录内，其他位置请使用绝对路径"
 
 
 _env_value_providers: dict[str, EnvValueProvider] = {}
@@ -319,9 +320,6 @@ def resolve_rejecting_cycle(path: Path) -> Path:
 
 def resolve_cached_default_images_root(workspace_root: Path) -> Path:
     """解析工作根目录下的默认图片目录，按 "default-images:"+工作根目录字符串做进程级缓存。
-
-    与显式配置分支共用 _DATA_ROOT_RESOLVE_CACHE，随
-    clear_resolved_env_root_cache 一并失效。
 
     Args:
         workspace_root: 已 resolve 的工作根目录。
@@ -586,7 +584,7 @@ def resolve_images_root() -> Path:
 
 
 def get_read_context() -> tuple[list[Path], Path, list[Path]]:
-    """一次求值 (工作区声明集合, 图片目录, 读权限)，供读取链各消费方共享单次结果。
+    """一次求值 (工作区声明集合, 图片目录, 读权限)。
 
     显式数据根目录可用时，工作区声明链不可解析仅使工作区为空、读权限退化为
     仅图片目录并记录；未声明时同一坏根先行上抛，图片目录自身不可解析照常上抛。
@@ -694,7 +692,7 @@ def is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
     """判断已 resolve 的路径是否位于已 resolve 的基目录内。
 
     镜像 is_within_any 的委托形态，单基经 is_within_any_nc_parts 完成判定与
-    空基护栏，不再重复 resolve；供循环场景复用以避免重复解析。包含语义与
+    空基护栏，不再重复 resolve。包含语义与
     pathlib relative_to 等价，等价性随 normcase_parts 的 pathlib 同口径折叠
     按构造成立。
 
@@ -732,7 +730,7 @@ def is_unc_path(path_str: str) -> bool:
 
     混合形态仅在 win32 判为 UNC，POSIX 反斜杠是合法文件名字符；统一分隔符
     形态各平台一致拒绝。UNC 的 resolve 在 Windows 触发 SMB 认证，须在
-    resolve 前拦截。path 与 images 组的候选守卫共用本判定。
+    resolve 前拦截。
     """
     stripped = path_str.lstrip()
     if len(stripped) < 2:
@@ -769,8 +767,7 @@ def has_windows_colon_component(path: str) -> bool:
     """判断 win32 下路径是否存在含冒号的分量，即 NTFS 备用数据流形态。
 
     驱动器符与其带根形态为合法前缀，跳过；非 win32 平台恒返回 False，冒号在
-    POSIX 是合法文件名字符。normalize_path 与参考图读取链共用本判定，保持
-    单一规则。
+    POSIX 是合法文件名字符。
 
     Args:
         path: 输入路径字符串，可为相对或绝对。
@@ -794,8 +791,7 @@ def is_drive_relative(path: Path) -> bool:
     """判断路径是否为盘符相对形态（C:foo）：有 drive 无 root。
 
     基目录与输入异盘时 pathlib 拼接丢弃基目录、resolve 落到输入盘的进程 CWD；
-    POSIX 无 drive 恒返回 False。normalize_path、file URI 转换与参考图候选定位
-    共用本判定。
+    POSIX 无 drive 恒返回 False。
 
     Args:
         path: 待判定的路径对象。
@@ -809,8 +805,7 @@ def is_drive_relative(path: Path) -> bool:
 def is_windows_rooted_without_drive(path: Path) -> bool:
     """判断 win32 下路径是否有根无盘符（/foo），POSIX 该形态为合法绝对路径恒 False。
 
-    pathlib 拼接对该形态锚定重置为基目录所在盘的盘根，落点逃出基目录。normalize_path、
-    file URI 转换与参考图候选定位共用本判定，保持三处拒绝口径一致。
+    pathlib 拼接对该形态锚定重置为基目录所在盘的盘根，落点逃出基目录。
 
     Args:
         path: 待判定的路径对象。
@@ -836,7 +831,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
     """
     try:
         # Python 3.13 起 resolve 对空字节不再抛 ValueError，改入口显式拒绝保证
-        # 跨版本行为一致；判定经 has_null_byte 与 file URI 转换共用单一来源。
+        # 跨版本行为一致。
         if has_null_byte(path):
             raise ValueError(raw_error_text("路径含空字节: {path}", path=as_text(path)))
         path_obj = Path(path)
@@ -848,8 +843,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
             )
 
         # 驱动器相对路径有 drive 无 root，base_dir 与其异盘时 pathlib 拼接丢弃
-        # base_dir、resolve 落到该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝；
-        # 判定经 is_drive_relative 与 file URI 转换、参考图候选定位共用单一来源。
+        # base_dir、resolve 落到该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝。
         if is_drive_relative(path_obj):
             raise ValueError(
                 raw_error_text("拒绝驱动器相对路径以避免绕过基目录解析: {path}", path=as_text(path))
@@ -857,8 +851,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
 
         # 有根无盘符形态有 root 无 drive，is_absolute 判为 False 会被当相对路径拼
         # 基目录，但 pathlib 拼接对该形态锚定重置为基目录所在盘的盘根、落点逃出
-        # 基目录，与驱动器相对同口径在 resolve 前拒绝；判定经
-        # is_windows_rooted_without_drive 共用单一来源，POSIX 该形态即合法绝对
+        # 基目录，与驱动器相对同口径在 resolve 前拒绝。POSIX 该形态即合法绝对
         # 路径恒不触发。
         if is_windows_rooted_without_drive(path_obj):
             raise ValueError(
@@ -869,8 +862,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         # 已验证路径字符串才与实际打开的文件名一致；仅名称级归一，不改变越界判定。
         if sys.platform == "win32":
             # 分量含冒号是 NTFS 备用数据流形态，流名不参与越界判定，逐分量拒绝；
-            # 驱动器符与其带根形态为合法前缀，判定经 has_windows_colon_component
-            # 与参考图读取链共用单一来源。
+            # 驱动器符与其带根形态为合法前缀。
             if has_windows_colon_component(path):
                 raise ValueError(
                     raw_error_text(
@@ -882,8 +874,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
             polished_name = final_name.rstrip(". ") if final_name else final_name
             if polished_name and polished_name != final_name:
                 path_obj = path_obj.with_name(polished_name)
-            # Windows 保留设备名作最终分量会被解释为设备而非文件，判定经
-            # is_windows_reserved_name 与 sanitize_filename 单一来源。
+            # Windows 保留设备名作最终分量会被解释为设备而非文件。
             if is_windows_reserved_name(polished_name):
                 raise ValueError(
                     raw_error_text(
@@ -929,7 +920,7 @@ class BoundedResolution(NamedTuple):
 
 
 def resolve_against_base(path: str, base: Path) -> BoundedResolution:
-    """以 base 为基准解析路径并判定界内性，解析组合单源供多端共用。
+    """以 base 为基准解析路径并判定界内性。
 
     形态拒绝语义随 normalize_path 单源演化，调用方各自保留错误通道；界内性为
     is_within_resolved 的纯词法比较，不做文件系统 IO。
@@ -949,7 +940,7 @@ def resolve_against_base(path: str, base: Path) -> BoundedResolution:
 
 
 def images_root_relative(path: str | Path, images_root: Path) -> str | None:
-    """返回路径相对图片目录的正斜杠形态，供 Web 端点改写条目路径共用。
+    """返回路径相对图片目录的正斜杠形态。
 
     Args:
         path: 待相对化的路径。

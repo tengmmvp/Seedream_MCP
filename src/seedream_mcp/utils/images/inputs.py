@@ -35,6 +35,7 @@ from ..core.formats import encode_data_uri
 from ..core.inflight import TransientInflightError
 from ..core.logs import get_logger
 from ..io.path import (
+    RELATIVE_PATH_CONFINEMENT_MESSAGE,
     get_read_context,
     is_unc_path,
     is_within_resolved,
@@ -118,9 +119,8 @@ def _resolves_outside_read_scope(
 ) -> bool:
     """判断输入路径解析后的物理位置是否落在读权限之外。
 
-    候选管线与 resolve_local_image_candidate 共用 iter_local_candidates，任一
-    候选命中读权限任一目录即界内。UNC 路径不 resolve 以免触发 SMB 连接，UNC
-    输入直接返回 False 交诊断分支处理。
+    任一候选命中读权限任一目录即界内。UNC 路径不 resolve 以免触发 SMB 连接，
+    UNC 输入直接返回 False 交诊断分支处理。
     """
     if is_unc_path(normalized):
         return False
@@ -150,14 +150,13 @@ def _format_local_read_error(exc: OSError, normalized: str) -> ErrorText:
 def _prepare_local_image(normalized: str, original: str) -> str:
     """校验本地图片路径并读取编码为 Base64 Data URI。
 
-    候选定位委托 resolve_local_image_candidate，与 ImagePreparer 的缓存签名共用
-    同一选择规则，锁定同一文件；调用方已完成定位时经 local_candidate_ctx 传入，
-    读取复用同一候选不再二次定位。(图片目录, 读权限) 经 get_read_context 在函数顶
-    部单点求值，各分支共享，消除一次失败请求内的重复解析。畸形形态透出
-    normalize_path 的拒绝原因；越界抛携带配置指引的错误；界内定位失败经
-    validate_image_path 做诊断性校验，取具体失败原因并附图片目录内的相似路径
-    建议。各失败均属参数校验语义而非 API 调用失败，归
-    SeedreamValidationError。需在工作线程中调用。
+    候选定位委托 resolve_local_image_candidate，锁定同一文件；调用方已完成定位时
+    经 local_candidate_ctx 传入，读取复用同一候选不再二次定位。(图片目录, 读权限)
+    经 get_read_context 在函数顶部单点求值，消除一次失败请求内的重复解析。
+    畸形形态透出 normalize_path 的拒绝原因；越界抛携带配置指引的错误；界内定位失败
+    经 validate_image_path 做诊断性校验，取具体失败原因并附图片目录内的相似路径建议。
+    各失败均属参数校验语义而非 API 调用失败，归 SeedreamValidationError。
+    需在工作线程中调用。
     """
     found = local_candidate_ctx.get()
     if found is None:
@@ -179,7 +178,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
                 resolved_probe, images_root
             ):
                 raise SeedreamValidationError(
-                    "相对路径仅限图片保存目录内，其他位置请使用绝对路径",
+                    RELATIVE_PATH_CONFINEMENT_MESSAGE,
                     field="image",
                     value=normalized,
                 )
@@ -210,7 +209,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
 
     validated_path, _ = found
 
-    # 读取、限额复核、格式维度与出站标签校验经共享辅助，与校验链同一判定口径。
+    # 读取、限额复核、格式维度与出站标签校验经共享辅助。
     # 内存峰值：读取字节、b64 编码与 data URI 拼接约为单图的 5.5×，
     # 并发 5 × 30MB 上限下瞬态约 800MB；PIL 解码成本落在工作线程而非事件循环。
     image_bytes, media_type = read_and_decode_local_image(
