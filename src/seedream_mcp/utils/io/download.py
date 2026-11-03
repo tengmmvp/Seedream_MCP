@@ -137,12 +137,12 @@ _FORMAT_EQUIVALENT_EXTENSIONS: tuple[frozenset[str], ...] = tuple(
     if len(family_extensions) > 1
 )
 
-# 字节签名校验失败的统一拒绝文案，流内即时判定与流末兜底两处共用。
+# 字节签名校验失败的统一拒绝文案。
 _SIGNATURE_REJECTION_MESSAGE = "下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造"
 
 
 def _is_gzip_head(content: bytes) -> bool:
-    """判定字节头是否为 gzip 魔数（0x1f8b），供终验解码回退嗅探容器形态。"""
+    """判定字节头是否为 gzip 魔数（0x1f8b）。"""
     return content[:2] == b"\x1f\x8b"
 
 
@@ -165,36 +165,66 @@ def _inflate_part_file_capped(path: Path, wbits: int, max_output: int) -> bytear
     """分块流式读取临时文件解压并以 max_output 封顶解码输出，防解压炸弹。
 
     压缩体不整段驻留内存，按 _DOWNLOAD_CHUNK_SIZE 逐块读取喂 decompressobj，
-    峰值收敛为约 1×解码输出加固定块缓冲。产出超限、输入尽而未收束、收束后
-    仍有残留输入（块内 unused_data/unconsumed_tail 与文件未读入字节）抛
+    峰值收敛为约 1×解码输出加固定块缓冲。产出超限、输入尽而未收束抛
     ValueError，流损坏由 zlib 抛 zlib.error，调用方统一归为终态拒绝；
     max_length 限额逐轮取回 unconsumed_tail，单轮产出有界。
+
+    成员收束后的残留按容器分治：gzip 容器（wbits=16+MAX_WBITS）放宽——
+    残留以 gzip 魔数开头即换新 decompressobj 接力解压后续成员
+    （输出累计仍受 max_output 封顶），NUL 残留以排空至 EOF 全 NUL 为准
+    容忍为尾部填充；其余残留与 zlib 包装容器的任何残留维持 ValueError
+    终态拒绝。
     """
+    gzip_container = wbits == 16 + zlib.MAX_WBITS
     decomp = zlib.decompressobj(wbits=wbits)
     out = bytearray()
     with open_no_follow_read(path) as handle:
-        while not decomp.eof:
-            chunk = handle.read(_DOWNLOAD_CHUNK_SIZE)
-            if not chunk:
-                raise ValueError("压缩流未完整收束")
-            pending: bytes = chunk
-            while pending:
-                produced = decomp.decompress(pending, _DOWNLOAD_CHUNK_SIZE)
-                out += produced
-                if len(out) > max_output:
-                    raise ValueError("解码输出超过上限")
-                if decomp.eof:
-                    # eof 即收束：跨 max_length 轮次收束时残留输入滞留 unconsumed_tail，
-                    # 循环内不再消费，残留判定统一移到循环外。
+        # 已读入未消费的输入字节。
+        pending: bytes = b""
+        while True:
+            while not decomp.eof:
+                if not pending:
+                    pending = handle.read(_DOWNLOAD_CHUNK_SIZE)
+                    if not pending:
+                        raise ValueError("压缩流未完整收束")
+                while pending:
+                    produced = decomp.decompress(pending, _DOWNLOAD_CHUNK_SIZE)
+                    out += produced
+                    if len(out) > max_output:
+                        raise ValueError("解码输出超过上限")
+                    if decomp.eof:
+                        # eof 即收束：跨 max_length 轮次收束时残留输入滞留 unconsumed_tail，
+                        # 循环内不再消费，残留判定统一移到成员收束处。
+                        break
+                    pending = decomp.unconsumed_tail
+            pending = decomp.unused_data
+            # 成员魔数可能恰在读取块边界后：补足两字节判定窗口，文件读尽则止。
+            while len(pending) < 2:
+                tail = handle.read(_DOWNLOAD_CHUNK_SIZE)
+                if not tail:
                     break
-                pending = decomp.unconsumed_tail
-        if handle.read(1) or decomp.unused_data or decomp.unconsumed_tail:
+                pending += tail
+            if not pending:
+                break
+            if gzip_container and _is_gzip_head(pending):
+                decomp = zlib.decompressobj(wbits=wbits)
+                continue
+            if gzip_container and not pending.strip(b"\x00"):
+                # 尾部填充判定排空至 EOF：窗口外出现垃圾或后续成员即拒绝，
+                # 接受与否不依赖块对齐。
+                while True:
+                    tail = handle.read(_DOWNLOAD_CHUNK_SIZE)
+                    if not tail:
+                        break
+                    if tail.strip(b"\x00"):
+                        raise ValueError("压缩流含残留尾部")
+                break
             raise ValueError("压缩流含残留尾部")
     return out
 
 
-# 只读文件系统、磁盘满与配额超限类永久文件系统 errno：解码回退写回与重试循环
-# 共用的终态判定集。
+# 只读文件系统、磁盘满与配额超限类永久文件系统 errno：
+# 解码回退写回与重试循环的终态判定集。
 _PERMANENT_FS_ERRNOS = frozenset({errno.EROFS, errno.ENOSPC, errno.EDQUOT})
 
 
@@ -290,19 +320,16 @@ _TERMINAL_GAI_ERRNOS = frozenset(
     if code is not None
 )
 
-# 域名解析失败文案的共用模板：主机与底层异常以分类参数进入，gaierror 与其余 OSError
-# 的解析失败经单一构造按终止性选异常类上抛。
+# 域名解析失败文案的模板：主机与底层异常以分类参数进入。
 _DNS_RESOLVE_FAILURE_TEMPLATE = "域名解析失败: {host} ({exc})"
 
-# 域名解析结果为空文案的共用模板：主机以分类参数进入，两个上抛点共享单一来源。
+# 域名解析结果为空文案的模板：主机以分类参数进入。
 _DNS_EMPTY_RESULT_TEMPLATE = "域名解析结果为空: {host}"
 
-# 无效 URL 文案的共用模板：URL 以分类参数进入，静态校验、重定向解析与保存侧
-# 校验的上抛点共享单一来源；供 save 模块跨模块引用，公共名不带下划线前缀。
+# 无效 URL 文案的模板：URL 以分类参数进入，公共名不带下划线前缀。
 INVALID_URL_TEMPLATE = "无效的URL: {url}"
 
-# HTTP 状态错误文案的共用模板：状态码以分类参数进入，非 200 终态的重试与终态
-# 两条路径经单一构造按终止性选异常类上抛。
+# HTTP 状态错误文案的模板：状态码以分类参数进入。
 _HTTP_ERROR_TEMPLATE = "HTTP错误: {status}"
 
 
@@ -718,7 +745,7 @@ async def _classify_range_response(
                 ),
             )
         if declared_total is not None and declared_total >= resume.offset:
-            # 声明总长不小于已确认偏移：排空响应体，总长随描述符下传，完成与违约终态共用。
+            # 声明总长不小于已确认偏移：排空响应体，总长随描述符下传。
             await _drain_response_quietly(response)
             if declared_total == resume.offset:
                 # 服务器证明全部字节已收讫；完成态同 206 口径核验表示身份，
@@ -1083,7 +1110,7 @@ class DownloadManager:
 
     @staticmethod
     def _extract_peer_ip(response: aiohttp.ClientResponse) -> str | None:
-        """从底层传输连接中提取实际对端 IP，供连接后复核使用。"""
+        """从底层传输连接中提取实际对端 IP。"""
         connection = response.connection
         if connection is None or connection.transport is None:
             return None

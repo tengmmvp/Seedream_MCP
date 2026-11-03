@@ -1499,25 +1499,77 @@ async def test_download_forced_gzip_cross_chunk_output_decoded_and_saved(
 
 
 @pytest.mark.parametrize(
-    "body",
+    "body,expected",
     [
-        pytest.param(gzip.compress(_DECODE_CROSS_CHUNK_BODY) + b"XX", id="trailing-bytes"),
         pytest.param(
             gzip.compress(_DECODE_CROSS_CHUNK_BODY) + gzip.compress(_DECODE_BODY),
+            _DECODE_CROSS_CHUNK_BODY + _DECODE_BODY,
             id="multi-member",
+        ),
+        pytest.param(
+            gzip.compress(_DECODE_CROSS_CHUNK_BODY) + gzip.compress(_DECODE_BODY) + b"\x00" * 9,
+            _DECODE_CROSS_CHUNK_BODY + _DECODE_BODY,
+            id="multi-member-nul-tail",
+        ),
+        pytest.param(
+            gzip.compress(_DECODE_CROSS_CHUNK_BODY) + b"\x00" * 16,
+            _DECODE_CROSS_CHUNK_BODY,
+            id="nul-padding",
+        ),
+        pytest.param(
+            gzip.compress(_DECODE_CROSS_CHUNK_BODY)
+            + b"\x00" * (io_download_module._DOWNLOAD_CHUNK_SIZE + 1),
+            _DECODE_CROSS_CHUNK_BODY,
+            id="nul-padding-over-chunk",
         ),
     ],
 )
-async def test_download_forced_gzip_cross_chunk_residue_is_terminal(
+async def test_download_forced_gzip_members_and_nul_tail_decoded_and_saved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     no_sleep: None,
     body: bytes,
+    expected: bytes,
 ) -> None:
-    """跨块输出收束后仍有残留输入（附加字节或多成员 gzip）：终态拒绝而非死循环。
+    """gzip 多成员接力与全 NUL 尾部填充：拼接解码字节落盘而非终态拒绝。
 
-    wait_for 使死循环回归快速失败而非挂起测试套件。
+    wait_for 使成员接力回归死循环时快速失败而非挂起测试套件。
     """
+    manager = DownloadManager()
+    session = _FakeSession([_compressed_success_response(body)])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await asyncio.wait_for(
+        manager.download_image("https://example.com/img.png", save_path), timeout=30
+    )
+
+    assert result["success"] is True
+    assert result["attempts"] == 1
+    assert result["file_size"] == len(expected)
+    assert save_path.read_bytes() == expected
+    assert not list(tmp_path.glob("*.part"))
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        pytest.param(b"XX", id="garbage"),
+        pytest.param(b"\x00\x00XX", id="nul-then-garbage"),
+        pytest.param(
+            b"\x00" * io_download_module._DOWNLOAD_CHUNK_SIZE + b"XX",
+            id="nul-run-over-chunk-then-garbage",
+        ),
+    ],
+)
+async def test_download_forced_gzip_garbage_tail_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
+    tail: bytes,
+) -> None:
+    """gzip 收束后残留非魔数开头且非全 NUL：维持终态签名拒绝不落盘。"""
+    body = gzip.compress(_DECODE_CROSS_CHUNK_BODY) + tail
     manager = DownloadManager()
     session = _FakeSession([_compressed_success_response(body)])
     _patch_download_network(monkeypatch, manager, session)
@@ -1531,6 +1583,27 @@ async def test_download_forced_gzip_cross_chunk_residue_is_terminal(
     assert not isinstance(excinfo.value, RetryableDownloadError)
     assert session._idx == 1
     assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_forced_gzip_small_read_chunks_multi_member_decoded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """逐字节读取下成员魔数跨读取块边界：补读判定窗口后接力解压成功。"""
+    monkeypatch.setattr(io_download_module, "_DOWNLOAD_CHUNK_SIZE", 1)
+    body = gzip.compress(_DECODE_BODY) + gzip.compress(_DECODE_BODY)
+    manager = DownloadManager()
+    session = _FakeSession([_compressed_success_response(body)])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await asyncio.wait_for(
+        manager.download_image("https://example.com/img.png", save_path), timeout=30
+    )
+
+    assert result["success"] is True
+    assert result["attempts"] == 1
+    assert save_path.read_bytes() == _DECODE_BODY * 2
     assert not list(tmp_path.glob("*.part"))
 
 
@@ -2206,7 +2279,7 @@ def _interrupted_unknown_total_attempt() -> _FakeResponse:
 
 
 def _explicit_range_unknown_total_resume_response(content_length: int) -> _FakeResponse:
-    """构造总长未知、区间明确的 206：Content-Length 取传入值，供全量/分片两形态共用。"""
+    """构造总长未知、区间明确的 206：Content-Length 取传入值。"""
     remaining = _RESUME_BODY[_RESUME_SPLIT:]
     return _FakeResponse(
         status=206,
