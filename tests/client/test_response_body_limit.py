@@ -263,9 +263,8 @@ async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) 
 
         result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
 
-    # 无截断时不写 truncated_events 键：跨组契约约定 0 或缺省不携带该键，
-    # results/outputs 侧按键存在性渲染截断提示
-    assert "truncated_events" not in result
+    # 无截断时计数 0 原样透传，results 侧按值归一渲染提示
+    assert result["truncated_events"] == 0
     assert len(result["data"]) == 1
     assert len(result["data"][0]["b64_json"]) == b64_len
 

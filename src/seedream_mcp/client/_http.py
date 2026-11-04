@@ -618,7 +618,8 @@ class _ClientHTTPMixin:
         if not is_sse_response(response):
             return await self._parse_json_success_response(response, deadline)
 
-        sse_result = await parse_sse_response(
+        # truncated_events/deadline_exceeded 原样透传，results 侧提取器按值归一。
+        return await parse_sse_response(
             response,
             model_id=self.config.model_id,
             buffer_max_size=self.config.stream_buffer_max_size,
@@ -627,13 +628,6 @@ class _ClientHTTPMixin:
             log=self.logger,
             deadline=deadline,
         )
-        truncated_events = sse_result.pop("truncated_events", 0)
-        if isinstance(truncated_events, int) and truncated_events > 0:
-            sse_result["truncated_events"] = truncated_events
-        deadline_exceeded = sse_result.pop("deadline_exceeded", False)
-        if deadline_exceeded is True:
-            sse_result["deadline_exceeded"] = True
-        return sse_result
 
     async def _send_stream_request(
         self,

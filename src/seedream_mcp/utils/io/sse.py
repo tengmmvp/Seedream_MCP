@@ -729,8 +729,9 @@ async def parse_sse_response(
             重试，已有条目则保留部分结果返回。
 
     Returns:
-        包含 success/data/usage/status/tools 的统一结果字典；deadline 截止且已有
-        条目时另含 deadline_exceeded=True 与 status=partial。
+        恒含 success/data/usage/status/tools/truncated_events/deadline_exceeded
+        七键的统一结果字典；truncated_events=0、deadline_exceeded=False 为干净流
+        编码，事件被丢弃或超时提前终止时 status 收敛为 partial。
 
     Raises:
         SeedreamAPIError: 响应流累计接收字节超过 total_bytes_limit，或上游返回请求级
