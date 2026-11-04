@@ -885,13 +885,42 @@ def test_timeout_signal_timer_disarmed_after_use() -> None:
     _assert_imported_from_api(read_js_module_source("generate.js"), "withTimeoutSignal")
 
 
-def test_refs_fallback_budget_matches_server_derivation() -> None:
-    """refs.js 回退预算常量与服务端按默认请求体上限的推导一致。"""
+def test_refs_fallback_budget_conservative_and_server_sourced() -> None:
+    """refs.js 预算取值与来源三态同出单一访问器，回退值保守不超最小合法部署。
+
+    回退若按默认请求体上限复算，调参部署（低请求体上限）下放行的组装会被服务端 413
+    整拒；回退改按最小可配置请求体上限推导（得 0，宁拒勿超）。预算数值与拒绝
+    文案同源消费 uploadBudget：来源值经共用常量进 ZERO_BUDGET_REASONS 表
+    登记文案，未登记来源回落配置异常口径，不误报成部署上限事实。
+    """
     refs_js = read_js_module_source("refs.js")
-    match = re.search(r"DEFAULT_UPLOAD_BUDGET_CHARS = (\d+) \* 1024 \* 1024;", refs_js)
+    match = re.search(r"DEFAULT_UPLOAD_BUDGET_CHARS = (\d+);", refs_js)
     assert match, "refs.js 回退预算常量形态改变，守护需同步"
-    default_body = SeedreamConfig(api_key="guard-key").http_max_body_size
-    assert int(match.group(1)) * 1024 * 1024 == _upload_budget_chars(default_body)
+    floor_config = SeedreamConfig(api_key="guard-key", http_max_body_size=1024 * 1024)
+    assert int(match.group(1)) <= _upload_budget_chars(floor_config.http_max_body_size)
+    budget_access = function_body(refs_js, r"function uploadBudget\(.*?^}")
+    assert (
+        "state.configInfo.upload_budget_chars" in budget_access
+    ), "预算未收敛到消费服务端下发值的单一访问器"
+    reasons_table = re.search(r"ZERO_BUDGET_REASONS = new Map\(\[(.*?)\]\);", refs_js, re.DOTALL)
+    assert reasons_table, "零预算文案表形态改变，守护需同步"
+    # uploadBudget 新增来源漏登记文案在此拦截。
+    produced = set(re.findall(r"source: (BUDGET_SOURCE_\w+)", budget_access))
+    registered = set(re.findall(r"\[\s*(BUDGET_SOURCE_\w+),", reasons_table.group(1)))
+    assert produced, "uploadBudget 不再经 BUDGET_SOURCE 常量产出来源，守护需同步"
+    assert (
+        produced <= registered
+    ), f"uploadBudget 产出的来源常量未登记零预算文案: {sorted(produced - registered)}"
+    assert re.search(
+        r'BUDGET_SOURCE_INVALID,\s*"服务配置数据异常', reasons_table.group(1)
+    ), "字段非法未归因配置异常"
+    zero_reason = function_body(refs_js, r"function zeroBudgetReason\(.*?^}")
+    assert "state.configInfo" not in zero_reason, "拒绝文案绕过来源分流自行判配置态"
+    assert re.search(r"\?\?[^;]*BUDGET_SOURCE_INVALID", zero_reason), "未登记来源未回落配置异常口径"
+    add_reference = function_body(refs_js, r"export function addReference\(.*?^}")
+    assert (
+        "Math.ceil" in add_reference
+    ), "超预算文案的上限数值须向上取整，亚 KiB 预算取整到 0 会渲染 0KB 上限"
 
 
 def test_refs_fallback_ref_limit_matches_server_default() -> None:

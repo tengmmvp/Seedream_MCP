@@ -19,22 +19,56 @@ import {
 
 const SINGLE_REF_LIMIT = 1;
 const FUSION_REF_MIN = 2;
-// config-info 未加载时的回退默认：上限 14 与 unknown 家族一致，预算按默认
-// 请求体上限 64MiB 扣 3MiB 信封余量推导；加载后以服务端下发值为单一来源。
-const DEFAULT_UPLOAD_BUDGET_CHARS = 61 * 1024 * 1024;
+// config-info 未加载或字段非法时的回退参考图上限，与 unknown 家族一致。
 const DEFAULT_UNKNOWN_REF_LIMIT = 14;
+// 预算回退值：按最小可配置请求体上限扣信封余量推导得 0，宁拒勿超——回退放行量不得超出任何合法部署的真实上限。
+const DEFAULT_UPLOAD_BUDGET_CHARS = 0;
 
-// 预算为 0 时部署无法接受任何 data URI 上传。
-const ZERO_BUDGET_REASON =
-  "当前部署请求体上限过低，无法上传参考图，请改用图片 URL";
+const BUDGET_SOURCE_SERVER = "server";
+const BUDGET_SOURCE_UNLOADED = "unloaded";
+const BUDGET_SOURCE_INVALID = "invalid";
 
-// data URI 累计字符预算，来自服务端按请求体上限的推导；0 为有效预算，
-// 表示该上限容纳不下任何 data URI。
-function uploadBudgetChars() {
-  const fromServer = state.configInfo && state.configInfo.upload_budget_chars;
-  return Number.isFinite(fromServer) && fromServer >= 0
-    ? fromServer
-    : DEFAULT_UPLOAD_BUDGET_CHARS;
+// 预算为 0 时按来源分流的拒绝文案：合法零是部署上限事实，出路改用 URL；
+// 未加载是暂态、字段非法是载荷异常，补救均为刷新重取。
+const ZERO_BUDGET_REASONS = new Map([
+  [
+    BUDGET_SOURCE_SERVER,
+    "当前部署请求体上限过低，无法上传参考图，请改用图片 URL",
+  ],
+  [
+    BUDGET_SOURCE_INVALID,
+    "服务配置数据异常，暂无法校验上传体积，请刷新页面",
+  ],
+  [
+    BUDGET_SOURCE_UNLOADED,
+    "服务配置未加载，暂无法校验上传体积，请刷新页面或改用图片 URL",
+  ],
+]);
+
+// data URI 累计字符预算与来源三态；0 为有效预算，表示上限容纳不下任何 data URI。
+function uploadBudget() {
+  if (!state.configInfo) {
+    return {
+      budget: DEFAULT_UPLOAD_BUDGET_CHARS,
+      source: BUDGET_SOURCE_UNLOADED,
+    };
+  }
+  const fromServer = state.configInfo.upload_budget_chars;
+  if (!(Number.isFinite(fromServer) && fromServer >= 0)) {
+    return {
+      budget: DEFAULT_UPLOAD_BUDGET_CHARS,
+      source: BUDGET_SOURCE_INVALID,
+    };
+  }
+  return { budget: fromServer, source: BUDGET_SOURCE_SERVER };
+}
+
+// 未登记来源按配置异常口径收场，不误报成部署上限事实或未加载暂态。
+function zeroBudgetReason(source) {
+  return (
+    ZERO_BUDGET_REASONS.get(source) ??
+    ZERO_BUDGET_REASONS.get(BUDGET_SOURCE_INVALID)
+  );
 }
 
 // 未知模型（Endpoint ID 部署）的参考图上限，来自服务端 unknown 家族能力声明。
@@ -127,7 +161,7 @@ function dataUriTotalChars() {
 
 /** 追加 nextChars 字符后是否仍在 data URI 累计上限内。 */
 export function withinUploadBudget(nextChars) {
-  return dataUriTotalChars() + nextChars <= uploadBudgetChars();
+  return dataUriTotalChars() + nextChars <= uploadBudget().budget;
 }
 
 // 参考图区行内错误提示：拒绝原因落在表单内，替代阻塞式弹窗。
@@ -187,15 +221,17 @@ export function addReference(kind, value, preview) {
     return reason;
   }
   if (kind === "data_uri" && !withinUploadBudget(value.length)) {
-    const budget = uploadBudgetChars();
+    const { budget, source } = uploadBudget();
     if (budget <= 0) {
-      showRefError(ZERO_BUDGET_REASON);
-      return ZERO_BUDGET_REASON;
+      const reason = zeroBudgetReason(source);
+      showRefError(reason);
+      return reason;
     }
+    // 上限数值向上取整展示：1~1023 字符的预算向下取整会渲染出 0KB 上限。
     const budgetText =
       budget >= 1024 * 1024
-        ? `${Math.floor(budget / (1024 * 1024))}MB`
-        : `${Math.floor(budget / 1024)}KB`;
+        ? `${Math.ceil(budget / (1024 * 1024))}MB`
+        : `${Math.ceil(budget / 1024)}KB`;
     const reason = `参考图总量超过 ${budgetText} 上限，请改用图片 URL`;
     showRefError(reason);
     return reason;
@@ -215,8 +251,9 @@ export function addReference(kind, value, preview) {
  * @param {FileList} files - 待读取的文件列表。
  */
 export async function handleFiles(files) {
-  if (uploadBudgetChars() <= 0) {
-    showRefError(ZERO_BUDGET_REASON);
+  const { budget, source } = uploadBudget();
+  if (budget <= 0) {
+    showRefError(zeroBudgetReason(source));
     return;
   }
   const config = toolConfig(state.tool);
@@ -236,7 +273,7 @@ export async function handleFiles(files) {
     }
     // data URI 有 4/3 膨胀，加 64 字节头与填充余量。
     const projected = Math.ceil((file.size * 4) / 3) + 64;
-    if (batchChars + projected > uploadBudgetChars()) {
+    if (batchChars + projected > budget) {
       rejected.push(`${file.name}（超出参考图总量上限）`);
       continue;
     }

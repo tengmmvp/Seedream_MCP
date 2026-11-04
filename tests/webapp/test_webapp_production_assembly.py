@@ -174,6 +174,34 @@ async def test_config_info_fallback_budget_tracks_active_config(
     assert tuned > baseline
 
 
+async def test_config_info_upload_budget_tracks_body_size_limit(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """上传预算随请求体上限配置下发：前端预检与调参部署的真实上限同源。
+
+    下发若锁默认推导，低请求体上限部署的前端预检会放行注定被 413 整拒的组装。
+    """
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    default_config = SeedreamConfig(api_key="test_key", workspace_root=str(tmp_path))
+    set_active_config(default_config)
+    tuned_config = SeedreamConfig(
+        api_key="test_key",
+        http_max_body_size=8 * 1024 * 1024,
+        workspace_root=str(tmp_path),
+    )
+    app = _build_streamable_app("127.0.0.1", False, "", True)
+
+    async with web_asgi_client(app) as client:
+        baseline = (await client.get("/web/api/config-info")).json()["upload_budget_chars"]
+        set_active_config(tuned_config)
+        tuned = (await client.get("/web/api/config-info")).json()["upload_budget_chars"]
+
+    assert baseline == _upload_budget_chars(default_config.http_max_body_size)
+    assert tuned == _upload_budget_chars(tuned_config.http_max_body_size)
+    assert tuned < baseline
+
+
 async def test_production_app_without_web_returns_404(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
