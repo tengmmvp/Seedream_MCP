@@ -287,7 +287,6 @@ async def _single_trip_to_temp(
     manager: DownloadManager,
     response: Any,
     save_path: Path,
-    temp_suffix: str = ".png.part",
     content_type: str = "image/png",
     attempt: int = 0,
     wall_start_time: float | None = None,
@@ -300,19 +299,18 @@ async def _single_trip_to_temp(
     通行常量。
     """
     if wall_start_time is None:
-        wall_start_time = time.monotonic()
-    resume = _ResumeState(manager.max_file_size)
+        wall_start_time = time.time()
+    resume = _ResumeState(
+        max_file_size=manager.max_file_size,
+        save_path=save_path,
+        mono_start_time=time.monotonic(),
+        wall_start_time=wall_start_time,
+        fsync=fsync,
+    )
+    resume.attempt = attempt
     try:
         return await manager._stream_response_to_resume(
-            response,
-            resume,
-            save_path,
-            temp_suffix,
-            content_type,
-            attempt,
-            wall_start_time,
-            fsync,
-            _RangeClassification(),
+            response, resume, content_type, _RangeClassification()
         )
     finally:
         await resume.dispose()

@@ -1822,7 +1822,13 @@ async def test_decode_rewrite_fail_twice_restarts_and_reraises(
     part = tmp_path / "out.png.part"
     part.write_bytes(body)
     manager = DownloadManager()
-    resume = _ResumeState(manager.max_file_size)
+    resume = _ResumeState(
+        max_file_size=manager.max_file_size,
+        save_path=tmp_path / "out.png",
+        mono_start_time=0.0,
+        wall_start_time=0.0,
+        fsync=False,
+    )
     resume.path = part
     resume.head_bytes = body[:SNIFF_HEAD_BYTES_FLOOR]
     resume.offset = len(body)
@@ -3177,9 +3183,9 @@ async def test_download_resume_trip_truncates_and_reuses_temp_file(
     real_ensure_file = _ResumeState.ensure_file
     ensure_calls = {"count": 0}
 
-    def _counting_ensure_file(state: _ResumeState, directory: Path, suffix: str) -> bool:
+    def _counting_ensure_file(state: _ResumeState) -> bool:
         ensure_calls["count"] += 1
-        return real_ensure_file(state, directory, suffix)
+        return real_ensure_file(state)
 
     monkeypatch.setattr(_ResumeState, "ensure_file", _counting_ensure_file)
     manager = DownloadManager()

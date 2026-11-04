@@ -594,6 +594,11 @@ class _ResumeState:
 
     __slots__ = (
         "max_file_size",
+        "save_path",
+        "attempt",
+        "mono_start_time",
+        "wall_start_time",
+        "fsync",
         "fd",
         "path",
         "offset",
@@ -603,8 +608,24 @@ class _ResumeState:
         "content_type",
     )
 
-    def __init__(self, max_file_size: int) -> None:
+    # 双钟同型相邻，全量 keyword-only 防位置互换静默颠倒 mono/wall 口径。
+    def __init__(
+        self,
+        *,
+        max_file_size: int,
+        save_path: Path,
+        mono_start_time: float,
+        wall_start_time: float,
+        fsync: bool,
+    ) -> None:
         self.max_file_size = max_file_size
+        # 除 attempt 由重试循环逐趟刷新外，构造后均不变；
+        # 单调钟计预算耗时，墙钟记用户可见时间。
+        self.save_path = save_path
+        self.attempt = 0
+        self.mono_start_time = mono_start_time
+        self.wall_start_time = wall_start_time
+        self.fsync = fsync
         self.fd: int | None = None
         self.path: Path | None = None
         self.offset = 0
@@ -612,6 +633,11 @@ class _ResumeState:
         self.validator: str | None = None
         self.expected_total: int | None = None
         self.content_type = ""
+
+    @property
+    def temp_suffix(self) -> str:
+        """临时文件的可读性后缀：原扩展名后追加 .part，无扩展名回退 .bin。"""
+        return (self.save_path.suffix or ".bin") + ".part"
 
     def is_completed(self) -> bool:
         """判断是否为完成态：已确认字节恰达已知总长，越界交付不判完成。"""
@@ -621,11 +647,11 @@ class _ResumeState:
         """已持有临时文件 fd 与路径时为真。"""
         return self.fd is not None and self.path is not None
 
-    def ensure_file(self, directory: Path, suffix: str) -> bool:
+    def ensure_file(self) -> bool:
         """按需创建随机名临时文件，返回是否本次新建，重复调用幂等。"""
         if self.has_file():
             return False
-        self.fd, self.path = open_temp_fd(directory, suffix=suffix)
+        self.fd, self.path = open_temp_fd(self.save_path.parent, suffix=self.temp_suffix)
         return True
 
     def request_headers(self) -> dict[str, str]:
@@ -1225,12 +1251,7 @@ class DownloadManager:
         self,
         response: "aiohttp.ClientResponse",
         resume: _ResumeState,
-        save_path: Path,
-        temp_suffix: str,
         content_type: str,
-        attempt: int,
-        wall_start_time: float,
-        fsync: bool,
         classification: _RangeClassification,
     ) -> dict[str, Any]:
         """把单趟响应体追加到续传临时文件，流末校验后原子替换，返回结果字典。
@@ -1308,7 +1329,7 @@ class DownloadManager:
             fresh_file = False
         else:
             fresh_file = await await_settled_op(
-                asyncio.to_thread(resume.ensure_file, save_path.parent, temp_suffix),
+                asyncio.to_thread(resume.ensure_file),
                 absorb_all_cancels=True,
             )
         # fd 与 path 已持有或刚由 ensure_file 赋值，必非 None，cast 仅收窄 Optional 类型。
@@ -1452,18 +1473,9 @@ class DownloadManager:
             # 以流干净收尾为完成点：出站区间恒开至表示尾，干净收尾即尾部已尽；
             # 截断与连接中断仍经短体判定与异常路径走可重试。
             resume.expected_total = resume.offset
-        return await self._finalize_completed_resume(
-            resume, save_path, attempt, wall_start_time, fsync
-        )
+        return await self._finalize_completed_resume(resume)
 
-    async def _finalize_completed_resume(
-        self,
-        resume: _ResumeState,
-        save_path: Path,
-        attempt: int,
-        wall_start_time: float,
-        fsync: bool,
-    ) -> dict[str, Any]:
+    async def _finalize_completed_resume(self, resume: _ResumeState) -> dict[str, Any]:
         """完成态落盘终局：签名复核、路径修正与原子替换，返回结果字典。
 
         首趟流正常收尾与完成态重试共用本终局。字节头非受支持图片时先经
@@ -1492,6 +1504,7 @@ class DownloadManager:
             if not await self._decode_compressed_resume(resume):
                 raise DownloadError(_SIGNATURE_REJECTION_MESSAGE)
         head_bytes = resume.head_bytes
+        save_path = resume.save_path
         final_save_path = save_path
         sniffed = infer_extension_from_bytes(head_bytes)
         if sniffed != save_path.suffix.lower() and not _extensions_in_same_format(
@@ -1533,7 +1546,7 @@ class DownloadManager:
             resume.fd = None
             raise
         try:
-            await finalize_atomic_replace(fd, path, final_save_path, fsync=fsync)
+            await finalize_atomic_replace(fd, path, final_save_path, fsync=resume.fsync)
         except PermissionError as exc:
             # fsync/replace 遭杀软等瞬时持锁：保留完成态与数据，退避后重试重走终局。
             _raise_transient_file_lock("终局落盘", exc)
@@ -1542,7 +1555,7 @@ class DownloadManager:
         # 替换已成，临时路径随之消亡；失败路径保留供重试重走终局。
         resume.path = None
 
-        download_time = time.time() - wall_start_time
+        download_time = time.time() - resume.wall_start_time
         logger.info(
             "图片下载成功: {} ({} 字节, {:.2f}秒)",
             final_save_path,
@@ -1555,7 +1568,7 @@ class DownloadManager:
             "file_size": resume.offset,
             "download_time": download_time,
             "content_type": resume.content_type,
-            "attempts": attempt + 1,
+            "attempts": resume.attempt + 1,
         }
 
     async def _decode_compressed_resume(self, resume: _ResumeState) -> bool:
@@ -1627,12 +1640,6 @@ class DownloadManager:
         session: "aiohttp.ClientSession",
         url: str,
         headers: dict[str, str],
-        save_path: Path,
-        temp_suffix: str,
-        attempt: int,
-        start_time: float,
-        wall_start_time: float,
-        fsync: bool,
         resume: _ResumeState,
     ) -> dict[str, Any]:
         """执行单次下载尝试，含逐跳重定向循环，返回成功落盘结果字典。
@@ -1663,7 +1670,7 @@ class DownloadManager:
                 next_url = self._handle_redirect_response(response, current_url, redirect_count)
                 if next_url is not None:
                     # 每跳的会话 total 超时独立计窗，跟随前按单调钟累计校验总预算。
-                    elapsed = time.monotonic() - start_time
+                    elapsed = time.monotonic() - resume.mono_start_time
                     if elapsed >= self._download_total_budget():
                         raise asyncio.TimeoutError(
                             raw_error_text(
@@ -1692,9 +1699,7 @@ class DownloadManager:
                     # 保住终局可重试失败后的完成态捷径；完整数据已确认，
                     # 直接重走落盘终局。
                     resume.expected_total = classification.range_total
-                    return await self._finalize_completed_resume(
-                        resume, save_path, attempt, wall_start_time, fsync
-                    )
+                    return await self._finalize_completed_resume(resume)
                 if response.status != 200 and not classification.continuing:
                     await _drain_response_quietly(response)
                     # 5xx 与 408/429 多为瞬时故障或限流，纳入重试避免批量下载触发限流
@@ -1714,26 +1719,13 @@ class DownloadManager:
                     )
 
                 return await self._stream_response_to_resume(
-                    response,
-                    resume,
-                    save_path,
-                    temp_suffix,
-                    content_type,
-                    attempt,
-                    wall_start_time,
-                    fsync,
-                    classification,
+                    response, resume, content_type, classification
                 )
 
     async def _download_with_retries(
         self,
         url: str,
-        save_path: Path,
-        temp_suffix: str,
         base_headers: dict[str, str],
-        start_time: float,
-        wall_start_time: float,
-        fsync: bool,
         resume: _ResumeState,
     ) -> dict[str, Any]:
         """按线性退避重复下载尝试直至成功、终态失败或重试耗尽。
@@ -1751,18 +1743,17 @@ class DownloadManager:
         # max_retries<0 时循环零次执行，预绑定防末行失败日志读 attempt 未定义。
         attempt = -1
         for attempt in range(self.max_retries + 1):
+            resume.attempt = attempt
             try:
                 # 防御性兜底：父目录可能在退避等待或并发清理期间被删除，每趟尝试前
                 # 确保存在；在 try 内使其 OSError 按下方分支归一（权限/只读盘终态，
                 # 其余重试）。
-                await asyncio.to_thread(save_path.parent.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(resume.save_path.parent.mkdir, parents=True, exist_ok=True)
                 if resume.is_completed():
                     # 完成态：响应体已全部确认落盘，重试不再发请求，
                     # 直接重走落盘终局；200 与无总长声明的 416 会作废已完整前缀
                     # 退回全量重下，空 206 更会把空文件归档顶替完整数据。
-                    return await self._finalize_completed_resume(
-                        resume, save_path, attempt, wall_start_time, fsync
-                    )
+                    return await self._finalize_completed_resume(resume)
                 logger.info(
                     "开始下载图片 (尝试 {}/{}): {}",
                     attempt + 1,
@@ -1772,18 +1763,7 @@ class DownloadManager:
 
                 session = await self._ensure_session()
                 attempt_headers = {**base_headers, **resume.request_headers()}
-                return await self._attempt_download(
-                    session,
-                    url,
-                    attempt_headers,
-                    save_path,
-                    temp_suffix,
-                    attempt,
-                    start_time,
-                    wall_start_time,
-                    fsync=fsync,
-                    resume=resume,
-                )
+                return await self._attempt_download(session, url, attempt_headers, resume)
 
             except TransientInflightError as e:
                 # 共享在途瞬态失败（标记混入，InflightTaskCancelledError 为其
@@ -1866,7 +1846,7 @@ class DownloadManager:
             if attempt < self.max_retries:
                 # 跨尝试累计预算耗尽即停止重试，
                 # 防止重试按尝试数成倍放大单个保存任务的占用。
-                elapsed = time.monotonic() - start_time
+                elapsed = time.monotonic() - resume.mono_start_time
                 if elapsed >= self._download_total_budget():
                     logger.warning(
                         "下载累计耗时 {:.0f} 秒已超总预算 {:.0f} 秒，停止重试: {}",
@@ -1915,13 +1895,9 @@ class DownloadManager:
         if headers is None:
             headers = {"User-Agent": f"Seedream-MCP/{__version__}", "Accept": "image/*"}
 
-        # 预算基准取单调钟：墙钟受系统对时回拨影响，会使累计预算判定失真；
-        # download_time 的人读挂钟度量另取 wall_start_time。
-        start_time = time.monotonic()
+        # 预算基准取单调钟：墙钟受系统对时回拨影响，会使累计预算判定失真。
+        mono_start_time = time.monotonic()
         wall_start_time = time.time()
-        # 临时文件的可读性后缀：原扩展名后追加 .part；续传临时文件跨尝试复用，
-        # 实际路径由 open_temp_fd 随机生成。
-        temp_suffix = (save_path.suffix or ".bin") + ".part"
         # 调用方头中的 Range/If-Range 与续传出站单源冲突：入口一次剥离并告警，
         # 重试各趟直接复用剥离结果。
         stripped_caller_headers = [key for key in headers if key.lower() in _RESERVED_RANGE_HEADERS]
@@ -1942,18 +1918,15 @@ class DownloadManager:
         effective_max_file_size = (
             self.max_file_size if max_file_size is None else min(self.max_file_size, max_file_size)
         )
-        resume = _ResumeState(effective_max_file_size)
+        resume = _ResumeState(
+            max_file_size=effective_max_file_size,
+            save_path=save_path,
+            mono_start_time=mono_start_time,
+            wall_start_time=wall_start_time,
+            fsync=fsync,
+        )
         try:
-            return await self._download_with_retries(
-                url,
-                save_path,
-                temp_suffix,
-                base_headers,
-                start_time,
-                wall_start_time,
-                fsync,
-                resume,
-            )
+            return await self._download_with_retries(url, base_headers, resume)
         finally:
             # 最终失败或取消后统一清理续传临时文件，成功路径已被原子替换，此处为空操作。
             await resume.dispose()
