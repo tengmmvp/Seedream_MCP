@@ -124,11 +124,7 @@ async def web_thumbnail(request: Request) -> Response:
         data = None
     except CpuOffloadPoolClosedError:
         # 池关闭是退出清理竞态，属服务端不可用，不并入图片缺陷的 422 口径。
-        return _responses.endpoint_error_json(
-            _responses.WebErrorInfo(
-                "thumbnail_unavailable", "CPU 卸载线程池已关闭，缩略图不可用", 500
-            )
-        )
+        return _responses.endpoint_error_json(_responses.THUMBNAIL_UNAVAILABLE_INFO)
     if data is None:
         return _responses.endpoint_error_json(_responses.THUMBNAIL_FAILED_INFO)
     return Response(content=data, media_type="image/jpeg", headers=_responses.PRIVATE_CACHE_HEADER)

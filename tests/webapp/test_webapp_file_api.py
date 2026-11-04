@@ -654,7 +654,9 @@ async def test_thumbnail_pool_closed_returns_500(web_app_with_image: Any) -> Non
 
     await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
 
-    _assert_endpoint_error(response, "thumbnail_unavailable", status=500)
+    _assert_endpoint_error(
+        response, "service_unavailable", status=500, message_contains="缩略图不可用"
+    )
 
 
 async def test_image_endpoint_source_vanished_before_send_returns_404(

@@ -104,6 +104,10 @@ INVALID_DIRECTORY_INFO = WebErrorInfo(
 SERVICE_UNAVAILABLE_INFO = WebErrorInfo(
     "service_unavailable", "CPU 卸载线程池已关闭，服务不可用", 500
 )
+# service_unavailable 一码两文案：缩略图变体自共享表项派生。
+THUMBNAIL_UNAVAILABLE_INFO = SERVICE_UNAVAILABLE_INFO._replace(
+    message="CPU 卸载线程池已关闭，缩略图不可用"
+)
 
 # 端点全捕兜底的固定 WebErrorInfo，防文案各处漂移。
 INTERNAL_ERROR_INFO = WebErrorInfo("internal_error", "服务器内部错误，详情见日志", 500)
