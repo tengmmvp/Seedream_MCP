@@ -119,13 +119,21 @@ def _host_literal(address: str) -> str:
     return f"[{address}]" if ":" in address else address
 
 
-def _address_allowlist_forms(address: str) -> tuple[list[str], list[str]]:
-    """由绑定地址字面量派生 Host/Origin 白名单条目，裸形态与端口通配成对。
+def _bind_address_allowlist(host: str) -> tuple[list[str], list[str]] | None:
+    """由具体绑定地址推导 Host/Origin 默认白名单，通配绑定返回 None。
 
-    IPv6 字面量按 Host/Origin 头的方括号形态生成；裸形态放行默认端口部署的
-    无端口头，Origin 同时覆盖 http 与 https 两种 scheme 的有端口与无端口形态。
+    通配判定经 ipaddress 解析覆盖 0.0.0.0、::、::0、0:0:0:0:0:0:0:0 等字面写法，
+    非 IP 字面量按具体地址派生白名单。条目裸形态与端口通配成对：裸形态放行
+    默认端口部署的无端口头，Origin 同时覆盖 http 与 https 两种 scheme 的
+    有端口与无端口形态。
     """
-    literal = _host_literal(address)
+    stripped = _strip_ipv6_brackets(host)
+    try:
+        if ipaddress.ip_address(stripped).is_unspecified:
+            return None
+    except ValueError:
+        pass
+    literal = _host_literal(stripped)
     allowed_hosts = [literal, f"{literal}:*"]
     allowed_origins = [
         f"http://{literal}",
@@ -134,21 +142,6 @@ def _address_allowlist_forms(address: str) -> tuple[list[str], list[str]]:
         f"https://{literal}:*",
     ]
     return allowed_hosts, allowed_origins
-
-
-def _bind_address_allowlist(host: str) -> tuple[list[str], list[str]] | None:
-    """由具体绑定地址推导 Host/Origin 默认白名单，通配绑定返回 None。
-
-    通配判定经 ipaddress 解析覆盖 0.0.0.0、::、::0、0:0:0:0:0:0:0:0 等字面写法，
-    非 IP 字面量按具体地址派生白名单。
-    """
-    stripped = _strip_ipv6_brackets(host)
-    try:
-        if ipaddress.ip_address(stripped).is_unspecified:
-            return None
-    except ValueError:
-        pass
-    return _address_allowlist_forms(stripped)
 
 
 def _loopback_allowlists() -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -651,25 +644,18 @@ class _BodyReadAdmission:
         )
         remaining = self._read_deadline - self._loop.time()
         if remaining <= 0:
-            self._begin_timeout_response(*self._timeout_rejection())
+            self._abandon(self._timeout_rejection())
             return None
         # 许可等待中窗口到期属准入饥饿而非慢速读体。
         self._waiting_for_permit = True
         try:
             await asyncio.wait_for(pending.acquire(), timeout=remaining)
         except asyncio.TimeoutError:
-            self._begin_timeout_response(*self._timeout_rejection())
+            self._abandon(self._timeout_rejection())
             return None
         finally:
             self._waiting_for_permit = False
         return pending
-
-    def _mark_abandoned(self) -> None:
-        """放弃收尾前置：置位放弃并拆看门狗，幂等。"""
-        if self.abandoned:
-            return
-        self.abandoned = True
-        self._stop_watchdog()
 
     def _cancel_driven_task(self) -> asyncio.Task[None]:
         """下游子任务取消单点：对已收尾任务 cancel 为 no-op，返回任务供调用点续收尾。"""
@@ -680,17 +666,23 @@ class _BodyReadAdmission:
         task.cancel()
         return task
 
-    def _on_outer_verdict(self) -> None:
-        """外层 413 已发出：标记放弃并取消下游子任务，监督者经取消路径退栈归还许可。"""
-        self._mark_abandoned()
-        self._cancel_driven_task()
+    def _abandon(
+        self,
+        rejection: tuple[str, str] | None = None,
+        cancel_driven: bool = False,
+    ) -> None:
+        """放弃转换单点：置位放弃并拆看门狗，408 仅随首次放弃经脱离任务排定，取消按调用路径携带。"""
+        already = self.abandoned
+        self.abandoned = True
+        self._stop_watchdog()
+        if rejection is not None and not already:
+            self.timeout_send = asyncio.ensure_future(self._send_timeout_response(*rejection))
+        if cancel_driven:
+            self._cancel_driven_task()
 
-    def _begin_timeout_response(self, code: str, description: str) -> None:
-        # 408 收尾在放弃前置之上经脱离任务发送，幂等防双发。
-        if self.abandoned:
-            return
-        self._mark_abandoned()
-        self.timeout_send = asyncio.ensure_future(self._send_timeout_response(code, description))
+    def _on_outer_verdict(self) -> None:
+        """外层 413 已发出：放弃并取消下游子任务，监督者经取消路径退栈归还许可。"""
+        self._abandon(cancel_driven=True)
 
     def _expire(self) -> None:
         # 窗口到期的强制收尾：终帧后不再约束，读取侧停滞时取消下游子任务防许可钉死。
@@ -700,8 +692,7 @@ class _BodyReadAdmission:
             # 外层已裁决超限：413 直发即终局动作，此间取消下游会截断响应体，
             # 写背压挂起由 uvicorn 与客户端连接自身收敛，取消留待裁决送达。
             return
-        self._begin_timeout_response(*self._timeout_rejection())
-        self._cancel_driven_task()
+        self._abandon(self._timeout_rejection(), cancel_driven=True)
 
     async def _receive_wrapper(self) -> Message:
         """tee 边转发边复用外层读体计数：实际越阈补取许可，终帧归还许可，外层超限裁决即放弃。"""
@@ -718,7 +709,7 @@ class _BodyReadAdmission:
             return message
         if self._policy.too_large:
             # 外层已直发 413：见裁决即放弃归还许可，无视 413 的滴流客户端不得占闸至窗口耗尽。
-            self._mark_abandoned()
+            self._abandon()
             return {"type": "http.disconnect"}
         more_body = bool(message.get("more_body", False))
         if not more_body:

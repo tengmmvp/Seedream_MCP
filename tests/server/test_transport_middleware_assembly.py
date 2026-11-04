@@ -2492,12 +2492,12 @@ async def test_large_body_admission_abandon_releases_permit_while_408_send_block
             # 模拟服务器写背压：408 首帧挂起，直至放行。
             await release_send.wait()
 
-    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+    middleware = _admission_stack(downstream, 1, 0.5, _ADMISSION_THRESHOLD)
     receive_calls = {"count": 0}
 
     async def receive() -> Message:
         receive_calls["count"] += 1
-        # 首帧越阈即持闸；第二帧驻留至读体窗口耗尽触发收尾。
+        # 首帧越阈即持闸（距 0.5s 窗口耗尽留数百毫秒余量抗负载抖动）；第二帧驻留触发收尾。
         await asyncio.sleep(1.0 if receive_calls["count"] > 1 else 0.01)
         return {"type": "http.request", "body": b"x" * (5 * 1024 * 1024), "more_body": True}
 
@@ -2537,6 +2537,54 @@ async def test_large_body_admission_abandon_releases_permit_while_408_send_block
     await asyncio.wait_for(suspended, timeout=5)
     assert sent[0]["type"] == "http.response.start"
     assert sent[0]["status"] == 408
+
+
+async def test_large_body_admission_repeated_abandon_cancels_driven_without_second_408() -> None:
+    """已放弃后再次携带放弃原因与 cancel_driven 的放弃：驱动任务取消照常执行，408 不双发。"""
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, receive, send
+        raise AssertionError("本用例直接驱动 _abandon，不经下游 app")
+
+    scope = _large_body_scope(_LARGE_CL_HEADERS)
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    middleware = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD)
+    session = _BodyReadAdmission(
+        middleware, scope, cast(Receive, None), cast(Send, send), _BodyReadPolicy(scope)
+    )
+
+    async def _hang() -> None:
+        await asyncio.Event().wait()
+
+    driven = asyncio.ensure_future(_hang())
+    session.driven_task = driven
+    first_408: asyncio.Task[None] | None = None
+    try:
+        session._abandon(transport_module._BODY_READ_TIMEOUT_408)
+        first_408 = session.timeout_send
+        assert first_408 is not None
+
+        session._abandon(transport_module._LARGE_BODY_ADMISSION_TIMEOUT_408, cancel_driven=True)
+
+        with pytest.raises(asyncio.CancelledError):
+            await driven
+        assert session.timeout_send is first_408
+        await first_408
+
+        starts = [message for message in sent if message.get("type") == "http.response.start"]
+        assert len(starts) == 1
+        assert starts[0]["status"] == 408
+        body_msg = next(m for m in sent if m.get("type") == "http.response.body")
+        assert json.loads(body_msg["body"])["error"] == "body_read_timeout"
+    finally:
+        # 断言失败路径同样收敛驱动与 408 发送任务，防 pending 告警淹没回归信号。
+        driven.cancel()
+        pending = [driven] + ([first_408] if first_408 is not None else [])
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def test_large_body_admission_external_cancel_after_abandon_propagates(
