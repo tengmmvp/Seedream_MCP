@@ -1,4 +1,4 @@
-"""URL 辅助契约测试：sanitize_url 脱敏（utils/core/sanitizers）与 get_file_extension_from_url 推断（utils/io/url）。
+"""URL 辅助契约测试：sanitize_url 与 strip_uri_userinfo 脱敏（utils/core/sanitizers）与 get_file_extension_from_url 推断（utils/io/url）。
 
 锁定 http/https 的 scheme/host/path 保留与凭据、query 剥离，以及无 authority 形态
 收敛为 scheme:<redacted>，防止 data URI 被伪造成 data://、空串输出 :// 进入日志。
@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from seedream_mcp.utils.core.sanitizers import sanitize_url
+from seedream_mcp.utils.core.sanitizers import sanitize_url, strip_uri_userinfo
 from seedream_mcp.utils.io.url import get_file_extension_from_url
 
 
@@ -59,6 +59,21 @@ def test_sanitize_url_strips_control_chars_from_result() -> None:
 def test_sanitize_url_falls_back_on_invalid_ipv6() -> None:
     """非法 IPv6 字面量使解析抛错，整体收敛为 <invalid-url>。"""
     assert sanitize_url("https://[::1") == "<invalid-url>"
+
+
+def test_strip_uri_userinfo_strips_credentials_keeps_rest() -> None:
+    """任意 scheme 的 authority userinfo 整段剥离，host、端口与其余部分保留。"""
+    assert strip_uri_userinfo("file://user:pass@nas/share") == "file://nas/share"
+    assert (
+        strip_uri_userinfo("file://u:p%40x@nas:8443/share?k=v#f") == "file://nas:8443/share?k=v#f"
+    )
+
+
+def test_strip_uri_userinfo_keeps_forms_without_authority_userinfo() -> None:
+    """authority 无 @ 的 URI 与无 scheme:// 形态原样返回，路径中的 @ 不误伤。"""
+    assert strip_uri_userinfo("file://nas/share") == "file://nas/share"
+    assert strip_uri_userinfo("file:///path/to/file@name.txt") == "file:///path/to/file@name.txt"
+    assert strip_uri_userinfo("mailto:user@example.com") == "mailto:user@example.com"
 
 
 def test_get_file_extension_from_url_direct_cases() -> None:

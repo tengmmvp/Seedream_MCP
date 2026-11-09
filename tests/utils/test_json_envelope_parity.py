@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from starlette.types import Message
 
 from seedream_mcp.server import transport as transport_module
 from seedream_mcp.utils.core.json_envelope import (
     SECURE_JSON_HEADER_BYTES,
     SECURE_JSON_HEADERS,
+    StrictJsonEncodeError,
+    dump_strict_json_bytes,
     flat_error_body,
 )
 from seedream_mcp.webapp import _responses
@@ -43,6 +46,15 @@ def test_flat_error_body_two_key_shape() -> None:
         "error_description": _PARITY_DESCRIPTION,
     }
     assert _PARITY_DESCRIPTION.encode("utf-8") in body
+
+
+def test_dump_strict_json_bytes_splits_encode_failure_from_value_error() -> None:
+    """孤立代理字符的编码失败经 StrictJsonEncodeError 分流，独立于 ValueError。"""
+    assert not issubclass(StrictJsonEncodeError, ValueError)
+    with pytest.raises(StrictJsonEncodeError):
+        dump_strict_json_bytes({"prompt": "\ud800"})
+    with pytest.raises(ValueError):
+        dump_strict_json_bytes({"size": float("nan")})
 
 
 async def _rejection_response(

@@ -923,6 +923,21 @@ def sanitize_url(url: str) -> str:
     return re.sub(r"[\x00-\x1f\x7f]", "", result)
 
 
+# 任意 scheme 的 URI userinfo 剥离模式：authority 止于首个 / ? #，段内贪婪到
+# 最后一个 @ 定界，密码含 @ 时剥净不残留。要求 scheme:// 起头，路径中的 @ 与
+# 无 authority 的形态不误伤。
+_URI_USERINFO_PATTERN = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#]*@")
+
+
+def strip_uri_userinfo(uri: str) -> str:
+    """剥离 URI authority 中的 userinfo，scheme、host 与其余部分原样保留。
+
+    输入为单个 URI 值且不限 scheme，供被拒 roots 声明一类记录点脱敏。
+    无 scheme:// 形态或 authority 无 @ 时原样返回。
+    """
+    return _URI_USERINFO_PATTERN.sub(r"\1", uri)
+
+
 _SanitizedValue = TypeVar("_SanitizedValue")
 
 

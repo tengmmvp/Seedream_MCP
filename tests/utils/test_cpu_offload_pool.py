@@ -41,7 +41,7 @@ async def test_cpu_pool_saturation_keeps_default_executor_responsive() -> None:
 
         assert await asyncio.wait_for(_short_task(), timeout=2) == "default-pool"
 
-        extra = asyncio.ensure_future(run_in_cpu_pool(lambda: "queued"))
+        extra: asyncio.Task[Any] = asyncio.ensure_future(run_in_cpu_pool(lambda: "queued"))
         # 留出调度窗口：若长任务可插队默认池空闲线程，此处已完成。
         await asyncio.sleep(0.1)
         assert not extra.done()

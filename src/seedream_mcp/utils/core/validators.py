@@ -812,6 +812,11 @@ def resolve_wave_divisor(
     return divisor
 
 
+def resolve_effective_auto_save(auto_save: bool | None, default_enabled: bool) -> bool:
+    """合成自动保存生效值：请求级覆盖优先，缺省取全局开关。"""
+    return default_enabled if auto_save is None else auto_save
+
+
 def resolve_effective_generation_defaults(
     *,
     size: str | None,

@@ -22,9 +22,19 @@ def dump_compact_strict_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+class StrictJsonEncodeError(Exception):
+    """编码期失败（孤立代理字符等），独立于序列化期 ValueError 的分流类型。"""
+
+
 def dump_strict_json_bytes(value: Any) -> bytes:
-    """紧凑严格 JSON 的 UTF-8 字节形态，供下沉路径把序列化与编码一并带离事件循环。"""
-    return dump_compact_strict_json(value).encode("utf-8")
+    """紧凑严格 JSON 的 UTF-8 字节形态，供下沉路径把序列化与编码一并带离事件循环。
+
+    编码期失败经 StrictJsonEncodeError 分流，免去调用方掌握 UnicodeEncodeError 为 ValueError 子类、须先分派的顺序知识。
+    """
+    try:
+        return dump_compact_strict_json(value).encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise StrictJsonEncodeError(str(e)) from e
 
 
 def flat_error_body(error: str, description: str) -> bytes:
