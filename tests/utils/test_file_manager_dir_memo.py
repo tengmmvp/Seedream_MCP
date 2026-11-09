@@ -227,6 +227,19 @@ def test_memo_hit_symlink_swap_falls_back_to_full_validation(
 
     monkeypatch.setattr(os, "lstat", fake_lstat)
 
+    # POSIX realpath 见 lstat 判链接后 readlink 取目标；假目标指回 base 内真实
+    # 目录，回落校验经其解析仍在保存目录内（Windows realpath 走句柄不查 readlink）。
+    swap_target = tmp_path / "swap-target"
+    swap_target.mkdir()
+    real_readlink = os.readlink
+
+    def fake_readlink(path: os.PathLike[str] | str, *args: Any, **kwargs: Any) -> str:
+        if Path(path) == first.parent:
+            return str(swap_target)
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", fake_readlink)
+
     manager.create_save_path(prompt="cat", url="https://x/2.png", tool_name="t2i")
 
     assert validate_calls["count"] == 1
