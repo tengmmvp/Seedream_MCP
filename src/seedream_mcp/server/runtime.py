@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
 
 from mcp.server.caching import CacheHint, CacheableMethod
 from mcp.server.mcpserver import MCPServer, RequestStateSecurity
+from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
 from mcp.server.request_state import RequestStateBoundary
 from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
@@ -36,8 +37,12 @@ from ..utils.core.logs import get_logger
 from ..version import __version__
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from mcp.server.lowlevel.helper_types import ReadResourceContents
     from mcp.server.mcpserver import Context
     from mcp.types import CallToolResult, GetPromptResult, InputRequiredResult
+    from pydantic.networks import AnyUrl
 
     from ..client import SeedreamClient
     from ..utils.io.download import DownloadManager
@@ -421,6 +426,20 @@ class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
                 safe_error_text("Unknown tool: {name}", name=as_text(name)),
             )
         return await super().call_tool(name, arguments, context)
+
+    async def read_resource(
+        self,
+        uri: "AnyUrl | str",
+        context: "Context[dict[str, Any], Any] | None" = None,
+    ) -> "Iterable[ReadResourceContents] | InputRequiredResult":
+        # mcp 2.0.0 的 read_resource 把 ResourceNotFoundError 重包装为带 cause 的
+        # 普通 ResourceError，子类判定丢失致 -32602 沉为 -32603；按因果链归位。
+        try:
+            return await super().read_resource(uri, context)
+        except ResourceError as exc:
+            if isinstance(exc.__cause__, ResourceNotFoundError):
+                raise exc.__cause__
+            raise
 
 
 def _create_mcp_server() -> MCPServer:
