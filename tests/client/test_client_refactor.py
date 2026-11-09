@@ -1320,10 +1320,10 @@ def test_serialize_request_rejects_circular_reference() -> None:
 
 
 def test_serialize_request_classifies_deep_nesting_as_validation_error() -> None:
-    """深层嵌套请求体的 RecursionError 同归校验异常，不落泛化 API 失败分类。
+    """深层嵌套请求体经序列化前深度门归校验异常，不落泛化 API 失败分类。
 
-    RecursionError 属 RuntimeError 子类、不在 ValueError 体系内，无独立分支时
-    逃过校验归约、被流水线全捕归为 api_error/502。
+    json 编码器对深嵌套是否抛 RecursionError 随版本与平台漂移，判定不依赖
+    编码器行为。
     """
     deep: dict[str, Any] = {}
     node: dict[str, Any] = deep
@@ -1337,7 +1337,6 @@ def test_serialize_request_classifies_deep_nesting_as_validation_error() -> None
 
     message = excinfo.value.message
     assert "请求参数嵌套过深" in message
-    assert isinstance(excinfo.value.__cause__, RecursionError)
     assert not isinstance(excinfo.value, SeedreamAPIError)
     assert resolve_error_profile(excinfo.value).error_code == "validation_error"
 
@@ -1373,10 +1372,11 @@ def test_serialize_request_recursion_error_on_shallow_payload_maps_to_internal_e
 def test_serialize_request_recursion_error_above_depth_limit_keeps_validation_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """深度恰超判定阈值的载荷遇 RecursionError 维持用户校验错误归因。
+    """深度恰超判定阈值的载荷在序列化前被深度门拒绝，归用户校验错误。
 
-    显式栈探测以 _REQUEST_NESTING_DEPTH_LIMIT 为界，超过即归因载荷本身；
-    此处锁定阈值边界，与 50_000 层真实深嵌套用例同锁超阈值分支。
+    显式栈探测以 _REQUEST_NESTING_DEPTH_LIMIT 为界，此处锁定阈值边界，与
+    50_000 层真实深嵌套用例同锁超阈值分支；dump 替身兜底证明拒绝发生在
+    编码之前。
     """
     import seedream_mcp.client._http as client_http_module
     from seedream_mcp.client._http import _REQUEST_NESTING_DEPTH_LIMIT
@@ -1399,7 +1399,6 @@ def test_serialize_request_recursion_error_above_depth_limit_keeps_validation_er
 
     message = excinfo.value.message
     assert "请求参数嵌套过深" in message
-    assert isinstance(excinfo.value.__cause__, RecursionError)
     assert not isinstance(excinfo.value, SeedreamAPIError)
     assert resolve_error_profile(excinfo.value).error_code == "validation_error"
 

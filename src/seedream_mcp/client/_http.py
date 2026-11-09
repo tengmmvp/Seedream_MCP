@@ -366,11 +366,13 @@ class _ClientHTTPMixin:
         """将请求体序列化为紧凑严格 JSON 的 UTF-8 字节，供调用方在工作线程预编码后直接发送。
 
         编码失败（StrictJsonEncodeError）与 ValueError 收敛为附底层原因的校验错误，
-        不落流水线全捕的泛化 API 失败分类。浮点与环引用同抛裸 ValueError；深层嵌套
-        抛 RecursionError，属 RuntimeError 子类、不入 ValueError 分支，归因前先探测
-        实际嵌套深度：确超阈值维持校验错误，浅于此的 RecursionError 源自工作线程
-        栈余量不足，归无状态码的 API 错误（泛化意外通道）。
+        不落流水线全捕的泛化 API 失败分类。浮点与环引用同抛裸 ValueError；嵌套深度
+        经显式探测在序列化前拒绝——json 编码器对深嵌套是否抛 RecursionError 随版本
+        与平台漂移，不作判定依据；已过深度门的 RecursionError 源自工作线程栈余量
+        不足，归无状态码的 API 错误（泛化意外通道）。
         """
+        if _request_nesting_depth_exceeds(request_data, _REQUEST_NESTING_DEPTH_LIMIT):
+            raise SeedreamValidationError("请求参数嵌套过深")
         try:
             return dump_strict_json_bytes(request_data)
         except StrictJsonEncodeError as exc:
@@ -382,10 +384,6 @@ class _ClientHTTPMixin:
                 base_detail_error_text("请求参数含非有限浮点值或环引用", str(exc))
             ) from exc
         except RecursionError as exc:
-            if _request_nesting_depth_exceeds(request_data, _REQUEST_NESTING_DEPTH_LIMIT):
-                raise SeedreamValidationError(
-                    base_detail_error_text("请求参数嵌套过深", str(exc))
-                ) from exc
             raise SeedreamAPIError(base_detail_error_text("请求序列化意外失败", str(exc))) from exc
 
     def _raise_api_error_for(
