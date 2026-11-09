@@ -13,9 +13,11 @@ outputSchema 并校验 structuredContent，运行时返回的 CallToolResult 原
 inputSchema 平铺契约：五个带参工具以逐字段平铺参数声明而非单一 params 嵌套模型，
 FuncMetadata 不支持单参数 BaseModel 自动展开，嵌套声明会把 inputSchema 收敛为
 一个对象字段。平铺字段的名称、类型、默认值、约束与描述镜像 tools.schemas
-的输入模型，描述与约束字面量经该模块的共享常量引用；非空语义经签名层
-``_NON_BLANK_PATTERN`` 等价镜像，纯空白输入在协议层即被拒绝。工具体以 locals()
-推导参数字典，排除集为签名中不属于输入模型的参数名，签名是参数字典的单一来源；
+的输入模型，描述与约束字面量经该模块的共享常量引用；
+非空语义经签名层 ``_NON_BLANK_PATTERN`` 等价镜像，纯空白输入在协议层即被拒绝。
+浏览 directory 缺省与空串均指图片目录根，不镜像非空 pattern。
+工具体以 locals() 推导参数字典，排除集为签名中不属于输入模型的参数名，
+签名是参数字典的单一来源；
 _run_tool_pipeline 过滤 None 字段组装输入模型并委托既有 run_* 处理器，未知键立即
 抛 TypeError，守护排除集配置错误。两侧等价性由 test_tool_parameter_order 断言
 锁定；inputSchema 的 additionalProperties 收紧覆盖含无参 get_model_info 在内的
@@ -103,9 +105,8 @@ from ..tools.schemas import (
     MAX_IMAGES_DESCRIPTION,
     MAX_IMAGES_MIN,
     MULTI_IMAGE_DESCRIPTION,
-    multi_image_field_type,
-    MULTI_IMAGE_MIN_ITEMS,
     MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION,
+    MultiImageType,
     NON_BLANK_PATTERN as _NON_BLANK_PATTERN,
     OFFSET_DESCRIPTION,
     OFFSET_MAX,
@@ -127,8 +128,8 @@ from ..tools.schemas import (
     SAVE_PATH_DESCRIPTION,
     SAVE_PATH_MAX_LENGTH,
     SEQUENTIAL_IMAGE_DESCRIPTION,
-    sequential_image_field_type,
     SEQUENTIAL_PROMPT_DESCRIPTION,
+    SequentialImageType,
     SHOW_DETAILS_DESCRIPTION,
     SINGLE_IMAGE_DESCRIPTION,
     SIZE_DESCRIPTION,
@@ -243,10 +244,10 @@ _CUSTOM_NAME_FIELD: str | None = Field(
     description=CUSTOM_NAME_DESCRIPTION,
 )
 
-# 平铺侧条目叠加非空 pattern。
+# 平铺侧条目叠加非空 pattern，族类型按条目类型订阅 schemas 的单点组合形状。
 _FLAT_IMAGE_ITEM = Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]
-_MULTI_IMAGE_FLAT_TYPE: Any = multi_image_field_type(_FLAT_IMAGE_ITEM, MULTI_IMAGE_MIN_ITEMS)
-_SEQUENTIAL_IMAGE_FLAT_TYPE: Any = sequential_image_field_type(_FLAT_IMAGE_ITEM, 1)
+_MULTI_IMAGE_FLAT_TYPE = MultiImageType[_FLAT_IMAGE_ITEM]
+_SEQUENTIAL_IMAGE_FLAT_TYPE = SequentialImageType[_FLAT_IMAGE_ITEM]
 
 
 _PIPELINE_EXCLUDED_LOCALS = frozenset({"workspace_roots", "ctx"})
@@ -599,10 +600,10 @@ async def sequential_generation(
     icons=_tool_icons(BROWSE_IMAGES_TOOL_NAME),
 )
 async def browse_images(
+    # 浏览 directory 不镜像非空 pattern，语义归一点在 BrowseImagesInput.effective_directory。
     directory: str | None = Field(
         default=None,
         max_length=DIRECTORY_MAX_LENGTH,
-        pattern=_NON_BLANK_PATTERN,
         description=DIRECTORY_DESCRIPTION,
     ),
     recursive: bool = Field(
@@ -751,7 +752,7 @@ async def _rendered_workspace_roots(verbose: bool, *, fallback: bool = False) ->
     降级标记，向客户端声明本输出为环境回退而非客户端声明的工作区。
     """
     roots = await asyncio.to_thread(_workspace_roots_or_empty)
-    payload: dict[str, Any] = {"roots": [str(root).replace("\\", "/") for root in roots]}
+    payload: dict[str, Any] = {"roots": [root.as_posix() for root in roots]}
     if verbose:
         payload["resolved"] = [str(root) for root in roots]
     if fallback:

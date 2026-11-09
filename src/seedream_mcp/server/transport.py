@@ -284,6 +284,14 @@ async def _reject_body_too_large(send: Send) -> None:
     await _send_rejection(send, 413, "request_too_large", "Request body exceeds limit")
 
 
+async def _reject_host(send: Send, scope_type: str) -> None:
+    """Host 守卫的拒绝应答：websocket 无 HTTP 状态码可回，按鉴权中间件模式以 1008 关闭，http 回 403。"""
+    if scope_type == "websocket":
+        await send({"type": "websocket.close", "code": 1008})
+    else:
+        await _send_rejection(send, 403, "invalid_host", "Host not allowed")
+
+
 async def _send_best_effort(response: Awaitable[None]) -> None:
     """尽力发送短路响应，死连接上的直发失败降为 debug 静默，不冒泡为 ERROR 级 500。"""
     try:
@@ -897,11 +905,7 @@ class _LoopbackHostGuardMiddleware:
             # 与 SDK 内层 Host 校验同为大小写敏感精确比较：本层拒绝的大写回环
             # Host 在内层同样不匹配白名单，大写形态由此 403 拒绝。
             if host is None or _strip_host_port(host) not in self._allowed_hosts:
-                if scope_type == "websocket":
-                    # websocket 无 HTTP 状态码可回，按鉴权中间件模式以 1008 关闭。
-                    await send({"type": "websocket.close", "code": 1008})
-                else:
-                    await _send_rejection(send, 403, "invalid_host", "Host not allowed")
+                await _reject_host(send, scope_type)
                 return
         await self.app(scope, receive, send)
 
@@ -976,10 +980,7 @@ class _AppHostGuardMiddleware:
         if scope_type in ("http", "websocket"):
             host = _header_value(scope, b"host")
             if host is None or not self._host_permitted(host):
-                if scope_type == "websocket":
-                    await send({"type": "websocket.close", "code": 1008})
-                else:
-                    await _send_rejection(send, 403, "invalid_host", "Host not allowed")
+                await _reject_host(send, scope_type)
                 return
         await self.app(scope, receive, send)
 

@@ -368,6 +368,7 @@ def test_validate_transport_args_rejects_non_printable_ascii_cli_host(bad_host: 
 
     reason = bind_host_invalid_reason(bad_host)
     assert reason is not None
+    assert message is not None
     assert message == f"配置错误：--host {reason}。"
     assert "--host 须为可打印ASCII字符" in message
 
@@ -381,6 +382,7 @@ def test_validate_transport_args_rejects_empty_cli_host() -> None:
 
     reason = bind_host_invalid_reason("")
     assert reason is not None
+    assert message is not None
     assert message == f"配置错误：--host {reason}。"
     assert "--host 不能为空" in message
 

@@ -492,6 +492,7 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
     thread_errors: list[BaseException] = []
     thread: threading.Thread | None = None
     listening = False
+    port = 0
     for attempt in range(2):
         port = _pick_free_port()
         thread, listening = await _start_smoke_server_and_wait(port, thread_errors)
