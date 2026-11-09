@@ -287,7 +287,12 @@ def _read_env_values(env_file: str | None) -> tuple[dict[str, str], _RuntimeEnvI
     def _prepare_env_path(raw: str | Path) -> Path:
         # 路径准备与读取同口径包装：被删 CWD 抛 OSError，HOME 剥离容器对 ~ 抛 RuntimeError。
         try:
-            return Path(raw).expanduser().resolve()
+            prepared = Path(raw).expanduser()
+            # 相对路径经 Path.cwd 显式锚定：被删 CWD 的错误在此确定性上抛，
+            # 不依赖各平台 realpath 回退是否途经 getcwd。
+            if not prepared.is_absolute():
+                prepared = Path.cwd() / prepared
+            return prepared.resolve()
         except (OSError, RuntimeError) as exc:
             raise SeedreamConfigError(
                 error_text(
