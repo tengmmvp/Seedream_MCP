@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 
+from _lib.client_fakes import _make_send_request_fake
 from _lib.cpu_offload_spy import CpuOffloadSpy
 
 from seedream_mcp.client import SeedreamClient
@@ -64,21 +65,10 @@ def _install_build_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
 
 
 def _install_send_capture(monkeypatch: pytest.MonkeyPatch, bodies: list[bytes]) -> None:
-    """在类上替换 _send_standard_request，记录每个请求实际发送的 body 对象。"""
+    """在类上替换 _send_request，记录每个请求实际发送的 body 对象。"""
 
-    async def fake_send(
-        self: Any,
-        *,
-        client: Any,
-        url: str,
-        request_body: bytes,
-        request_timeout: Any,
-        attempt_timeout_seconds: float,
-    ) -> dict[str, Any]:
-        del self, client, url, request_timeout, attempt_timeout_seconds
-        bodies.append(request_body)
-        # 在途窗口：让同批请求先后进入序列化阶段再完成，模拟真实网络并发
-        await asyncio.sleep(0)
+    def result_by_body_count(_call: int) -> dict[str, Any]:
+        # URL 序号取返回时刻的 body 计数，同批在途重叠时各请求看到同一序号。
         return {
             "success": True,
             "data": [{"url": f"https://example.com/{len(bodies)}.png"}],
@@ -86,7 +76,12 @@ def _install_send_capture(monkeypatch: pytest.MonkeyPatch, bodies: list[bytes]) 
             "status": "completed",
         }
 
-    monkeypatch.setattr(SeedreamClient, "_send_standard_request", fake_send)
+    fake_send, _ = _make_send_request_fake(
+        result_by_body_count,
+        bodies=bodies,
+        yield_before_return=True,
+    )
+    monkeypatch.setattr(SeedreamClient, "_send_request", fake_send)
 
 
 async def test_parallel_batch_builds_and_serializes_once(

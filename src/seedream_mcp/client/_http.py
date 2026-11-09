@@ -7,7 +7,6 @@ _client、_client_lock 与 _timeout 由 SeedreamClient.__init__ 提供。
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -19,6 +18,7 @@ from ..config import SeedreamConfig
 from .request_plan import _ACTIVE_REQUEST_PLAN, serialize_request_body
 from ..utils.core.executors import CpuOffloadPoolClosedError, load_json_bytes
 from ..utils.core.http_int import strict_http_int
+from ..utils.core.json_envelope import StrictJsonEncodeError, dump_strict_json_bytes
 from ..utils.core.loop_bound import loop_bound_semaphore
 from ..utils.core.retry_budget import api_retry_budget_seconds, retry_feasibility_floor
 from ..utils.core.errors import (
@@ -27,6 +27,7 @@ from ..utils.core.errors import (
     SeedreamMCPError,
     SeedreamNetworkError,
     SeedreamTimeoutError,
+    SeedreamValidationError,
     as_detail,
     as_plain,
     base_detail_error_text,
@@ -80,6 +81,13 @@ _ERROR_JSON_PARSE_LIMIT = 64 * 1024
 # 组图 15 张 b64_json 图片的最坏合法响应体。
 _RESPONSE_BODY_LIMIT_FACTOR = 20
 
+# 请求体「嵌套过深」判定阈值：默认递归限额 1000 下，json 无 C 扩展的纯 Python
+# 编码器每层容器约耗 2 个递归配额、浅栈可序列化深度约 500，取其一半留安全边。
+_REQUEST_NESTING_DEPTH_LIMIT = 250
+
+# 深度探测的单次节点预算：极端宽载荷放弃遍历，探测失败不归因用户载荷。
+_REQUEST_DEPTH_PROBE_NODE_BUDGET = 1_000_000
+
 
 def _bounded_error_text(value: Any, limit: int) -> str:
     """dict/list 判体量后渲染为限长文本，超限收敛为元素数摘要，不物化完整 repr；其余形态直接转字符串，限长由调用方施加。"""
@@ -124,6 +132,35 @@ def _has_valid_image_items(data: Any) -> bool:
     return any(
         not item_reports_failure(item) and item_has_image_payload(item) for item in data_items(data)
     )
+
+
+def _request_nesting_depth_exceeds(value: Any, limit: int) -> bool:
+    """显式栈迭代探测 dict/list 树是否存在超过 limit 的嵌套深度。
+
+    id 判重使环引用与共享子树各遍历一次并必然终止；节点预算超限或遍历中途
+    异常返回 False——探测失败时 RecursionError 不归因用户载荷。
+    """
+    try:
+        budget = _REQUEST_DEPTH_PROBE_NODE_BUDGET
+        seen: set[int] = {id(value)}
+        pending: list[tuple[Any, int]] = [(value, 1)]
+        while pending:
+            node, depth = pending.pop()
+            if not isinstance(node, (dict, list)):
+                continue
+            if depth > limit:
+                return True
+            children = node.values() if isinstance(node, dict) else node
+            for child in children:
+                budget -= 1
+                if budget < 0:
+                    return False
+                if isinstance(child, (dict, list)) and id(child) not in seen:
+                    seen.add(id(child))
+                    pending.append((child, depth + 1))
+        return False
+    except Exception:
+        return False
 
 
 class _ClientHTTPMixin:
@@ -326,12 +363,30 @@ class _ClientHTTPMixin:
 
     @staticmethod
     def _serialize_request(request_data: dict[str, Any]) -> bytes:
-        """将请求体序列化为 UTF-8 bytes，供调用方在工作线程预编码后直接发送。
+        """将请求体序列化为紧凑严格 JSON 的 UTF-8 字节，供调用方在工作线程预编码后直接发送。
 
-        关闭 ensure_ascii，中文等非 ASCII 字符以 UTF-8 原样输出，不被 ASCII 转义
-        序列膨胀。dumps 到 encode 单链产出，无中间缓冲的二次拷贝。
+        编码失败（StrictJsonEncodeError）与 ValueError 收敛为附底层原因的校验错误，
+        不落流水线全捕的泛化 API 失败分类。浮点与环引用同抛裸 ValueError；深层嵌套
+        抛 RecursionError，属 RuntimeError 子类、不入 ValueError 分支，归因前先探测
+        实际嵌套深度：确超阈值维持校验错误，浅于此的 RecursionError 源自工作线程
+        栈余量不足，归无状态码的 API 错误（泛化意外通道）。
         """
-        return json.dumps(request_data, ensure_ascii=False).encode("utf-8")
+        try:
+            return dump_strict_json_bytes(request_data)
+        except StrictJsonEncodeError as exc:
+            raise SeedreamValidationError(
+                base_detail_error_text("请求参数含无法编码的字符", str(exc))
+            ) from exc
+        except ValueError as exc:
+            raise SeedreamValidationError(
+                base_detail_error_text("请求参数含非有限浮点值或环引用", str(exc))
+            ) from exc
+        except RecursionError as exc:
+            if _request_nesting_depth_exceeds(request_data, _REQUEST_NESTING_DEPTH_LIMIT):
+                raise SeedreamValidationError(
+                    base_detail_error_text("请求参数嵌套过深", str(exc))
+                ) from exc
+            raise SeedreamAPIError(base_detail_error_text("请求序列化意外失败", str(exc))) from exc
 
     def _raise_api_error_for(
         self,
@@ -629,50 +684,12 @@ class _ClientHTTPMixin:
             deadline=deadline,
         )
 
-    async def _send_stream_request(
-        self,
-        *,
-        client: httpx.AsyncClient,
-        url: str,
-        request_body: bytes,
-        request_timeout: httpx.Timeout,
-        attempt_timeout_seconds: float,
-    ) -> dict[str, Any]:
-        """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。"""
-        return await self._send_request(
-            client=client,
-            url=url,
-            request_body=request_body,
-            request_timeout=request_timeout,
-            attempt_timeout_seconds=attempt_timeout_seconds,
-            handle_response=self._handle_stream_response,
-        )
-
-    async def _send_standard_request(
-        self,
-        *,
-        client: httpx.AsyncClient,
-        url: str,
-        request_body: bytes,
-        request_timeout: httpx.Timeout,
-        attempt_timeout_seconds: float,
-    ) -> dict[str, Any]:
-        """发送非流式请求，将 JSON 响应解析为统一结果结构。"""
-        return await self._send_request(
-            client=client,
-            url=url,
-            request_body=request_body,
-            request_timeout=request_timeout,
-            attempt_timeout_seconds=attempt_timeout_seconds,
-            handle_response=self._parse_json_success_response,
-        )
-
     async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
         """调用 Seedream API。
 
         进程级生成准入约束同时在途的生成 API 请求数，覆盖 MCP 工具与 Web 生成入口；
         准入在请求构建完成后获取，构建期不占进程级并发容量，重试期间保持占槽。
-        按 request_data 是否含 stream 标志分发到流式或非流式发送路径。
+        按 request_data 是否含 stream 标志选择流式或非流式的响应处理回调。
         失败时按错误类型分类：非 200 响应中仅 429 与 5xx 可重试，其余状态码立即抛出；
         超时与网络错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的 Seedream 异常。
         单次尝试时限取单次 api_timeout 与剩余总预算的较小值。
@@ -709,7 +726,11 @@ class _ClientHTTPMixin:
         total_attempts = max(1, self.config.max_retries + 1)
         single_attempt_timeout = float(self.config.api_timeout)
 
-        is_stream = bool(request_data.get("stream"))
+        handle_response = (
+            self._handle_stream_response
+            if request_data.get("stream")
+            else self._parse_json_success_response
+        )
         total_budget = api_retry_budget_seconds(self.config.api_timeout)
         total_budget_deadline = time.monotonic() + total_budget
         last_error: BaseException | None = None
@@ -747,21 +768,13 @@ class _ClientHTTPMixin:
                     request_data=request_data,
                 )
 
-                if is_stream:
-                    return await self._send_stream_request(
-                        client=client,
-                        url=url,
-                        request_body=request_body,
-                        request_timeout=request_timeout,
-                        attempt_timeout_seconds=attempt_timeout,
-                    )
-
-                return await self._send_standard_request(
+                return await self._send_request(
                     client=client,
                     url=url,
                     request_body=request_body,
                     request_timeout=request_timeout,
                     attempt_timeout_seconds=attempt_timeout,
+                    handle_response=handle_response,
                 )
             except SeedreamAPIError as exc:
                 last_error = exc

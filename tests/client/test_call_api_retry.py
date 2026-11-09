@@ -1,12 +1,12 @@
 """SeedreamClient._call_api 重试与错误分类守护。
 
-重试循环对标准与流式两条分发路径共用，核心分支以分发目标参数化同时锁定两条
-路径：429 指数退避重试后成功、5xx 重试后成功、超时与网络错误重试耗尽后的异常
-映射、4xx 与意外错误立即抛出、Retry-After 退避取值与超上限信任服务端值。流式
-非 200 分支另以 httpx.MockTransport 驱动真实 _send_stream_request 覆盖：5xx 按
-重试次数耗尽且异常携带状态码、429 按服务端 Retry-After 退避、3xx 立即终态不
-重试。200 坏体与响应体上限分支仅标准路径在本文件经 MockTransport 覆盖。网络层
-经 monkeypatch 或 MockTransport 注入，不触达真实 API。
+重试循环共用单一发送路径，stream 标志仅选择响应处理回调，该选择由独立用例锁定。
+核心分支：429 指数退避重试后成功、5xx 重试后成功、超时与网络错误重试耗尽后的
+异常映射、4xx 与意外错误立即抛出、Retry-After 退避取值与超上限信任服务端值。
+流式非 200 分支另以 httpx.MockTransport 驱动真实 _send_request 覆盖：5xx 按重试
+次数耗尽且异常携带状态码、429 按服务端 Retry-After 退避、3xx 立即终态不重试。
+200 坏体与响应体上限分支仅非流式回调在本文件经 MockTransport 覆盖。网络层经
+monkeypatch 或 MockTransport 注入，不触达真实 API。
 """
 
 from __future__ import annotations
@@ -27,55 +27,8 @@ from seedream_mcp.utils.core.errors import (
     SeedreamTimeoutError,
 )
 
-from _lib.client_fakes import _install_mock_transport
+from _lib.client_fakes import _SUCCESS_RESULT, _install_mock_transport, _make_send_request_fake
 from _lib.time_fakes import _install_stepping_monotonic
-
-# 重试循环的两条分发目标：请求体不含 stream 标志经 _send_standard_request 发送，
-# 含 stream=True 经 _send_stream_request 发送，其余重试语义完全共用。
-_DISPATCH_TARGETS = [
-    pytest.param("_send_standard_request", {}, id="standard"),
-    pytest.param("_send_stream_request", {"stream": True}, id="stream"),
-]
-
-# fake_send 成功路径的共享返回载荷，调用方仅读取。
-_SUCCESS_RESULT: dict[str, Any] = {
-    "success": True,
-    "data": [],
-    "usage": {},
-    "status": "completed",
-}
-
-
-def _fake_send_by_call(
-    outcome: Callable[[int], dict[str, Any] | BaseException],
-    *,
-    budgets: list[float] | None = None,
-) -> tuple[Callable[..., Awaitable[dict[str, Any]]], Callable[[], int]]:
-    """构造按尝试序号取结果的 fake_send 替身，异常即抛出，返回替身与调用计数读取器。
-
-    budgets 传入列表时逐次记录 attempt_timeout_seconds，供单次尝试时限断言。
-    """
-    calls = 0
-
-    async def fake_send(
-        *,
-        client: httpx.AsyncClient,
-        url: str,
-        request_body: bytes,
-        request_timeout: httpx.Timeout,
-        attempt_timeout_seconds: float,
-    ) -> dict[str, Any]:
-        nonlocal calls
-        del client, url, request_body, request_timeout
-        calls += 1
-        if budgets is not None:
-            budgets.append(attempt_timeout_seconds)
-        value = outcome(calls)
-        if isinstance(value, BaseException):
-            raise value
-        return value
-
-    return fake_send, lambda: calls
 
 
 def _capture_sleep_into(durations: list[float]) -> Callable[..., Awaitable[None]]:
@@ -89,43 +42,55 @@ def _capture_sleep_into(durations: list[float]) -> Callable[..., Awaitable[None]
     return _capture_sleep
 
 
-@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
+async def test_call_api_selects_response_callback_by_stream_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream 标志选择响应处理回调：流式取 _handle_stream_response，非流式取 _parse_json_success_response。"""
+    config = SeedreamConfig(api_key="k", max_retries=0)
+    captured: list[Callable[[httpx.Response, float], Awaitable[dict[str, Any]]]] = []
+    fake_send, _ = _make_send_request_fake(_SUCCESS_RESULT, callbacks=captured)
+
+    async with SeedreamClient(config) as client:
+        monkeypatch.setattr(client, "_send_request", fake_send)
+        await client._call_api("text_to_image", {"prompt": "p"})
+        await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+        assert captured == [
+            client._parse_json_success_response,
+            client._handle_stream_response,
+        ]
+
+
 async def test_call_api_retries_on_429_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: None, send_method: str, extra_body: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """429 限流按退避重试，首次失败后第二次成功。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda call: (
                 SeedreamAPIError("rate limited", status_code=429) if call < 2 else _SUCCESS_RESULT
             )
         )
-        monkeypatch.setattr(client, send_method, fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+        monkeypatch.setattr(client, "_send_request", fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
 
     assert send_calls() == 2
     assert result["success"] is True
 
 
-@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
-async def test_call_api_4xx_not_retried(
-    monkeypatch: pytest.MonkeyPatch,
-    no_sleep: None,
-    send_method: str,
-    extra_body: dict[str, Any],
-) -> None:
+async def test_call_api_4xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_sleep: None) -> None:
     """非 429 的 4xx 客户端错误立即抛出，不重试。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda _call: SeedreamAPIError("bad request", status_code=400)
         )
-        monkeypatch.setattr(client, send_method, fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamAPIError):
-            await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+            await client._call_api("text_to_image", {"prompt": "p"})
 
     assert send_calls() == 1
 
@@ -135,10 +100,10 @@ async def test_call_api_3xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_slee
     config = SeedreamConfig(api_key="k", max_retries=3)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda _call: SeedreamAPIError("found", status_code=302)
         )
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamAPIError):
             await client._call_api("text_to_image", {"prompt": "p"})
 
@@ -158,10 +123,10 @@ async def test_call_api_exponential_backoff_no_overflow_on_huge_retries(
     config = SeedreamConfig(api_key="k", max_retries=1030)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda _call: SeedreamAPIError("server error", status_code=500)
         )
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamAPIError) as excinfo:
             await client._call_api("text_to_image", {"prompt": "p"})
 
@@ -169,92 +134,78 @@ async def test_call_api_exponential_backoff_no_overflow_on_huge_retries(
     assert "too large to convert" not in str(excinfo.value)
 
 
-@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_timeout_retried_then_mapped(
-    monkeypatch: pytest.MonkeyPatch,
-    no_sleep: None,
-    send_method: str,
-    extra_body: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """httpx 超时按 max_retries 重试用尽后映射为 SeedreamTimeoutError。"""
     config = SeedreamConfig(api_key="k", max_retries=1)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda _call: httpx.TimeoutException("timed out")
         )
-        monkeypatch.setattr(client, send_method, fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError):
-            await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+            await client._call_api("text_to_image", {"prompt": "p"})
 
     # max_retries=1 表示首次失败后还可重试 1 次，故共 2 次尝试
     assert send_calls() == 2
 
 
-@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_unexpected_error_not_retried(
-    monkeypatch: pytest.MonkeyPatch,
-    no_sleep: None,
-    send_method: str,
-    extra_body: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """非可重试的意外错误立即抛出，不浪费退避等待。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(lambda _call: ValueError("unexpected bug"))
-        monkeypatch.setattr(client, send_method, fake_send)
+        fake_send, send_calls = _make_send_request_fake(lambda _call: ValueError("unexpected bug"))
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(ValueError):
-            await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+            await client._call_api("text_to_image", {"prompt": "p"})
 
     assert send_calls() == 1
 
 
-@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_retries_on_5xx_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: None, send_method: str, extra_body: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """5xx 服务端错误按退避重试，首次失败后第二次成功。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda call: (
                 SeedreamAPIError("server error", status_code=500) if call < 2 else _SUCCESS_RESULT
             )
         )
-        monkeypatch.setattr(client, send_method, fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+        monkeypatch.setattr(client, "_send_request", fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
 
     assert send_calls() == 2
     assert result["success"] is True
 
 
-@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_network_error_retries_then_mapped(
-    monkeypatch: pytest.MonkeyPatch,
-    no_sleep: None,
-    send_method: str,
-    extra_body: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """httpx.RequestError 如 ConnectError 重试用尽后映射为 SeedreamNetworkError。"""
     config = SeedreamConfig(api_key="k", max_retries=1)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda _call: httpx.ConnectError("connection refused")
         )
-        monkeypatch.setattr(client, send_method, fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamNetworkError):
-            await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+            await client._call_api("text_to_image", {"prompt": "p"})
 
     # max_retries=1 表示首次失败后还可重试 1 次，故共 2 次尝试
     assert send_calls() == 2
 
 
-@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_429_uses_retry_after_for_backoff(
-    monkeypatch: pytest.MonkeyPatch, send_method: str, extra_body: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """带 retry_after 的 429 退避基于服务端 Retry-After，而非指数 2**attempt。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -265,15 +216,15 @@ async def test_call_api_429_uses_retry_after_for_backoff(
     monkeypatch.setattr(random, "uniform", lambda *_: 0.0)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda call: (
                 SeedreamAPIError("rate limited", status_code=429, retry_after=2.0)
                 if call < 2
                 else _SUCCESS_RESULT
             )
         )
-        monkeypatch.setattr(client, send_method, fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+        monkeypatch.setattr(client, "_send_request", fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
 
     assert send_calls() == 2
     assert result["success"] is True
@@ -281,9 +232,8 @@ async def test_call_api_429_uses_retry_after_for_backoff(
     assert sleep_durations == [2.0]
 
 
-@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_429_retry_after_above_backoff_cap(
-    monkeypatch: pytest.MonkeyPatch, send_method: str, extra_body: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """retry_after 超过指数退避上限时仍信任服务端值，不被 60 秒上限截断。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -293,15 +243,15 @@ async def test_call_api_429_retry_after_above_backoff_cap(
     monkeypatch.setattr(random, "uniform", lambda *_: 0.0)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda call: (
                 SeedreamAPIError("rate limited", status_code=429, retry_after=120.0)
                 if call < 2
                 else _SUCCESS_RESULT
             )
         )
-        monkeypatch.setattr(client, send_method, fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+        monkeypatch.setattr(client, "_send_request", fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
 
     assert send_calls() == 2
     assert result["success"] is True
@@ -316,11 +266,8 @@ async def test_call_api_429_retry_after_above_backoff_cap(
         pytest.param(0.2, 2.4, id="positive-scale"),
     ],
 )
-@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_429_retry_after_jitter_floors_at_nominal(
     monkeypatch: pytest.MonkeyPatch,
-    send_method: str,
-    extra_body: dict[str, Any],
     jitter: float,
     slept: float,
 ) -> None:
@@ -336,15 +283,15 @@ async def test_call_api_429_retry_after_jitter_floors_at_nominal(
     monkeypatch.setattr(random, "uniform", lambda *_: jitter)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda call: (
                 SeedreamAPIError("rate limited", status_code=429, retry_after=2.0)
                 if call < 2
                 else _SUCCESS_RESULT
             )
         )
-        monkeypatch.setattr(client, send_method, fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+        monkeypatch.setattr(client, "_send_request", fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
 
     assert send_calls() == 2
     assert result["success"] is True
@@ -357,7 +304,7 @@ async def test_call_api_no_status_code_not_retried(
     """无 HTTP 状态码的错误不可重试，立即抛出，以 200 响应体 JSON 解析失败驱动。
 
     生成 API 非幂等，服务端可能已完成生成与计费，重试会重复计费。经 MockTransport
-    返回 200 + 非 JSON 体驱动真实 _send_standard_request：json.loads 抛 ValueError
+    返回 200 + 非 JSON 体驱动真实 _send_request：json.loads 抛 ValueError
     被包装为 status_code=None 的 SeedreamAPIError 后不重试直接上抛。
     """
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -448,15 +395,15 @@ async def test_standard_request_rejects_chunked_body_over_limit(
         assert attempts == 1
 
 
-# ==================== 流式非 200：MockTransport 驱动真实 _send_stream_request ====================
+# ==================== 流式非 200：MockTransport 驱动携带流式回调的真实发送路径 ====================
 
 
 async def test_stream_5xx_retries_with_status_code(no_sleep: None) -> None:
     """流式 5xx 经 _raise_for_response_status 装配状态码，按重试次数耗尽失败。
 
-    流式参数化用例整体替换 _send_stream_request，未触达非 200 的读体限额、状态码
-    装配与错误分类；本组用例以 MockTransport 让真实流式发送路径发出请求并收到
-    非 200，锁定该分支装配的 status_code 使 5xx 保持可重试语义。
+    替换 _send_request 的用例未触达非 200 的读体限额、状态码装配与错误分类；
+    本组用例以 MockTransport 让真实发送路径携带流式回调发出请求并收到非 200，
+    锁定该分支装配的 status_code 使 5xx 保持可重试语义。
     """
     config = SeedreamConfig(api_key="k", max_retries=2)
     attempts = 0
@@ -545,10 +492,10 @@ async def test_call_api_exponential_backoff_sequence_locked(
     monkeypatch.setattr(random, "uniform", lambda low, high: 0.0)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda _call: SeedreamAPIError("boom", status_code=500)
         )
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamAPIError):
             await client._call_api("text_to_image", {"prompt": "p"})
 
@@ -568,10 +515,10 @@ async def test_call_api_retry_budget_terminates_before_exhausting_attempts(
     _install_stepping_monotonic(0.5, monkeypatch)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda _call: httpx.ReadTimeout("read timed out")
         )
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.00 秒不足以支撑一次完整尝试"):
             await client._call_api("text_to_image", {"prompt": "p"})
 
@@ -591,11 +538,11 @@ async def test_call_api_attempt_timeout_clamped_to_remaining_budget(
     attempt_budgets: list[float] = []
 
     async with SeedreamClient(config) as client:
-        fake_send, _ = _fake_send_by_call(
+        fake_send, _ = _make_send_request_fake(
             lambda _call: SeedreamAPIError("server error", status_code=500),
             budgets=attempt_budgets,
         )
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.00 秒不足以支撑一次完整尝试"):
             await client._call_api("text_to_image", {"prompt": "p"})
 
@@ -615,10 +562,10 @@ async def test_call_api_retry_budget_floor_blocks_fractional_remainder(
     _install_stepping_monotonic(0.64, monkeypatch)
 
     async with SeedreamClient(config) as client:
-        fake_send, send_calls = _fake_send_by_call(
+        fake_send, send_calls = _make_send_request_fake(
             lambda _call: SeedreamAPIError("server error", status_code=500)
         )
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.08 秒不足以支撑一次完整尝试"):
             await client._call_api("text_to_image", {"prompt": "p"})
 
@@ -638,11 +585,11 @@ async def test_call_api_retry_budget_floor_allows_remainder_above_floor(
     attempt_budgets: list[float] = []
 
     async with SeedreamClient(config) as client:
-        fake_send, _ = _fake_send_by_call(
+        fake_send, _ = _make_send_request_fake(
             lambda _call: SeedreamAPIError("server error", status_code=500),
             budgets=attempt_budgets,
         )
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.00 秒不足以支撑一次完整尝试"):
             await client._call_api("text_to_image", {"prompt": "p"})
 

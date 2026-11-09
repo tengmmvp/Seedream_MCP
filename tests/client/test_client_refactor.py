@@ -23,6 +23,7 @@ from seedream_mcp.client._http import (
 )
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.utils.core.json_envelope import StrictJsonEncodeError
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamConfigError,
@@ -39,7 +40,7 @@ from seedream_mcp.utils.core.executors import (
 from seedream_mcp.utils.images import validation as image_validation_module
 from seedream_mcp.utils.io.stream import escalate_partial_status, item_has_image_payload
 
-from _lib.client_fakes import _install_mock_transport
+from _lib.client_fakes import _install_mock_transport, _make_send_request_fake
 from _lib.cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
 from _lib.log_fakes import RecordingLogger
 
@@ -1243,7 +1244,7 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
 
 
 def test_serialize_request_outputs_utf8_without_ascii_escape() -> None:
-    """_serialize_request 以 ensure_ascii=False 输出 UTF-8 bytes。
+    """_serialize_request 将请求体序列化为非 ASCII 原样输出的 UTF-8 字节。
 
     中文以 UTF-8 字节序列原样出现而非 \\uXXXX 转义，提示词不被转义膨胀；静态
     方法可经类直接调用，无需实例化。
@@ -1254,6 +1255,153 @@ def test_serialize_request_outputs_utf8_without_ascii_escape() -> None:
     assert "中文".encode("utf-8") in result
     # 字面反斜杠 u 4 e 2 d 的 ASCII 转义形式不得出现
     assert b"\\u4e2d" not in result
+
+
+def test_serialize_request_emits_compact_separators() -> None:
+    """出站请求体为紧凑 JSON：分隔符间无空白。"""
+    result = SeedreamClient._serialize_request({"prompt": "p", "seq": [1, 2]})
+
+    assert result == b'{"prompt":"p","seq":[1,2]}'
+
+
+def test_serialize_request_rejects_non_finite_floats() -> None:
+    """NaN/inf 在序列化期收敛为校验类异常，不发出服务器必拒的非法 JSON 字面量。
+
+    原始 ValueError 会被流水线全捕归为泛化 API 失败，校验类异常保住 400 分类。
+    与环引用同分支共享文案，底层原因片段进文案供区分定位。顶层与嵌套同口径。
+    """
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        SeedreamClient._serialize_request({"guidance_scale": float("nan")})
+    message = excinfo.value.message
+    assert "非有限浮点值或环引用" in message
+    assert "Out of range float values" in message
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert not isinstance(excinfo.value.__cause__, StrictJsonEncodeError)
+    assert resolve_error_profile(excinfo.value).error_code == "validation_error"
+
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        SeedreamClient._serialize_request({"params": {"scale": float("inf")}})
+    assert "非有限浮点值或环引用" in excinfo.value.message
+
+
+def test_serialize_request_rejects_isolated_surrogate() -> None:
+    """孤立代理字符原样保留到 UTF-8 编码期才失败，不冒充浮点文案。
+
+    编码期失败经原语分流为 StrictJsonEncodeError，类型独立于 ValueError，分支
+    不依赖 except 顺序，用户不被引去排查不存在的浮点问题。
+    """
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        SeedreamClient._serialize_request({"prompt": "前缀\ud800后缀"})
+
+    message = excinfo.value.message
+    assert "无法编码的字符" in message
+    assert "非有限浮点" not in message
+    assert "surrogates not allowed" in message
+    assert isinstance(excinfo.value.__cause__, StrictJsonEncodeError)
+    assert resolve_error_profile(excinfo.value).error_code == "validation_error"
+
+
+def test_serialize_request_rejects_circular_reference() -> None:
+    """环引用请求体同样收敛为校验异常，不无限递归抛 RecursionError。
+
+    与浮点同抛裸 ValueError、共享分支文案，底层原因片段进文案供区分定位。
+    """
+    circular: dict[str, Any] = {"prompt": "p"}
+    circular["self"] = circular
+
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        SeedreamClient._serialize_request(circular)
+
+    message = excinfo.value.message
+    assert "非有限浮点值或环引用" in message
+    assert "Circular reference detected" in message
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert resolve_error_profile(excinfo.value).error_code == "validation_error"
+
+
+def test_serialize_request_classifies_deep_nesting_as_validation_error() -> None:
+    """深层嵌套请求体的 RecursionError 同归校验异常，不落泛化 API 失败分类。
+
+    RecursionError 属 RuntimeError 子类、不在 ValueError 体系内，无独立分支时
+    逃过校验归约、被流水线全捕归为 api_error/502。
+    """
+    deep: dict[str, Any] = {}
+    node: dict[str, Any] = deep
+    for _ in range(50_000):
+        child: dict[str, Any] = {}
+        node["child"] = child
+        node = child
+
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        SeedreamClient._serialize_request(deep)
+
+    message = excinfo.value.message
+    assert "请求参数嵌套过深" in message
+    assert isinstance(excinfo.value.__cause__, RecursionError)
+    assert not isinstance(excinfo.value, SeedreamAPIError)
+    assert resolve_error_profile(excinfo.value).error_code == "validation_error"
+
+
+def test_serialize_request_recursion_error_on_shallow_payload_maps_to_internal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """浅载荷上的 RecursionError 归无状态码 API 错误，不误报用户校验错误。
+
+    序列化下沉 CPU 卸载池工作线程执行，栈余量不足时浅载荷同样触发
+    RecursionError，正确归因是泛化 API 失败（api_error/502）而非 400 类。
+    """
+    import seedream_mcp.client._http as client_http_module
+
+    def fake_serialize(request_data: dict[str, Any]) -> bytes:
+        del request_data
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(client_http_module, "dump_strict_json_bytes", fake_serialize)
+
+    with pytest.raises(SeedreamAPIError) as excinfo:
+        SeedreamClient._serialize_request({"prompt": "p", "seq": [1, 2]})
+
+    assert not isinstance(excinfo.value, SeedreamValidationError)
+    message = excinfo.value.message
+    assert "请求序列化意外失败" in message
+    assert "嵌套过深" not in message
+    assert excinfo.value.status_code is None
+    assert isinstance(excinfo.value.__cause__, RecursionError)
+    assert resolve_error_profile(excinfo.value).error_code == "api_error"
+
+
+def test_serialize_request_recursion_error_above_depth_limit_keeps_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """深度恰超判定阈值的载荷遇 RecursionError 维持用户校验错误归因。
+
+    显式栈探测以 _REQUEST_NESTING_DEPTH_LIMIT 为界，超过即归因载荷本身；
+    此处锁定阈值边界，与 50_000 层真实深嵌套用例同锁超阈值分支。
+    """
+    import seedream_mcp.client._http as client_http_module
+    from seedream_mcp.client._http import _REQUEST_NESTING_DEPTH_LIMIT
+
+    def fake_serialize(request_data: dict[str, Any]) -> bytes:
+        del request_data
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(client_http_module, "dump_strict_json_bytes", fake_serialize)
+
+    deep: dict[str, Any] = {}
+    node: dict[str, Any] = deep
+    for _ in range(_REQUEST_NESTING_DEPTH_LIMIT + 1):
+        child: dict[str, Any] = {}
+        node["child"] = child
+        node = child
+
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        SeedreamClient._serialize_request(deep)
+
+    message = excinfo.value.message
+    assert "请求参数嵌套过深" in message
+    assert isinstance(excinfo.value.__cause__, RecursionError)
+    assert not isinstance(excinfo.value, SeedreamAPIError)
+    assert resolve_error_profile(excinfo.value).error_code == "validation_error"
 
 
 # ==================== 生成端点 URL 尾斜杠归一化 ====================
@@ -1539,19 +1687,8 @@ async def test_parallel_batch_validates_common_params_once(
 
     calls = _install_validate_common_spy(monkeypatch)
 
-    async def fake_send(
-        self: Any,
-        *,
-        client: Any,
-        url: str,
-        request_body: bytes,
-        request_timeout: Any,
-        attempt_timeout_seconds: float,
-    ) -> dict[str, Any]:
-        del self, client, url, request_body, request_timeout, attempt_timeout_seconds
-        return {"success": True, "data": [], "usage": {}, "status": "completed"}
-
-    monkeypatch.setattr(SeedreamClient, "_send_standard_request", fake_send)
+    fake_send, _ = _make_send_request_fake()
+    monkeypatch.setattr(SeedreamClient, "_send_request", fake_send)
 
     result = await handle_text_to_image(
         TextToImageInput(prompt="parallel", request_count=4, parallelism=4),
