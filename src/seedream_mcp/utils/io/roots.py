@@ -311,6 +311,11 @@ def _file_uri_to_path(uri: str) -> Path | None:
     if (parsed.scheme or "").lower() != "file":
         return None
 
+    # 新版 url2pathname 为完整 file-URL 解析器，先归并前导斜杠再返回；UNC 与纯
+    # 分隔符形态须在其之前的原始 path 上拒绝。
+    if is_unc_path(parsed.path or "") or not (parsed.path or "").strip("/\\"):
+        return None
+
     try:
         path_part = url2pathname(parsed.path or "")
     except Exception:
