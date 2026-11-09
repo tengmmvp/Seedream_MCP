@@ -89,6 +89,14 @@ def _balanced_brace_block(code: str, open_idx: int) -> tuple[str, int]:
     raise AssertionError("花括号不配平，结构锚提取失配")
 
 
+def _lightbox_use_body(gallery_js: str) -> tuple[str, int]:
+    """灯箱回填函数的去注释函数体与读取窗口锚点（await blobToDataUri 位）。"""
+    use = _js_code_without_comments(
+        function_body(gallery_js, r"export async function useLightboxAsReference\(.*?^}")
+    )
+    return use, use.index("await blobToDataUri")
+
+
 def test_static_pages_exist() -> None:
     """入口页与 404 页随包存在于静态资源目录。"""
     assert (STATIC_DIR / "index.html").is_file()
@@ -643,40 +651,213 @@ def test_gallery_caption_keeps_zero_byte_size() -> None:
 
 
 def test_lightbox_reference_eviction_is_unconditional() -> None:
-    """灯箱回填的满档腾挪无条件执行，槽位操作收敛 refs.js。
+    """灯箱回填的满档让位无条件执行，让位与入列内聚于同步收编原语。
 
-    腾挪仅存在于文生图切换分支时，图生图唯一槽位已占（含切工具自动恢复的
+    让位仅存在于文生图切换分支时，图生图唯一槽位已占（含切工具自动恢复的
     占位）与多图融合满档下同一动作被数量上限拒绝，成败取决于先前所在工具；
-    让位项回暂存不丢，腾挪后列表即时重渲染。让位循环单源于 parkRefsBeyond：
-    腾挪传 max - 1（addReference 随后入列并在 >= max 再拒，须留一席），
-    工具收缩传 max（让位到数量上限本身），双副本手工循环不复存在。
+    让位项回暂存不丢。收编原语 admitReference 单点组装让位与入列：满档先
+    parkRefsBeyond(max - 1)（addReference 随后入列并在 >= max 再拒，
+    须留一席），再经 addReference 校验入列，被拒时让位项自暂存栈尾
+    弹回参考图列表；工具切换收敛传 max（让位到数量上限本身），双副本手工循环不存在；
+    generate.js 只委托收敛原语，不直接操控暂存栈。
     """
     gallery_js = read_js_module_source("gallery.js")
     refs_js = read_js_module_source("refs.js")
     generate_js = read_js_module_source("generate.js")
-    use = function_body(gallery_js, r"export async function useLightboxAsReference\(.*?^}")
-    code = _js_code_without_comments(use)
+    code, _ = _lightbox_use_body(gallery_js)
     switch_block, _ = _balanced_brace_block(
         code, code.index("{", code.index("state.tool === TOOL_TEXT_TO_IMAGE"))
     )
     assert ".click();" in switch_block, "文生图分支缺切图生图动作"
-    assert "ensureRefCapacity" not in switch_block, "腾挪仍困在工具切换分支，路径未统一"
-    assert use.count("ensureRefCapacity();") == 1, "回填前缺无条件腾挪"
-    assert use.index("ensureRefCapacity();") < use.index('addReference("data_uri"'), "腾挪晚于入列"
-    evictor = function_body(refs_js, r"export function ensureRefCapacity\(.*?^}")
-    assert "parkRefsBeyond(config.max - 1)" in evictor, "腾挪未为随后入列留一席"
-    parker = function_body(refs_js, r"export function parkRefsBeyond\(.*?^}")
-    assert "state.parkedRefs.push(state.refs.pop());" in parker, "让位项未回暂存不丢"
+    admit = _js_code_without_comments(
+        function_body(refs_js, r"export function admitReference\(.*?^}")
+    )
+    assert "parkRefsBeyond(config.max - 1)" in admit, "让位未为随后入列留一席"
+    assert admit.index("parkRefsBeyond(") < admit.index("addReference("), "让位晚于入列"
+    assert "state.parkedRefs.pop()" in admit, "被拒不弹回暂存栈尾，让位项搁浅"
+    assert "state.refs.push(" in admit, "弹回未归还参考图列表"
+    assert "renderReferences();" in admit, "回滚后未重渲染参考图列表"
+    parker = function_body(refs_js, r"^function parkRefsBeyond\(.*?^}")
+    assert "state.parkedRefs.push(ref);" in parker, "让位项未回暂存不丢"
+    assert "parked.push(ref);" in parker, "让位未捕获让位项，回滚失去计数"
     assert re.search(
         r"state\.refs\.length > 0\s*&&\s*state\.refs\.length > limit", parker
     ), "让位循环缺终止防御或越限判定"
-    assert "renderReferences();" in evictor, "腾挪后未重渲染参考图列表"
-    _assert_imported_from(generate_js, "refs.js", "parkRefsBeyond")
+    converge_body = function_body(refs_js, r"export function convergeRefsToTool\(.*?^}")
+    assert "parkRefsBeyond(config.max);" in converge_body, "工具切换收敛未先让位到上限"
+    assert "withinUploadBudget(next.value.length)" in converge_body, "恢复不受 data URI 预算约束"
+    assert "renderReferences();" in converge_body, "收敛后未重渲染参考图列表"
+    _assert_imported_from(generate_js, "refs.js", "convergeRefsToTool")
     apply = function_body(generate_js, r"export function applyToolUI\(.*?^}")
-    assert "parkRefsBeyond(config.max);" in apply, "工具收缩让位未走统一 helper"
+    assert "convergeRefsToTool();" in apply, "工具切换收敛未委托 refs.js 原语"
+    assert "state.parkedRefs" not in generate_js, "generate.js 直接操控暂存栈"
+
+
+def test_lightbox_reference_admission_is_synchronous_after_read() -> None:
+    """灯箱回填先读取后收编：让位不跨越 await，撤销装置整体删除。
+
+    让位先于 blob 读取的旧时序在读取窗口内留下交错面：Escape 关灯箱后切换
+    工具会交错让位与归还，归还按栈尾回暂存置换暂存序，切回原工具恢复出错序
+    的参考图列表。现读取窗口内零状态变更（仅禁用回填按钮防连点），读取完成后
+    在同步收编原语内一次完成让位、校验与入列：同步块内 JS 单线程无交错，
+    复原按构造精确，按身份归还与容量重申的撤销装置不再需要。拒绝原因
+    已由 addReference 落参考图区不重复（可见落位由灯箱回填提示落位用例
+    另行守护）；收编按读取完成时的当前工具规则判定。
+    """
+    gallery_js = read_js_module_source("gallery.js")
+    refs_js = read_js_module_source("refs.js")
+    assert "state.parkedRefs" not in gallery_js, "gallery.js 直接操控暂存栈"
+    assert "state.refs" not in gallery_js, "gallery.js 直接操控参考图栈"
+    assert "renderReferences" not in gallery_js, "参考图渲染未收敛 refs.js"
+    _assert_imported_from(gallery_js, "refs.js", "admitReference")
+    # 撤销装置整体删除：让位句柄与按身份归还不得回流。
+    for symbol in ("ensureRefCapacity", "restoreParkedRefs"):
+        assert symbol not in refs_js, f"撤销装置未删除: {symbol}"
+        assert symbol not in gallery_js, f"gallery.js 仍引用撤销装置: {symbol}"
+    code, read_at = _lightbox_use_body(gallery_js)
+    # 读取前的函数体片段零让位/收编调用，await 窗口内无让位可交错。
+    before_read = code[:read_at]
+    for name in ("parkRefsBeyond", "admitReference", "convergeRefsToTool"):
+        assert name not in before_read, f"读取前出现让位/收编调用: {name}"
+    assert code.index("button.disabled = true;") < read_at, "读取窗口内回填按钮未禁用"
+    finally_block, _ = _balanced_brace_block(code, code.index("} finally {") + len("} finally "))
+    assert "button.disabled = false;" in finally_block, "读取收尾未在 finally 恢复回填按钮"
+    admit = _js_code_without_comments(
+        function_body(refs_js, r"export function admitReference\(.*?^}")
+    )
+    assert "await" not in admit, "收编原语内出现 await，让位与入列之间可交错"
+
+
+def test_lightbox_backfill_error_lands_on_lightbox_node() -> None:
+    """灯箱回填的提示直落灯箱栏。
+
+    三处提示（取消告知、拒绝指引、读取失败）都经 seq 守卫到达：读取窗口内
+    灯箱关闭或换图使 lightboxSeq 前移，守卫静默拦下不到提示，故落提示时
+    灯箱恒开，无需视图感知兜底（图库栏/参考区分流为不可达死分支，已删），
+    gallery.js 不再引用 currentView。
+    """
+    gallery_js = read_js_module_source("gallery.js")
+    assert "currentView" not in gallery_js, "视图感知落位回流 gallery"
+    assert "suppressRefFallback" not in gallery_js, "死分支抑制参量回流"
+    fallback = function_body(gallery_js, r"function showBackfillError\(.*?^}")
+    assert fallback.count("showInlineError(") == 1, "落位未单点收敛灯箱栏"
+    assert 'showInlineError($("lightbox-error"), message);' in fallback, "回填提示未直落灯箱栏"
+    for literal in ('"gallery-error"', '"ref-error"'):
+        assert literal not in fallback, f"视图兜底分支残留: {literal}"
+    use, _ = _lightbox_use_body(gallery_js)
+    assert "showInlineError" not in use, "回填流程绕过共享落位直写错误节点"
+    assert use.count("showBackfillError(") == 3, "回填提示落位点增减，守护需同步"
+    reject_at = use.index('admitReference("data_uri"')
+    reject_block, _ = _balanced_brace_block(use, use.index("{", use.index("!== null)", reject_at)))
     assert (
-        "state.parkedRefs.push(state.refs.pop());" not in generate_js
-    ), "generate.js 残留手工让位副本"
+        'showBackfillError("参考图未添加，详情见生成台提示。");' in reject_block
+    ), "拒绝指引未走共享落位"
+    catch_block, _ = _balanced_brace_block(use, use.index("} catch {") + len("} catch "))
+    assert (
+        'showBackfillError("回填参考图失败，请改用上传方式。");' in catch_block
+    ), "读取失败分支未走共享落位"
+
+
+def test_lightbox_backfill_staleness_guard_covers_completion_paths() -> None:
+    """灯箱回填的过期守卫：序号或工具身份失配的完成三路不再收场灯箱、hash 跳转或落隐藏节点提示。
+
+    读取窗口内换图或关闭（Escape 等使 lightboxSeq 前进）后，旧完成仍无条件
+    收场灯箱并 hash 跳转，砸掉用户新开的灯箱/视图；用户切回不支持参考图的
+    工具后，收编按新工具规则拒绝、原因落已折叠区段的隐藏节点。守卫以窗口前快照判定放弃：
+    成功与拒绝共用读取后、收编前的一道守卫
+    （不入列即无拒绝原因可落隐藏节点，守卫后全程同步使一次判定贯到底），
+    序号守卫先行、工具守卫继后，各情形只陈述一次；工具已切而灯箱仍开（seq 匹配）的放弃
+    在灯箱栏补取消告知，seq 失配（换图或关闭）与失败路的放弃静默。
+    """
+    gallery_js = read_js_module_source("gallery.js")
+    use, read_at = _lightbox_use_body(gallery_js)
+    # 快照先于读取窗口落定，且晚于流程起点的自动切图生图。
+    for snapshot in ("const seq = lightboxSeq;", "const tool = state.tool;"):
+        assert use.index(snapshot) < read_at, f"快照未先于读取窗口: {snapshot}"
+    assert use.index(".click();") < use.index("const tool = state.tool;")
+    # 成功与拒绝共用的过期守卫：读取返回后、收编之前，序号失配先行静默放弃。
+    seq_guard_at = use.index("if (seq !== lightboxSeq) return;")
+    admit_at = use.index('admitReference("data_uri"')
+    assert read_at < seq_guard_at < admit_at, "过期闸未设在读取后、收编前"
+    # 守卫后无 await，一次判定贯穿收场灯箱、hash 跳转与提示的全部收尾。
+    assert "await" not in use[seq_guard_at:], "闸后出现 await，过期判定不再贯穿收尾"
+    for settle in ("closeLightbox();", 'location.hash = "#/generate";'):
+        assert seq_guard_at < use.index(settle), f"收场动作逸出过期闸: {settle}"
+    # 取消告知嵌在工具守卫内、工具守卫随序号守卫之后：到告知必先过序号守卫，
+    # 仅工具已切而灯箱未动（seq 匹配）的子场景可见。
+    tool_guard_at = use.index("if (state.tool !== tool) {")
+    assert seq_guard_at < tool_guard_at < admit_at, "工具闸未随序号闸之后、收编之前"
+    tool_block, _ = _balanced_brace_block(use, use.index("{", tool_guard_at))
+    assert (
+        "已切换生成工具，回填已取消。" in tool_block
+    ), "取消告知逸出工具闸，未限定 seq 匹配的工具切换子场景"
+    # catch 路两守卫同向设防：失配的读取失败不落任何提示。
+    catch_block, _ = _balanced_brace_block(use, use.index("} catch {") + len("} catch "))
+    failure_at = catch_block.index("showBackfillError(")
+    for guard in ("if (seq !== lightboxSeq) return;", "if (state.tool !== tool) return;"):
+        assert catch_block.index(guard) < failure_at, "catch 路过期失败仍落提示"
+    assert "已切换生成工具" not in catch_block, "取消告知扩大到读取失败路"
+
+
+def test_lightbox_backfill_blob_cleared_at_close_start() -> None:
+    """灯箱关闭起点即置空回填 blob：淡出窗口内的二次回填在入口短路。
+
+    blob 原先延迟到收尾计时器（260ms）才置空，而回填按钮在收尾前已
+    恢复可点，过期守卫按关闭后的新序号快照合法放行，同一 blob 再次入列
+    成重复参考图（图生图首份经暂存浮出、多图融合直接可见）。置空收敛到
+    closeLightbox 起点且先于淡出计时器武装，二次点击在
+    useLightboxAsReference 入口的空 blob 判定即返回；显示走对象 URL 不随
+    blob 提前回收，收尾不再重复置空，自身收场关灯箱晚于本地捕获、淡出中
+    重开经 openLightbox 重新赋值 blob，合法回填均不受波及。
+    """
+    gallery_js = read_js_module_source("gallery.js")
+    close = _js_code_without_comments(
+        function_body(gallery_js, r"export function closeLightbox\(.*?^}")
+    )
+    clear_at = close.index("currentLightboxBlob = null;")
+    assert clear_at < close.index("finishLightboxClose();"), "置空晚于 reduced-motion 同步收尾"
+    assert clear_at < close.index("setTimeout("), "置空晚于淡出计时器武装，260ms 窗口放行重复回填"
+    finish = _js_code_without_comments(
+        function_body(gallery_js, r"function finishLightboxClose\(.*?^}")
+    )
+    assert "currentLightboxBlob" not in finish, "置空未收敛到关闭起点，收尾残留重复防线"
+    open_fn = _js_code_without_comments(
+        function_body(gallery_js, r"export async function openLightbox\(.*?^}")
+    )
+    assert (
+        "currentLightboxBlob = blob;" in open_fn
+    ), "淡出中重开未重新赋值 blob，后续回填被起点置空误伤"
+    use, read_at = _lightbox_use_body(gallery_js)
+    assert use.index("if (!blob") < read_at, "入口空 blob 短路未先于读取窗口"
+    assert use.index("const blob = currentLightboxBlob;") < use.index(
+        "closeLightbox();"
+    ), "本地捕获晚于自身收场关灯箱，合法回填被起点置空误伤"
+
+
+def test_lightbox_backfill_button_state_scoped_to_instance() -> None:
+    """灯箱回填按钮的禁用态按实例收敛：新开复位、过期读取不越权恢复。
+
+    禁用只在读取窗口内防连点，恢复原先无条件执行且无人复位：
+    Escape 放弃读取后重开灯箱，过期读取的 finally 未到前按钮呈死禁用态；
+    反向地，先开实例的过期 finally 又会在新实例读取进行中提前复活按钮，连点防线失效。
+    复位收敛到 openLightbox 序号守卫之后（新实例落成才复位），恢复收敛到
+    finally 的当前实例判定（seq 失配即放弃恢复权）。
+    """
+    gallery_js = read_js_module_source("gallery.js")
+    open_fn = _js_code_without_comments(
+        function_body(gallery_js, r"export async function openLightbox\(.*?^}")
+    )
+    reset = '$("lightbox-use").disabled = false;'
+    assert reset in open_fn, "新开灯箱不复位回填按钮，被放弃读取遗留死禁用态"
+    guard_at = open_fn.index("if (seq !== lightboxSeq) return;")
+    assert guard_at < open_fn.index(reset), "复位逸出序号守卫，未落成的开箱同样触碰按钮"
+    use, _ = _lightbox_use_body(gallery_js)
+    finally_block, _ = _balanced_brace_block(use, use.index("} finally {") + len("} finally "))
+    assert re.search(
+        r"if \(seq === lightboxSeq\) button\.disabled = false;", finally_block
+    ), "读取收尾未按当前实例判定，过期读取复活新实例读取中的按钮"
+    assert use.count("button.disabled = false;") == 1, "恢复点未单点收敛到键控 finally"
+    assert gallery_js.count('$("lightbox-use")') == 2, "回填按钮出现第三处触碰点，守护需同步"
 
 
 def test_gallery_advance_guards_missing_next_offset() -> None:

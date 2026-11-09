@@ -18,19 +18,18 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Protocol, TypeVar, cast, overload
+from typing import TypeVar, cast, overload
 
 from mcp.server.mcpserver import Context
-from mcp.types import CallToolResult, ListRootsResult
-from pydantic import BaseModel
+from mcp.types import CallToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ..config import SeedreamConfig, get_active_config
 from ..definitions.conventions import (
     IMAGE_TO_IMAGE_TOOL_NAME,
-    MAX_LAYER_DECOMPOSITION_IMAGES,
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
     MULTI_IMAGE_FUSION_TOOL_NAME,
@@ -39,6 +38,7 @@ from ..definitions.conventions import (
 )
 from ..tools.outputs.channels import output_channels_scope
 from ..tools.schemas import (
+    BaseGenerationInput,
     ImageToImageInput,
     MultiImageFusionInput,
     SequentialGenerationInput,
@@ -50,19 +50,11 @@ from ..tools.runners import (
     run_sequential_generation,
     run_text_to_image,
 )
-from ..utils.core.errors import (
-    SeedreamConfigError,
-    SeedreamValidationError,
-    resolve_error_profile,
-)
 from ..utils.core.http_int import strict_http_int
 from ..utils.core.json_envelope import SECURE_JSON_HEADERS
 from ..utils.core.logs import get_logger
 from ..utils.core.retry_budget import api_retry_budget_seconds
-from ..utils.core.validators import (
-    resolve_sequential_max_images,
-    resolve_wave_divisor,
-)
+from ..utils.core.validators import resolve_effective_auto_save, resolve_wave_divisor
 from ..utils.io.download import worst_case_download_budget_ms
 from ..utils.io.stream import data_items
 from ..utils.model.capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
@@ -71,30 +63,25 @@ from .context import build_web_request_context
 
 logger = get_logger()
 
-_InputT = TypeVar("_InputT", bound=BaseModel)
-_RunnerInputT = TypeVar("_RunnerInputT", bound=BaseModel, contravariant=True)
+_GenerationInputT = TypeVar("_GenerationInputT", bound=BaseGenerationInput)
 
-
-class _GenerationRunner(Protocol[_RunnerInputT]):
-    """生成 runner 的调用契约，与 tools.runners 的 run_* 签名保持对齐。"""
-
-    async def __call__(
-        self,
-        params: _RunnerInputT,
-        config: SeedreamConfig,
-        ctx: Context | None = None,
-        workspace_roots: ListRootsResult | None = None,
-    ) -> CallToolResult: ...
+# 泛型绑定具体输入模型，避免 Callable 逆变要求 runner 接受任意基类实现。
+# Web 入口不传 workspace_roots，真实 runner 的该可选尾参不影响可赋值性。
+_GenerationRunner = Callable[
+    [_GenerationInputT, SeedreamConfig, Context | None],
+    Awaitable[CallToolResult],
+]
 
 
 def _rewrite_item_path(item: dict[str, object], images_root: Path) -> None:
     """改写单个结果条目的路径字段，产出前端可消费的 web_path 相对形态。
 
-    相对化与越界删除经 _responses.converge_path_entry 单点维护；markdown_ref 前端
-    不消费，无条件删除。
+    相对化与越界删除经 _responses.converge_path_entry 单点维护。
+    local_path 恒为保存链已 resolve 的绝对路径，词法相对化与图库端同契约。
+    markdown_ref 前端不消费，无条件删除。
     """
     item.pop("markdown_ref", None)
-    _responses.converge_path_entry(item, "local_path", images_root, resolve=True)
+    _responses.converge_path_entry(item, "local_path", images_root)
 
 
 def augment_generation_payload(structured: dict[str, object], images_root: Path) -> None:
@@ -136,19 +123,64 @@ def _generate_scheduling_budget_ms(
     return math.ceil(request_count / divisor) * budget_ms + GENERATE_OVERHEAD_MS
 
 
-def _per_request_image_count(
-    tool_name: str,
-    *,
-    layer_decomposition: bool,
-    max_images: int | None,
-    image_count: int,
+def worst_case_auto_save_tail_ms(
+    config: SeedreamConfig, *, total_images: int, auto_save: bool | None
 ) -> int:
-    """单请求产图数：图层拆分取满额，组图按 max_images 与参考图张数推导，其余恒产一图为上游固定形态。"""
-    if layer_decomposition:
-        return MAX_LAYER_DECOMPOSITION_IMAGES
-    if tool_name == SEQUENTIAL_GENERATION_TOOL_NAME:
-        return resolve_sequential_max_images(max_images, image_count)
-    return 1
+    """自动保存下载尾巴的最坏情形毫秒数，生效值关闭时恒为 0。
+
+    生成准入在 API 调用返回即释放、早于保存批下载，下载在进程级共享的
+    save_batch 信号量上排队，FIFO 公平性只保证队首最终获得许可位、不保证
+    单请求份额，尾巴按最坏逐图串行折算：总图数 × 单次最坏下载预算。
+    字段即执行链构造保存管理器时消费的同名 config 字段，
+    auto_save 三态经 resolve_effective_auto_save 与执行链同口径合成。
+    """
+    if not resolve_effective_auto_save(auto_save, config.auto_save_enabled):
+        return 0
+    return total_images * worst_case_download_budget_ms(
+        config.auto_save_download_timeout, config.auto_save_max_retries
+    )
+
+
+# 前端 setTimeout 的毫秒值域上限（2^31-1）：超出经 ToInt32 回绕为非正值立即触发。
+JS_SET_TIMEOUT_MAX_MS = 2_147_483_647
+
+
+def _wait_budget_ms(
+    config: SeedreamConfig,
+    *,
+    request_count: int,
+    per_request_images: int,
+    parallelism: int | None = None,
+    auto_save: bool | None = None,
+) -> int:
+    """等待预算毫秒：波次调度预算加最坏情形下载尾巴，封顶 JS setTimeout 值域。
+
+    auto_save 三态：None 回退全局开关，非 None 为请求级覆盖。
+    """
+    return min(
+        _generate_scheduling_budget_ms(config, request_count, parallelism=parallelism)
+        + worst_case_auto_save_tail_ms(
+            config,
+            total_images=request_count * per_request_images,
+            auto_save=auto_save,
+        ),
+        JS_SET_TIMEOUT_MAX_MS,
+    )
+
+
+def generate_fallback_timeout_ms(config: SeedreamConfig) -> int:
+    """满档等待预算：表单上限请求数加图层拆分满额产图的最坏推导。
+
+    config-info 下发此值作前端 preflight 失败的等待兜底，随部署配置走；预算
+    本体仍由生成端点 preflight 按输入单源推导。
+    """
+    return _wait_budget_ms(
+        config,
+        request_count=MAX_PARALLEL_REQUEST_COUNT,
+        per_request_images=ImageToImageInput.per_request_image_count(
+            layer_decomposition=True, max_images=None, image_count=0
+        ),
+    )
 
 
 @overload
@@ -173,57 +205,9 @@ def _parse_clamped_query_int(
     return min(max(parsed, lower), upper)
 
 
-def _wait_budget_ms(
-    config: SeedreamConfig,
-    tool_name: str,
-    *,
-    request_count: int,
-    parallelism: int | None = None,
-    layer_decomposition: bool = False,
-    max_images: int | None = None,
-    image_count: int = 0,
-    download_tail: bool | None = None,
+def _preflight_timeout_ms(
+    request: Request, config: SeedreamConfig, model_cls: type[BaseGenerationInput]
 ) -> int:
-    """等待预算毫秒：波次调度预算加按需计入的自动保存下载尾巴。
-
-    download_tail 三态：None 回退全局自动保存开关，True/False 为请求级覆盖
-    （显式 True 覆盖全局关闭，与 pipeline 的生效值合成同口径）。
-    """
-    budget_ms = _generate_scheduling_budget_ms(config, request_count, parallelism=parallelism)
-    include_tail = config.auto_save_enabled if download_tail is None else download_tail
-    if not include_tail:
-        return budget_ms
-    total_images = request_count * _per_request_image_count(
-        tool_name,
-        layer_decomposition=layer_decomposition,
-        max_images=max_images,
-        image_count=image_count,
-    )
-    # 保存信号量为进程级共享（并发生成请求均分槽位），单请求按
-    # ceil(max_concurrent / generate_concurrency) 个槽位折算下载波次；未满载时
-    # 实际下载更快，预算取保守的满载均分假设。
-    slots_per_request = math.ceil(config.auto_save_max_concurrent / config.generate_concurrency)
-    tail_ms = math.ceil(total_images / slots_per_request) * worst_case_download_budget_ms(
-        config.auto_save_download_timeout, config.auto_save_max_retries
-    )
-    return budget_ms + tail_ms
-
-
-def generate_fallback_timeout_ms(config: SeedreamConfig) -> int:
-    """满档等待预算：表单上限请求数加图层拆分满额产图的最坏推导。
-
-    config-info 下发此值作前端 preflight 失败的等待兜底，随部署配置走；预算
-    本体仍由生成端点 preflight 按输入单源推导。
-    """
-    return _wait_budget_ms(
-        config,
-        IMAGE_TO_IMAGE_TOOL_NAME,
-        request_count=MAX_PARALLEL_REQUEST_COUNT,
-        layer_decomposition=True,
-    )
-
-
-def _preflight_timeout_ms(request: Request, config: SeedreamConfig, tool_name: str) -> int:
     """预检按 query 投影推导前端等待预算（波次调度预算加自动保存下载尾巴），不读请求体与图片目录。
 
     读取键集与前端 preflightTimeoutMs 构造键集的对账由契约测试锁定；body 携带
@@ -238,27 +222,28 @@ def _preflight_timeout_ms(request: Request, config: SeedreamConfig, tool_name: s
     download_tail = query.get("download_tail")
     return _wait_budget_ms(
         config,
-        tool_name,
         request_count=request_count,
+        per_request_images=model_cls.per_request_image_count(
+            layer_decomposition=query.get("layer_decomposition") == "1",
+            max_images=_parse_clamped_query_int(
+                query.get("max_images"), 1, MAX_SEQUENTIAL_TOTAL_IMAGES
+            ),
+            image_count=_parse_clamped_query_int(
+                query.get("image_count"), 0, SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES, default=0
+            ),
+        ),
         parallelism=_parse_clamped_query_int(
             query.get("parallelism"), 1, MAX_PARALLEL_REQUEST_COUNT
         ),
-        layer_decomposition=query.get("layer_decomposition") == "1",
-        max_images=_parse_clamped_query_int(
-            query.get("max_images"), 1, MAX_SEQUENTIAL_TOTAL_IMAGES
-        ),
-        image_count=_parse_clamped_query_int(
-            query.get("image_count"), 0, SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES, default=0
-        ),
-        download_tail=None if download_tail not in ("0", "1") else download_tail == "1",
+        auto_save=None if download_tail not in ("0", "1") else download_tail == "1",
     )
 
 
 async def _run_web_generation(
     request: Request,
     tool_name: str,
-    model_cls: type[_InputT],
-    runner: _GenerationRunner[_InputT],
+    model_cls: type[_GenerationInputT],
+    runner: _GenerationRunner[_GenerationInputT],
 ) -> Response:
     """解析请求体并执行生成 runner，按结果形态映射响应。
 
@@ -274,7 +259,7 @@ async def _run_web_generation(
     if request.query_params.get("preflight") == "1":
         # 预检先于序言：推导预算只需 query 投影，免上传含参考图的整请求体。
         return JSONResponse(
-            {"success": True, "timeout_ms": _preflight_timeout_ms(request, config, tool_name)},
+            {"success": True, "timeout_ms": _preflight_timeout_ms(request, config, model_cls)},
             headers=SECURE_JSON_HEADERS,
         )
     preamble = await _responses.entry_preamble(request, tool_name, model_cls)
@@ -286,14 +271,10 @@ async def _run_web_generation(
     # 端未声明 roots 的会话同构。
     ctx = cast("Context | None", build_web_request_context())
     # runner 契约保证不抛，异常已归约为 is_error 结果，兜底仅防流水线全捕回归。
+    # 类型化异常→错误码的分派归流水线全捕层，Web 兜底不分派、不回显异常原文。
     try:
         with output_channels_scope(preview=False, mirror=False):
             result = await runner(params, config, ctx)
-    except (SeedreamValidationError, SeedreamConfigError) as exc:
-        # 错误码经档案注册表单源，不与注册表漂移；状态由状态表按码查得。
-        return await _responses.respond_structured_error(
-            tool_name, resolve_error_profile(exc).error_code, exc.message
-        )
     except Exception:
         logger.exception("Web 生成请求执行异常")
         return await _responses.INTERNAL_ERROR_INFO.as_response(tool_name)

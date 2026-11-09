@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
 from pathlib import Path
+from types import CodeType, FrameType
 from typing import Any
 
 import httpx
@@ -96,6 +99,25 @@ async def test_browse_rejects_invalid_body(
     response = await _post_browse(app, {"limit": 0})
 
     _assert_structured_failure(response, "browse_images", "validation_error", status=400)
+
+
+async def test_browse_blank_directory_defaults_to_images_root(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """空串与纯空白 directory 与缺省同义，浏览图片目录根返回 200 而非校验 400。"""
+    images_root = write_workspace_config(tmp_path)
+    day_dir = images_root / "2026-08-20" / "text_to_image"
+    day_dir.mkdir(parents=True)
+    (day_dir / "a.png").write_bytes(make_png_bytes())
+    app = build_web_app()
+
+    for directory in ("", "   "):
+        response = await _post_browse(app, {"directory": directory})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["count"] == 1
+        assert payload["directory"] == "."
 
 
 async def test_browse_invalid_json_returns_400_structured(
@@ -210,21 +232,21 @@ async def test_browse_runner_error_without_structured_content_maps_internal_erro
 async def test_browse_rejects_directory_outside_images_root(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """读权限（工作区）内、图片目录外的目录在端点拒绝：Web 文件端点仅服务图片目录。"""
+    """读权限（工作区）内、图片目录外的目录经核心 entry_bound 同界门拒绝：Web 文件端点仅服务图片目录。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_browse(app, {"directory": str(tmp_path)})
 
     _assert_structured_failure(
-        response, "browse_images", "invalid_directory", status=400, message_contains="图片目录"
+        response, "browse_images", "validation_error", status=400, message_contains="图片目录"
     )
 
 
 async def test_browse_rejects_directory_outside_read_scope(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """读权限之外的绝对路径目录同样在端点以 400 拒绝，不进入核心扫描。"""
+    """读权限之外的绝对路径目录同经核心同界门以 400 拒绝，不进入扫描。"""
     write_workspace_config(tmp_path)
     outside = tmp_path.parent / "seedream-browse-outside"
     outside.mkdir(exist_ok=True)
@@ -232,88 +254,170 @@ async def test_browse_rejects_directory_outside_read_scope(
 
     response = await _post_browse(app, {"directory": str(outside)})
 
-    _assert_structured_failure(response, "browse_images", "invalid_directory", status=400)
+    _assert_structured_failure(response, "browse_images", "validation_error", status=400)
 
 
-def _install_resolution_counters(
-    monkeypatch: pytest.MonkeyPatch,
-) -> tuple[list[str], list[str]]:
-    """在 web 层与 browse 核心两处挂计数透传的共享解析组合，返回各自调用记录。
+async def test_browse_rejects_root_landing_directory_as_validation_error(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """落文件系统根的相对目录经路径校验以 400 拒绝，消息携带落根原因。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
 
-    任一侧退回本地 normalize_path 拼装时计数落空，守护随即失败。
-    """
-    import seedream_mcp.tools.handlers.browse_images as browse_core_module
-    import seedream_mcp.webapp.gallery as gallery_module
-    from seedream_mcp.utils.io.path import (
-        BoundedResolution,
-        resolve_against_base as real_resolve,
+    response = await _post_browse(app, {"directory": "../" * 20})
+
+    _assert_structured_failure(
+        response, "browse_images", "validation_error", status=400, message_contains="文件系统根"
     )
 
-    gallery_calls: list[str] = []
-    core_calls: list[str] = []
 
-    def _gallery_resolve(directory: str, images_root: Path) -> BoundedResolution:
-        gallery_calls.append(directory)
-        return real_resolve(directory, images_root)
+# 解析归属白名单：经 gallery 端点与 browse 核心实际调用链确定，允许集合为
+# browse 核心（请求目录与图片目录解析）与扫描层（条目 resolve）；原语层归属
+# 仅作 to_thread 直发原语的违规标记，不在允许集合。
+_RESOLUTION_PRIMITIVE_LAYER = "seedream_mcp.utils.io.path"
+_BROWSE_CORE_MODULE = "seedream_mcp.tools.handlers.browse_images"
+_RESOLUTION_ALLOWED_REQUESTORS = frozenset({_BROWSE_CORE_MODULE, "seedream_mcp.utils.io.scan"})
 
-    def _core_resolve(directory: str, images_root: Path) -> BoundedResolution:
-        core_calls.append(directory)
-        return real_resolve(directory, images_root)
-
-    monkeypatch.setattr(gallery_module, "resolve_against_base", _gallery_resolve)
-    monkeypatch.setattr(browse_core_module, "resolve_against_base", _core_resolve)
-    return gallery_calls, core_calls
+# 线程池工作帧所属模块，其直接调用帧即 to_thread 直发形态的目标函数帧。
+_EXECUTOR_THREAD_MODULE = "concurrent.futures.thread"
 
 
-async def test_browse_resolves_request_directory_once_and_reuses_in_core(
+def _resolution_requestor(primitive_entry_codes: frozenset[CodeType]) -> str | None:
+    """取解析原语调用点向上首个非原语层的项目内帧所属模块；无此类帧时为 None。
+
+    工作线程栈不含发起 to_thread 的调度帧，直发形态改由目标函数帧识别：
+    目标为被包裹原语自身时归因原语层，端点侧 to_thread 直发原语不落 None 噪音。
+    """
+    frame: FrameType | None = sys._getframe(2)
+    while frame is not None:
+        module_name: str = frame.f_globals.get("__name__", "")
+        if module_name.startswith("seedream_mcp") and module_name != _RESOLUTION_PRIMITIVE_LAYER:
+            return module_name
+        caller = frame.f_back
+        if (
+            caller is not None
+            and caller.f_globals.get("__name__") == _EXECUTOR_THREAD_MODULE
+            and frame.f_code in primitive_entry_codes
+        ):
+            return _RESOLUTION_PRIMITIVE_LAYER
+        frame = caller
+    return None
+
+
+def _install_resolution_origin_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, str | None]]:
+    """在定义点包裹共享解析原语，记录窗口内每次调用的 (原语, 发起方模块)。
+
+    Path.resolve 挂类级，任意引用形态均被触达；resolve_against_base 与
+    os.path.realpath 挂模块属性，from-import 早绑定时 realpath 不经包裹为
+    已知窄洞（resolve_against_base 仍由其内部 Path.resolve 兜住）。归属按
+    调用方模块判定，端点侧经被触达形态重解析与 to_thread 直发原语同样落网。
+    """
+    import os
+
+    import seedream_mcp.utils.io.path as path_module
+    from seedream_mcp.utils.io.path import BoundedResolution
+
+    calls: list[tuple[str, str | None]] = []
+    real_path_resolve = Path.resolve
+    real_realpath = os.path.realpath
+    real_resolve_against_base = path_module.resolve_against_base
+    # 直发形态的目标帧识别依据：被包裹原语的 code 对象。
+    primitive_entry_codes = frozenset(
+        func.__code__ for func in (real_path_resolve, real_realpath, real_resolve_against_base)
+    )
+
+    def _track_path_resolve(self: Path, strict: bool = False) -> Path:
+        calls.append(("Path.resolve", _resolution_requestor(primitive_entry_codes)))
+        return real_path_resolve(self, strict=strict)
+
+    def _track_realpath(path: "str | os.PathLike[str]", *, strict: bool = False) -> str:
+        calls.append(("os.path.realpath", _resolution_requestor(primitive_entry_codes)))
+        return real_realpath(path, strict=strict)
+
+    def _track_resolve_against_base(path: str, base: Path) -> BoundedResolution:
+        calls.append(("resolve_against_base", _resolution_requestor(primitive_entry_codes)))
+        return real_resolve_against_base(path, base)
+
+    monkeypatch.setattr(Path, "resolve", _track_path_resolve)
+    monkeypatch.setattr(os.path, "realpath", _track_realpath)
+    monkeypatch.setattr(path_module, "resolve_against_base", _track_resolve_against_base)
+    return calls
+
+
+async def test_browse_request_window_resolutions_confined_to_core_side(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """请求目录经共享解析组合在端点解析一次后透传 browse 复用：核心不再重复解析。"""
-    images_root = write_workspace_config(tmp_path)
-    (images_root / "2026-08-20").mkdir()
-    (images_root / "2026-08-20" / "a.png").write_bytes(make_png_bytes())
-    gallery_calls, core_calls = _install_resolution_counters(monkeypatch)
-    app = build_web_app()
+    """一次 web browse 请求内解析原语调用的发起方全部落在允许集合，端点侧零发起。
 
-    response = await _post_browse(app, {})
+    行为级守护与符号无关：原语在定义点包裹，端点经被触达形态与 to_thread
+    直发原语发起解析即红。发起方 None（序言经 to_thread 派生图片目录一类
+    工作线程噪音）不计；核心发起至少出现一次兼作活性锚，防守护沦为不触达
+    主链路的死仪表。
+    """
+    images_root = write_workspace_config(tmp_path)
+    day_dir = images_root / "2026-08-20" / "text_to_image"
+    day_dir.mkdir(parents=True)
+    (day_dir / "a.png").write_bytes(make_png_bytes())
+    app = build_web_app()
+    calls = _install_resolution_origin_tracker(monkeypatch)
+
+    response = await _post_browse(app, {"show_details": True})
 
     assert response.status_code == 200
     assert response.json()["count"] == 1
-    assert gallery_calls == ["."]
-    assert core_calls == []
+    violations = [
+        (primitive, requestor)
+        for primitive, requestor in calls
+        if requestor is not None and requestor not in _RESOLUTION_ALLOWED_REQUESTORS
+    ]
+    assert not violations, f"web browse 请求窗口内出现允许集合外的解析发起方: {violations}"
+    assert any(
+        requestor == _BROWSE_CORE_MODULE for _, requestor in calls
+    ), "browse 核心未发起解析，守护未触达主链路"
 
 
-async def test_browse_malformed_directory_falls_back_to_core_resolution(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    clean_web_routes: None,
-    reset_http_app_state: None,
+async def test_browse_tracker_flags_to_thread_dispatch_of_resolution_primitive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """形态非法目录端点不透传解析结果，browse 核心经同一共享组合现解析报具体原因。"""
-    write_workspace_config(tmp_path)
-    gallery_calls, core_calls = _install_resolution_counters(monkeypatch)
-    app = build_web_app()
+    """to_thread 直发解析原语归因原语层计违规，不落 None 噪音放行。
 
-    response = await _post_browse(app, {"directory": "//server/share/x"})
+    端点侧最自然的回归写法 await asyncio.to_thread(resolve_against_base, ...)
+    以样本直喂追踪器锁定；直发原语层组合函数（resolve_rejecting_cycle）仍为
+    工作线程噪音，browse 核心/扫描层的 to_thread 调用不在此分支落网。
+    """
+    from seedream_mcp.utils.io.path import resolve_against_base, resolve_rejecting_cycle
 
-    _assert_structured_failure(response, "browse_images", "validation_error", status=400)
-    assert gallery_calls == ["//server/share/x"]
-    assert core_calls == ["//server/share/x"]
+    calls = _install_resolution_origin_tracker(monkeypatch)
+
+    await asyncio.to_thread(resolve_against_base, "a.png", tmp_path)
+    await asyncio.to_thread(resolve_rejecting_cycle, tmp_path / "b.png")
+
+    violations = [
+        (primitive, requestor)
+        for primitive, requestor in calls
+        if requestor is not None and requestor not in _RESOLUTION_ALLOWED_REQUESTORS
+    ]
+    assert ("Path.resolve", _RESOLUTION_PRIMITIVE_LAYER) in violations
+    assert ("Path.resolve", None) in calls
 
 
 async def test_browse_rejects_parent_escape_relative_directory(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """相对 ``..`` 穿越解析出图片目录的请求目录被端点拒绝，不回显服务器路径。"""
+    """相对 ``..`` 穿越解析出图片目录的请求目录经同界门拒绝，相对越界同落界文案。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_browse(app, {"directory": ".."})
 
-    _assert_structured_failure(response, "browse_images", "invalid_directory", status=400)
+    _assert_structured_failure(
+        response, "browse_images", "validation_error", status=400, message_contains="仅浏览图片目录"
+    )
 
 
 async def test_browse_rejects_unc_directory_as_clean_400(
@@ -444,7 +548,7 @@ async def test_web_browse_filters_outside_entries_at_source(
     reset_http_app_state: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """越界条目经 bounds_scope 在扫描源头剔除，响应不出现界外路径与计数虚高。"""
+    """越界条目经替代界在扫描源头剔除，响应不出现界外路径与计数虚高。"""
     import seedream_mcp.tools.handlers.browse_images as browse_module
     from seedream_mcp.utils.io.scan import _scan_resolved_directory
 

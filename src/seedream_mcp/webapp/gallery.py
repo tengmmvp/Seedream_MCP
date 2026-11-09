@@ -1,14 +1,13 @@
-"""Web 操作台图库浏览端点：图片目录边界校验后透传 browse 工具并收敛前端消费形态。
+"""Web 操作台图库浏览端点：透传 browse 工具并收敛前端消费形态。
 
 与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务图片目录内文件，
-图库浏览同样以图片目录为界，请求目录经 resolve_against_base 解析，
-越出图片目录在端点拒绝，解析结果透传 browse 复用，免同请求重复解析。
-browse 条目为绝对路径，Web 层改写为图片目录相对形态供前端直接拼接为图片端点参数。
+图库浏览同样以图片目录为界：图片目录与 Web 拒绝文案经 entry_bound 一并传入 browse 核心，
+请求目录的解析与边界判定由核心单点承担。browse 条目为绝对路径，
+Web 层改写为图片目录相对形态供前端直接拼接为图片端点参数。
 """
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from starlette.requests import Request
@@ -16,19 +15,22 @@ from starlette.responses import Response
 
 from ..definitions.conventions import BROWSE_IMAGES_TOOL_NAME
 from ..tools.outputs.channels import output_channels_scope
-from ..tools.schemas import BrowseImagesInput
+from ..tools.schemas import BrowseImagesInput, EntryBound
 from ..tools.runners import run_browse_images
+from ..utils.core.errors import error_text
 from ..utils.core.logs import get_logger
-from ..utils.io.path import BoundedResolution, resolve_against_base
 from . import _responses
 
 logger = get_logger()
+
+# 同界门拒绝文案（Web 图库口径）。
+_ENTRY_BOUND_DENIAL_MESSAGE = error_text("目录不在图片目录内，Web 图库仅浏览图片目录")
 
 
 def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
     """投影白名单裁剪后，条目 path 改写为图片目录相对形态。
 
-    越界条目已在扫描源头经 bounds_scope 剔除。改写经 _responses.converge_path_entry
+    越界条目已在扫描源头经替代界剔除。改写经 _responses.converge_path_entry
     与 generate 端单点维护。
     """
     _responses.project_browse_payload(structured)
@@ -38,26 +40,6 @@ def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
     for item in images:
         if isinstance(item, dict):
             _responses.converge_path_entry(item, "path", images_root)
-
-
-async def _resolve_request_directory(directory: str, images_root: Path) -> BoundedResolution | None:
-    """解析请求目录。
-
-    形态非法时返回 None，交 browse 核心以原语义报具体原因。
-    """
-
-    def _resolve() -> BoundedResolution | None:
-        try:
-            return resolve_against_base(directory, images_root)
-        except ValueError:
-            return None
-
-    return await asyncio.to_thread(_resolve)
-
-
-async def _structured_error(error: _responses.WebErrorInfo) -> Response:
-    """图库端点错误分支的结构化响应。"""
-    return await error.as_response(BROWSE_IMAGES_TOOL_NAME)
 
 
 async def web_browse(request: Request) -> Response:
@@ -71,22 +53,18 @@ async def web_browse(request: Request) -> Response:
     if isinstance(preamble, Response):
         return preamble
     params, images_root = preamble
-    directory = params.effective_directory
-    resolution = await _resolve_request_directory(directory, images_root)
-    if resolution is not None and not resolution.within_base:
-        return await _structured_error(_responses.INVALID_DIRECTORY_INFO)
-    resolved_directory = resolution.resolved if resolution is not None else None
-    # browse 契约保证不抛，异常已归约为 is_error 结果，兜底仅防处理器全捕回归；
-    # 条目过滤以图片目录为界在扫描源头剔除，与 Web 文件端点服务范围一致。
+    # browse 契约保证不抛，异常已归约为 is_error 结果，兜底仅防处理器全捕回归。
     try:
         # 端点仅消费 structuredContent，镜像通道在作用域边界关闭，免付镜像构建成本。
         with output_channels_scope(mirror=False):
             result = await run_browse_images(
-                params, ctx=None, bounds_scope=[images_root], resolved_directory=resolved_directory
+                params,
+                ctx=None,
+                entry_bound=EntryBound(images_root, _ENTRY_BOUND_DENIAL_MESSAGE),
             )
     except Exception:
         logger.exception("Web 图库浏览请求执行异常")
-        return await _structured_error(_responses.INTERNAL_ERROR_INFO)
+        return await _responses.INTERNAL_ERROR_INFO.as_response(BROWSE_IMAGES_TOOL_NAME)
     payload = await _responses.runner_result_payload(BROWSE_IMAGES_TOOL_NAME, result)
     _converge_for_web(payload, images_root)
     status = 200 if not result.is_error else _responses.structured_status(payload)

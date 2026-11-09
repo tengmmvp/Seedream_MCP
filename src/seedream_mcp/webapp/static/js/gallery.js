@@ -25,7 +25,7 @@ import {
   TOOL_IMAGE_TO_IMAGE,
   TOOL_TEXT_TO_IMAGE,
 } from "./api.js";
-import { addReference, ensureRefCapacity } from "./refs.js";
+import { admitReference } from "./refs.js";
 
 /** 图库单页条数。 */
 const GALLERY_PAGE_SIZE = 60;
@@ -443,6 +443,8 @@ export async function openLightbox(item, errorEl = $("gallery-error")) {
   $("lightbox-caption").textContent = item.web_path;
   clearInlineError(errorEl);
   clearInlineError($("lightbox-error"));
+  // 被放弃读取遗留的禁用态不得带入新实例。
+  $("lightbox-use").disabled = false;
   const lightbox = $("lightbox");
   lightbox.classList.remove("hidden");
   void lightbox.offsetWidth;
@@ -463,9 +465,11 @@ export async function openLightbox(item, errorEl = $("gallery-error")) {
 // 灯箱退场收尾计时器：过渡走完后再挂 hidden 并释放资源。
 let lightboxCloseTimer = 0;
 
-/** 关闭灯箱：退场过渡结束后释放当前对象 URL 与 blob。 */
+/** 关闭灯箱：起点置空 blob，退场过渡结束后释放当前对象 URL。 */
 export function closeLightbox() {
   lightboxSeq++;
+  // blob 于关闭起点置空：淡出窗口内回填按钮仍可点，二次点击靠入口空 blob 短路。
+  currentLightboxBlob = null;
   $("lightbox").classList.remove("open");
   clearTimeout(lightboxCloseTimer);
   // reduced-motion 下无过渡可等，立即收尾。
@@ -476,14 +480,14 @@ export function closeLightbox() {
   lightboxCloseTimer = setTimeout(finishLightboxClose, 260);
 }
 
-// 灯箱退场收尾：挂 hidden 并释放对象 URL 与 blob。
+// 灯箱退场收尾：挂 hidden 并释放对象 URL。
 function finishLightboxClose() {
   const lightbox = $("lightbox");
   // 计时窗口内被重新打开时不收尾，交由新一轮关闭处理。
+  // open 类在关闭起点同步摘除，不待过渡收尾。
   if (lightbox.classList.contains("open")) return;
   lightbox.classList.add("hidden");
   releaseLightboxUrl();
-  currentLightboxBlob = null;
   const img = $("lightbox-img");
   img.removeAttribute("src");
   img.classList.remove("loaded");
@@ -501,10 +505,19 @@ function releaseLightboxUrl() {
   }
 }
 
+// 回填提示落位：调用点均经序号守卫到达，灯箱恒开。
+function showBackfillError(message) {
+  showInlineError($("lightbox-error"), message);
+}
+
 /**
- * 回填参考图：config-info 不再下发图片目录绝对路径，前端无从拼本地路径，改用
- * 灯箱已持有的 blob 转 data URI 作为参考图值。文生图工具自动切到图生图；满档
- * 时既有参考图经 ensureRefCapacity 统一让位，不因所在工具与进入路径而异。
+ * 回填参考图：config-info 不再下发图片目录绝对路径，前端无从拼本地路径，
+ * 改用灯箱已持有的 blob 转 data URI 作为参考图值。
+ * 文生图工具自动切到图生图。读取窗口内仅禁用回填按钮防连点，
+ * 灯箱换图/关闭或工具被切换即视为用户放弃：
+ * 过期完成不入列、不收场灯箱也不跳转，
+ * 仅工具已切而灯箱仍开的放弃在灯箱栏补取消告知，其余放弃静默。
+ * 读取完成后经 admitReference 同步完成让位、校验与入列。
  * 回填成功后 hash 跳回生成台，视图切换由浏览器原生 hashchange 事件驱动。
  */
 export async function useLightboxAsReference() {
@@ -514,18 +527,33 @@ export async function useLightboxAsReference() {
   if (state.tool === TOOL_TEXT_TO_IMAGE) {
     document.querySelector(`[data-tool="${TOOL_IMAGE_TO_IMAGE}"]`).click();
   }
-  ensureRefCapacity();
+  // 放弃语义快照。
+  const seq = lightboxSeq;
+  const tool = state.tool;
+  const button = $("lightbox-use");
+  button.disabled = true;
   try {
     const dataUri = await blobToDataUri(blob);
-    // 拒绝（数量或体积超限）时停留灯箱不跳转，具体原因已落生成台提示位。
-    if (addReference("data_uri", dataUri, dataUri) !== null) {
-      showInlineError($("lightbox-error"), "参考图未添加，详情见生成台提示。");
+    // 序号失配则静默。
+    if (seq !== lightboxSeq) return;
+    // 工具已切而灯箱未动时补取消告知。
+    if (state.tool !== tool) {
+      showBackfillError("已切换生成工具，回填已取消。");
+      return;
+    }
+    // 拒绝原因已由 addReference 落参考图区，仅在灯箱栏补简短指引。
+    if (admitReference("data_uri", dataUri, dataUri) !== null) {
+      showBackfillError("参考图未添加，详情见生成台提示。");
       return;
     }
   } catch {
-    // 回填失败提示落在灯箱栏内，替代阻塞式弹窗。
-    showInlineError($("lightbox-error"), "回填参考图失败，请改用上传方式。");
+    if (seq !== lightboxSeq) return;
+    if (state.tool !== tool) return;
+    showBackfillError("回填参考图失败，请改用上传方式。");
     return;
+  } finally {
+    // 序号失配的放弃不恢复按钮，不得复活新实例读取中的按钮。
+    if (seq === lightboxSeq) button.disabled = false;
   }
   closeLightbox();
   location.hash = "#/generate";

@@ -646,7 +646,7 @@ async def test_static_page_mode_zero_file_returns_500(
 
     from seedream_mcp.webapp import meta as meta_module
 
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
+    if getattr(os, "geteuid", lambda: -1)() == 0:
         pytest.skip("root 不受权限位约束")
     static_dir = prepare_static_dir(monkeypatch, tmp_path)
     page = static_dir / "index.html"

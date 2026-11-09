@@ -1,7 +1,7 @@
 /**
- * @fileoverview 参考图域：各工具的数量规则、增删与渲染。参考图三来源——
- * 上传转 data URI、手输 URL、图库灯箱回填转 data URI；提示词以「图N」指代
- * 列表序号。
+ * @fileoverview 参考图域：各工具的数量规则、增删、暂存恢复与渲染。
+ * 参考图三来源——上传转 data URI、手输 URL、图库灯箱回填转 data URI；
+ * 提示词以「图N」指代列表序号。
  */
 
 "use strict";
@@ -113,7 +113,7 @@ export function toolConfig(tool) {
  *
  * @param {number} [enterIndex=-1] - 播放入场动画的条目序号，默认不播。
  */
-export function renderReferences(enterIndex = -1) {
+function renderReferences(enterIndex = -1) {
   const config = toolConfig(state.tool);
   const list = $("reference-list");
   list.innerHTML = "";
@@ -160,7 +160,7 @@ function dataUriTotalChars() {
 }
 
 /** 追加 nextChars 字符后是否仍在 data URI 累计上限内。 */
-export function withinUploadBudget(nextChars) {
+function withinUploadBudget(nextChars) {
   return dataUriTotalChars() + nextChars <= uploadBudget().budget;
 }
 
@@ -177,25 +177,35 @@ function clearRefError() {
  * 把超出保留上限的参考图自末位让位、回暂存不丢。
  *
  * @param {number} limit - 保留上限。
- * @returns {boolean} 是否有让位。
+ * @returns {Array<Object>} 本次让位的引用对象，按让位先后序。
  */
-export function parkRefsBeyond(limit) {
-  let parked = false;
+function parkRefsBeyond(limit) {
+  const parked = [];
   // length > 0 兼作 limit < 0 工具（文生图）的循环终止防御。
   while (state.refs.length > 0 && state.refs.length > limit) {
-    state.parkedRefs.push(state.refs.pop());
-    parked = true;
+    const ref = state.refs.pop();
+    state.parkedRefs.push(ref);
+    parked.push(ref);
   }
   return parked;
 }
 
 /**
- * 为一张待入列的参考图腾出槽位：满档时既有参考图自末位让位、回暂存不丢。
+ * 工具切换收敛：上限收缩时参考图暂存而非丢弃，
+ * 切回支持的工具按上限与 data URI 累计预算自暂存栈尾恢复原顺序，
+ * 超限项留在暂存不丢。
  */
-export function ensureRefCapacity() {
+export function convergeRefsToTool() {
   const config = toolConfig(state.tool);
-  // addReference 随后入列并在 >= max 再拒，腾挪须留一席（max - 1）。
-  if (parkRefsBeyond(config.max - 1)) renderReferences();
+  parkRefsBeyond(config.max);
+  while (state.parkedRefs.length > 0 && state.refs.length < config.max) {
+    const next = state.parkedRefs[state.parkedRefs.length - 1];
+    if (next.kind === "data_uri" && !withinUploadBudget(next.value.length)) {
+      break;
+    }
+    state.refs.push(state.parkedRefs.pop());
+  }
+  renderReferences();
 }
 
 /**
@@ -240,6 +250,30 @@ export function addReference(kind, value, preview) {
   state.refs.push({ kind, value, preview: preview || null });
   renderReferences(state.refs.length - 1);
   return null;
+}
+
+/**
+ * 同步收编一张参考图：满档时既有参考图自末位让位腾出一席，
+ * 再经 addReference 校验入列。被拒时让位项自暂存栈尾弹回参考图列表，
+ * 栈序无损。全程同步无交错，供 data URI 读取等异步前置完成后的调用。
+ *
+ * @param {string} kind - 来源类型，取 data_uri 或 url。
+ * @param {string} value - 参考图值，data URI 或图片 URL。
+ * @param {string|null} [preview] - 预览地址。
+ * @returns {string|null} 成功入列返回 null，被拒绝返回拒绝原因。
+ */
+export function admitReference(kind, value, preview) {
+  const config = toolConfig(state.tool);
+  // addReference 随后入列并在 >= max 再拒，让位须留一席（max - 1）。
+  const parked = parkRefsBeyond(config.max - 1);
+  const reason = addReference(kind, value, preview);
+  if (reason === null) return null;
+  // 本次让位项恰为暂存栈尾，逐项弹回即按逆让位序精确复原。
+  for (let i = 0; i < parked.length; i++) {
+    state.refs.push(state.parkedRefs.pop());
+  }
+  if (parked.length) renderReferences();
+  return reason;
 }
 
 /**

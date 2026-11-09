@@ -76,7 +76,6 @@ def test_structured_status_unknown_type_falls_back_to_502() -> None:
         ("not_found", 404),
         ("thumbnail_failed", 422),
         ("images_root_unavailable", 400),
-        ("invalid_directory", 400),
         ("service_unavailable", 500),
     ],
 )

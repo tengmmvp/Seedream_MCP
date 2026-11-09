@@ -17,10 +17,16 @@ from starlette.requests import Request
 from _lib.web_fixtures import _assert_imported_from, function_body, read_js_module_source
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.definitions.conventions import (
-    IMAGE_TO_IMAGE_TOOL_NAME,
+    MAX_LAYER_DECOMPOSITION_IMAGES,
     MAX_PARALLEL_REQUEST_COUNT,
 )
-from seedream_mcp.webapp.generate import _preflight_timeout_ms
+from seedream_mcp.tools.schemas import ImageToImageInput
+from seedream_mcp.webapp.generate import (
+    _generate_scheduling_budget_ms,
+    _preflight_timeout_ms,
+    generate_fallback_timeout_ms,
+    worst_case_auto_save_tail_ms,
+)
 
 _JS_MODULES = ("api.js", "generate.js", "gallery.js", "main.js", "refs.js")
 
@@ -66,6 +72,20 @@ def _assert_server_reads_covered_by_frontend(
 def _preflight_js_body() -> str:
     return function_body(
         read_js_module_source("generate.js"), r"async function preflightTimeoutMs\(.*?^}"
+    )
+
+
+def _full_load_preflight_request() -> Request:
+    """满档预检请求：表单上限请求数加图层拆分满额产图的最坏投影。"""
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [],
+            "query_string": (
+                f"request_count={MAX_PARALLEL_REQUEST_COUNT}&layer_decomposition=1".encode()
+            ),
+        }
     )
 
 
@@ -228,19 +248,55 @@ def test_generate_timeout_fallback_covers_server_derivation() -> None:
     cap = re.search(r"GENERATE_FALLBACK_TIMEOUT_MS = (\d+);", generate_js)
     assert cap is not None, "generate.js 静态保守上限常量形态改变，守护需同步"
     config = SeedreamConfig(api_key="guard-key")
-    # 满额批次取最坏组合：请求数取表单上限，图层拆分使单请求产图满额；
     # 经真实预检入口推导，与线缆行为同源。
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "headers": [],
-            "query_string": (
-                f"request_count={MAX_PARALLEL_REQUEST_COUNT}&layer_decomposition=1".encode()
-            ),
-        }
-    )
-    derived_ms = _preflight_timeout_ms(request, config, IMAGE_TO_IMAGE_TOOL_NAME)
+    derived_ms = _preflight_timeout_ms(_full_load_preflight_request(), config, ImageToImageInput)
     assert (
         int(cap.group(1)) >= derived_ms * 1.5
     ), "静态保守上限低于服务端默认满档推导的 1.5 倍，需抬升上限常量"
+
+
+# JS setTimeout 毫秒值域上限：以字面量对账生产常量，防封顶上限漂移出浏览器值域。
+_JS_SET_TIMEOUT_MAX_MS = 2_147_483_647
+
+
+def _unclamped_full_load_budget_ms(config: SeedreamConfig) -> int:
+    """满档投影的未封顶预算：调度预算加满额产图的串行下载尾巴。"""
+    return _generate_scheduling_budget_ms(
+        config, MAX_PARALLEL_REQUEST_COUNT
+    ) + worst_case_auto_save_tail_ms(
+        config,
+        total_images=MAX_PARALLEL_REQUEST_COUNT * MAX_LAYER_DECOMPOSITION_IMAGES,
+        auto_save=None,
+    )
+
+
+def test_extreme_config_budget_capped_at_js_timer_domain() -> None:
+    """极端配置的最坏推导封顶 JS setTimeout 值域：超出经 ToInt32 回绕为非正值，计时器立即触发。"""
+
+    # 下载超时取配置上界、重试配置层无上界，均为可部署的合法档位。
+    config = SeedreamConfig(
+        api_key="guard-key",
+        auto_save_download_timeout=720,
+        auto_save_max_retries=17,
+    )
+    unclamped_ms = _unclamped_full_load_budget_ms(config)
+    assert unclamped_ms > _JS_SET_TIMEOUT_MAX_MS, "极端档已不越过 JS 值域，封顶用例需重选档位"
+    assert (
+        _preflight_timeout_ms(_full_load_preflight_request(), config, ImageToImageInput)
+        == _JS_SET_TIMEOUT_MAX_MS
+    ), "preflight 预算未封顶，浏览器计时器回绕立即中止在途生成等待"
+    assert (
+        generate_fallback_timeout_ms(config) == _JS_SET_TIMEOUT_MAX_MS
+    ), "config-info 兜底预算未封顶，preflight 失败回退仍回绕"
+
+
+def test_default_config_budget_within_js_timer_domain_uncapped() -> None:
+    """常规配置的推导在值域内，封顶不生效。"""
+    config = SeedreamConfig(api_key="guard-key")
+    unclamped_ms = _unclamped_full_load_budget_ms(config)
+
+    assert unclamped_ms <= _JS_SET_TIMEOUT_MAX_MS
+    assert (
+        _preflight_timeout_ms(_full_load_preflight_request(), config, ImageToImageInput)
+        == unclamped_ms
+    )

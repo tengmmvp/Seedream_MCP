@@ -22,11 +22,9 @@ from _lib.cpu_offload_spy import CpuOffloadSpy
 from _lib.subprocess_helpers import _run_in_subprocess
 from _lib.web_fixtures import web_asgi_client, write_workspace_config
 from seedream_mcp.config import SeedreamConfig, get_active_config, set_active_config
-from seedream_mcp.definitions.conventions import (
-    IMAGE_TO_IMAGE_TOOL_NAME,
-    MAX_PARALLEL_REQUEST_COUNT,
-)
+from seedream_mcp.definitions.conventions import MAX_PARALLEL_REQUEST_COUNT
 from seedream_mcp.server.transport import _build_streamable_app
+from seedream_mcp.tools.schemas import ImageToImageInput
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.sanitizers import _CONTAINER_REPR_DEPTH_LIMIT
 from seedream_mcp.utils.model.capabilities import (
@@ -106,7 +104,7 @@ async def test_production_app_serves_web_console(
     assert info["max_request_count"] == 10
     assert info["max_images"] == 15
     assert info["generate_fallback_timeout_ms"] == _preflight_timeout_ms(
-        _full_load_preflight_request(), get_active_config(), IMAGE_TO_IMAGE_TOOL_NAME
+        _full_load_preflight_request(), get_active_config(), ImageToImageInput
     )
     assert info["default_watermark"] is False
     assert static_response.status_code == 200

@@ -56,7 +56,7 @@ from ..utils.core.sanitizers import utf8_value_leaf_length
 from ..utils.io.path import (
     READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
     images_root_relative,
-    normalize_path,
+    resolved_form_violation,
     resolve_images_root,
 )
 
@@ -97,9 +97,6 @@ IMAGE_NOT_FOUND_INFO = WebErrorInfo("not_found", "图片不存在", 404)
 API_NOT_FOUND_INFO = IMAGE_NOT_FOUND_INFO._replace(message="接口不存在")
 THUMBNAIL_FAILED_INFO = WebErrorInfo("thumbnail_failed", "缩略图生成失败", 422)
 IMAGES_ROOT_UNAVAILABLE_INFO = WebErrorInfo("images_root_unavailable", "无法确定图片目录", 400)
-INVALID_DIRECTORY_INFO = WebErrorInfo(
-    "invalid_directory", "目录不在图片目录内，Web 图库仅浏览图片目录", 400
-)
 # CPU 卸载池关闭属退出清理与服务并发的窗口期，是服务端不可用而非请求或结果缺陷。
 SERVICE_UNAVAILABLE_INFO = WebErrorInfo(
     "service_unavailable", "CPU 卸载线程池已关闭，服务不可用", 500
@@ -122,7 +119,6 @@ _ENDPOINT_OWN_ERRORS: tuple[WebErrorInfo, ...] = (
     IMAGE_NOT_FOUND_INFO,
     THUMBNAIL_FAILED_INFO,
     IMAGES_ROOT_UNAVAILABLE_INFO,
-    INVALID_DIRECTORY_INFO,
     SERVICE_UNAVAILABLE_INFO,
     WebErrorInfo(BROWSE_FAILED_ERROR_TYPE, "图片浏览失败", 500),
     WebErrorInfo(MODEL_INFO_FAILED_ERROR_TYPE, "模型信息查询失败", 500),
@@ -382,29 +378,24 @@ async def respond_structured_error(
     return await respond_structured_json(structured, _error_status(error_type))
 
 
-def converge_path_entry(
-    item: dict[str, object], key: str, images_root: Path, *, resolve: bool = False
-) -> None:
+def converge_path_entry(item: dict[str, object], key: str, images_root: Path) -> None:
     """把条目的路径键改写为图片目录相对形态并附 web_path，越界删除该键。
 
-    resolve 为 True 时先解析为物理路径再相对化（输入为任意本地路径）；False 时
     输入须已是 resolve 后的绝对路径，做纯词法相对化。
+    local_path 的该形态由保存链路径构造点（storage 的 _finalize_save_path）建立，
+    图库 path 键由扫描层 resolve 保证。
+    越界删除静默——save_path 指向图片目录外是文档用法，常规流量不刷日志；形态
+    背离 resolve 契约的删除记 warning，违约不零信号。
     """
     value = item.get(key)
     if not isinstance(value, str) or not value:
         return
-    if resolve:
-        try:
-            # normalize_path 携带 UNC/NUL/ADS 等全套预拒绝，异常归一为 ValueError。
-            path = normalize_path(value)
-        except ValueError:
-            del item[key]
-            return
-    else:
-        path = Path(value)
-    relative = images_root_relative(path, images_root)
+    relative = images_root_relative(Path(value), images_root)
     if relative is None:
         del item[key]
+        violation = resolved_form_violation(value)
+        if violation is not None:
+            logger.warning("收敛删除形态违约的路径键 {}（{}）: {}", key, violation, value)
         return
     item["web_path"] = relative
     item[key] = relative

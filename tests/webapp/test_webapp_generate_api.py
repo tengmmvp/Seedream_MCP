@@ -24,6 +24,8 @@ import seedream_mcp.server.runtime as runtime_module
 import seedream_mcp.server.transport as transport_module
 from _lib.cpu_offload_spy import CpuOffloadSpy
 from _lib.generation_fixtures import _patch_client_method_spy
+from _lib.log_fakes import capture_loguru_records
+from _lib.path_helpers import form_violation_params
 from _lib.web_fixtures import (
     _assert_endpoint_error,
     _assert_structured_failure,
@@ -40,10 +42,7 @@ from seedream_mcp.config import (
     get_active_config,
     set_active_config,
 )
-from seedream_mcp.definitions.conventions import (
-    MAX_LAYER_DECOMPOSITION_IMAGES,
-    TEXT_TO_IMAGE_TOOL_NAME,
-)
+from seedream_mcp.definitions.conventions import MAX_LAYER_DECOMPOSITION_IMAGES
 import seedream_mcp.tools.outputs as outputs_module
 from seedream_mcp.tools.outputs.channels import output_channel_enabled
 from seedream_mcp.tools.pipeline import build_generation_context
@@ -135,6 +134,24 @@ def _install_second_entry_gated_parse(
     return entries, both_entered
 
 
+# converge 路径的来源模块：generate 的改写循环与 _responses 的收敛单点。
+_CONVERGE_SOURCE_MODULES = frozenset(
+    {"seedream_mcp.webapp.generate", "seedream_mcp.webapp._responses"}
+)
+# 逐条 warning/debug 记录会随常规流量冲刷轮转日志，均为 converge 静默守护对象。
+_CONVERGE_FLOOD_LEVELS = frozenset({"DEBUG", "WARNING"})
+
+
+def _converge_flood_messages(records: list[Any]) -> list[str]:
+    """筛出 converge 来源模块的 warning/debug 记录并渲染为可读文本。"""
+    return [
+        f'{record["level"].name} {record["name"]}: {record["message"]}'
+        for record in records
+        if record["name"] in _CONVERGE_SOURCE_MODULES
+        and record["level"].name in _CONVERGE_FLOOD_LEVELS
+    ]
+
+
 async def test_generate_returns_structured_payload_with_web_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -165,18 +182,13 @@ async def test_generate_returns_structured_payload_with_web_path(
     assert entry["local_path"] == "2026-08-20/text_to_image/a.png"
 
 
-def _download_slots(config: SeedreamConfig) -> int:
-    """满载均分假设下单个生成请求分得的保存下载槽位数。"""
-    return math.ceil(config.auto_save_max_concurrent / config.generate_concurrency)
-
-
 async def test_generate_preflight_derives_timeout_without_running_runner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """preflight 按 query 投影推导等待预算并跳过生成执行，下载尾巴按并发折算。"""
+    """preflight 按 query 投影推导等待预算并跳过生成执行，下载尾巴按图数串行折算。"""
     write_workspace_config(tmp_path)
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(generate_module, "run_text_to_image", _make_fake_runner(captured=calls))
@@ -189,7 +201,7 @@ async def test_generate_preflight_derives_timeout_without_running_runner(
 
     assert response.status_code == 200
     budget_ms = generate_module._generate_scheduling_budget_ms(config, 2)
-    tail_ms = math.ceil(2 / _download_slots(config)) * worst_case_download_budget_ms(
+    tail_ms = 2 * worst_case_download_budget_ms(
         config.auto_save_download_timeout, config.auto_save_max_retries
     )
     assert response.json() == {"success": True, "timeout_ms": budget_ms + tail_ms}
@@ -250,11 +262,8 @@ async def test_generate_preflight_folds_layer_and_sequential_image_counts(
     )
 
     expected = {
-        "layer": budget_ms
-        + math.ceil(MAX_LAYER_DECOMPOSITION_IMAGES / _download_slots(config)) * per_download_ms,
-        "sequential": budget_ms
-        + math.ceil(resolve_sequential_max_images(None, 3) / _download_slots(config))
-        * per_download_ms,
+        "layer": budget_ms + MAX_LAYER_DECOMPOSITION_IMAGES * per_download_ms,
+        "sequential": budget_ms + resolve_sequential_max_images(None, 3) * per_download_ms,
     }
     assert layer_response.json()["timeout_ms"] == expected["layer"]
     assert sequential_response.json()["timeout_ms"] == expected["sequential"]
@@ -272,7 +281,7 @@ async def test_generate_preflight_clamps_malformed_projections(
     per_download_ms = worst_case_download_budget_ms(
         config.auto_save_download_timeout, config.auto_save_max_retries
     )
-    single_image_tail_ms = math.ceil(1 / _download_slots(config)) * per_download_ms
+    single_image_tail_ms = per_download_ms
     budget_ms = generate_module._generate_scheduling_budget_ms(config, 1)
 
     sequential_response = await web_post_raw(
@@ -320,7 +329,7 @@ async def test_generate_preflight_download_tail_tri_state_projection(
     app = build_web_app()
     config = get_active_config()
     budget_ms = generate_module._generate_scheduling_budget_ms(config, 1)
-    tail_ms = math.ceil(1 / _download_slots(config)) * worst_case_download_budget_ms(
+    tail_ms = worst_case_download_budget_ms(
         config.auto_save_download_timeout, config.auto_save_max_retries
     )
 
@@ -367,7 +376,7 @@ def test_generate_preflight_download_tail_parity_with_pipeline_auto_save(
     )
 
     preflight_tail_included = generate_module._preflight_timeout_ms(
-        request, config, TEXT_TO_IMAGE_TOOL_NAME
+        request, config, TextToImageInput
     ) > generate_module._generate_scheduling_budget_ms(config, 1)
     context = build_generation_context(
         TextToImageInput(prompt="parity", auto_save=explicit_auto_save), config
@@ -509,6 +518,42 @@ async def test_generate_save_path_outside_drops_local_path_keys(
     result_entry = payload["auto_save"]["results"][0]
     assert "local_path" not in result_entry
     assert "markdown_ref" not in result_entry
+
+
+async def test_generate_save_path_outside_logs_no_converge_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """save_path 越出图片目录是文档用法，converge 路径不产生 warning/debug 记录。
+
+    按来源模块与级别过滤而非文案匹配：任意措辞的告警回潮都会变红。
+    """
+    write_workspace_config(tmp_path)
+    destination = tmp_path / "tmp-export"
+    destination.mkdir()
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": True,
+            "data": [{"url": "https://x/x.png", "local_path": str(destination / "x.png")}],
+        },
+    )
+    app = build_web_app()
+    records: list[Any] = []
+
+    with capture_loguru_records(records):
+        response = await _post_json(
+            app,
+            "/web/api/generate/text-to-image",
+            {"prompt": "一只猫", "save_path": str(destination)},
+        )
+
+    assert response.status_code == 200
+    assert _converge_flood_messages(records) == []
 
 
 async def test_generate_rewrites_auto_save_results_local_path_inside_images_root(
@@ -1103,41 +1148,44 @@ async def test_generate_large_body_goes_through_transport_admission(
     assert admissions == [("large_body_admission", 1)]
 
 
-async def test_generate_runner_validation_error_returns_400(
+@pytest.mark.parametrize(
+    "error",
+    [
+        SeedreamValidationError("参考图数量超出上限", field="image"),
+        SeedreamConfigError("数据根目录无法解析"),
+    ],
+    ids=["validation", "config"],
+)
+async def test_generate_runner_typed_error_collapses_to_internal_error(
+    error: Exception,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """runner 抛 SeedreamValidationError 的兜底分支与主路径同构：完整结构化结果映射 400。"""
+    """runner 契约违约抛类型化异常时并入通用兜底：500 internal_error，异常文案不外泄。
 
-    monkeypatch.setattr(
-        generate_module,
-        "run_text_to_image",
-        _make_fake_runner(error=SeedreamValidationError("参考图数量超出上限", field="image")),
-    )
+    类型化异常→错误码映射归流水线全捕层（归约为 is_error 结果走主路径透传），
+    Web 层不设第二套分派。兜底真正可达意味着流水线全捕回归，详情只入日志。
+    """
+
+    monkeypatch.setattr(generate_module, "run_text_to_image", _make_fake_runner(error=error))
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
-    payload = _assert_structured_failure(
-        response,
-        "text_to_image",
-        "validation_error",
-        status=400,
-        message_contains="参考图数量超出上限",
-    )
-    assert payload["data"] is None
+    payload = _assert_structured_failure(response, "text_to_image", "internal_error", status=500)
+    assert str(error) not in payload["error"]["message"]
 
 
-async def test_generate_runner_validation_error_echoes_message(
+async def test_generate_runner_typed_error_does_not_leak_local_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """runner 校验错误消息原样返回，携带图片目录路径。"""
+    """契约违约兜底不回显异常原文：携带图片目录路径的异常文本不出现在错误文案。"""
     images_root = write_workspace_config(tmp_path)
 
     monkeypatch.setattr(
@@ -1151,39 +1199,8 @@ async def test_generate_runner_validation_error_echoes_message(
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
-    _assert_structured_failure(
-        response,
-        "text_to_image",
-        "validation_error",
-        status=400,
-        message_contains=str(images_root),
-    )
-
-
-async def test_generate_runner_config_error_returns_503(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    clean_web_routes: None,
-    reset_http_app_state: None,
-) -> None:
-    """runner 抛 SeedreamConfigError 的兜底分支与主路径同构：完整结构化结果映射 503。"""
-    monkeypatch.setattr(
-        generate_module,
-        "run_text_to_image",
-        _make_fake_runner(error=SeedreamConfigError("数据根目录无法解析")),
-    )
-    write_workspace_config(tmp_path)
-    app = build_web_app()
-
-    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
-
-    _assert_structured_failure(
-        response,
-        "text_to_image",
-        "config_error",
-        status=503,
-        message_contains="数据根目录无法解析",
-    )
+    payload = _assert_structured_failure(response, "text_to_image", "internal_error", status=500)
+    assert str(images_root) not in payload["error"]["message"]
 
 
 async def test_generate_runner_unexpected_error_returns_500(
@@ -1455,15 +1472,36 @@ def test_structured_status_falls_back_to_502_without_str_error_type() -> None:
     assert _responses.structured_status({"error": {"type": "timeout_error"}}) == 504
 
 
-def test_converge_path_entry_deletes_key_when_resolve_fails(tmp_path: Path) -> None:
-    """resolve 阶段抛 OSError/ValueError 的路径删除条目键，不附 web_path。"""
+def test_converge_path_entry_deletes_outside_key_silently(tmp_path: Path) -> None:
+    """越界删除静默：save_path 指向图片目录外是文档用法，常规流量不刷日志。"""
     images_root = tmp_path / ".seedream" / "images"
-    images_root.mkdir(parents=True)
-    item: dict[str, object] = {"local_path": "bad\x00name.png", "keep": 1}
+    outside: dict[str, object] = {"local_path": str(tmp_path / "export" / "a.png"), "keep": 1}
+    records: list[Any] = []
 
-    _responses.converge_path_entry(item, "local_path", images_root, resolve=True)
+    with capture_loguru_records(records):
+        _responses.converge_path_entry(outside, "local_path", images_root)
+
+    assert outside == {"keep": 1}
+    assert _converge_flood_messages(records) == []
+
+
+@pytest.mark.parametrize(("value_factory", "reason"), form_violation_params())
+def test_converge_path_entry_warns_on_form_violation_delete(
+    tmp_path: Path, value_factory: Callable[[Path], str], reason: str
+) -> None:
+    """形态背离 resolve 契约的删键记 warning，携带键名与原因分类，违约不零信号。"""
+    images_root = tmp_path / ".seedream" / "images"
+    item: dict[str, object] = {"local_path": value_factory(tmp_path), "keep": 1}
+    records: list[Any] = []
+
+    with capture_loguru_records(records):
+        _responses.converge_path_entry(item, "local_path", images_root)
 
     assert item == {"keep": 1}
+    warnings = _converge_flood_messages(records)
+    assert len(warnings) == 1
+    assert "local_path" in warnings[0]
+    assert reason in warnings[0]
 
 
 def _make_stub_resource() -> SimpleNamespace:

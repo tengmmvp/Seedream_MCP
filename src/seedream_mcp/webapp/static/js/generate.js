@@ -26,12 +26,7 @@ import {
   TOOL_TEXT_TO_IMAGE,
   withTimeoutSignal,
 } from "./api.js";
-import {
-  parkRefsBeyond,
-  renderReferences,
-  toolConfig,
-  withinUploadBudget,
-} from "./refs.js";
+import { convergeRefsToTool, toolConfig } from "./refs.js";
 import { openLightbox, resetGalleryPaging } from "./gallery.js";
 
 /**
@@ -247,17 +242,7 @@ export function applyToolUI() {
     $("layer-decomposition").checked = false;
     syncLayerDecompositionSize();
   }
-  // 上限收缩时参考图暂存而非丢弃，切回支持的工具按上限自动恢复原顺序；
-  // 恢复与入列同受 data URI 累计上限约束，超限项留在暂存不丢。
-  parkRefsBeyond(config.max);
-  while (state.parkedRefs.length > 0 && state.refs.length < config.max) {
-    const next = state.parkedRefs[state.parkedRefs.length - 1];
-    if (next.kind === "data_uri" && !withinUploadBudget(next.value.length)) {
-      break;
-    }
-    state.refs.push(state.parkedRefs.pop());
-  }
-  renderReferences();
+  convergeRefsToTool();
 }
 
 /**
@@ -407,7 +392,7 @@ function buildRenderDots() {
 // config 不可得时 preflight 失败回退的等待预算缺省：按服务端默认配置的满档
 // 推导×1.5 取整到百万圆整档（守护测试锁定下限）；超时消息已提示服务端可能
 // 仍在执行。
-const GENERATE_FALLBACK_TIMEOUT_MS = 25000000;
+const GENERATE_FALLBACK_TIMEOUT_MS = 41000000;
 
 // preflight 失败的等待兜底：优先 config-info 下发的满档推导（随部署配置走），
 // 不可得才落缺省常量。
