@@ -99,7 +99,7 @@ jobs:
         uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           config: cliff.toml
-          version: 2.14.2
+          version: v2.14.2
           args: --latest --strip header
 
       - name: 🏷️ Create Release
@@ -161,7 +161,7 @@ jobs:
         uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           config: cliff.toml
-          version: 2.14.2
+          version: v2.14.2
           args: --latest --prepend CHANGELOG.md
 
       - name: 💾 Commit changelog to main
