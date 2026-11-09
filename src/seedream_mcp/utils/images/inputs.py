@@ -1,0 +1,222 @@
+"""图像输入预处理：将多种来源的图像统一归一化为 API 可接受的格式。
+
+支持 URL、Data URI 与本地文件路径三种来源。URL 经校验后原样返回，Data URI
+以归一化的 media type 重建返回；本地文件路径在读权限边界校验通过后，经
+O_NOFOLLOW 读取并编码为 Base64 Data URI。预处理逻辑独立于 SeedreamClient，
+可独立测试与复用。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from pathlib import Path
+
+from ..core.errors import (
+    ErrorText,
+    SeedreamMCPError,
+    SeedreamValidationError,
+    as_detail,
+    as_plain,
+    as_text,
+    base_detail_error_text,
+    detail_error_text,
+    error_text,
+)
+from ..core.executors import (
+    CpuOffloadPoolClosedError,
+    run_in_cpu_pool,
+    should_offload_size,
+)
+from ..core.formats import encode_data_uri
+from ..core.inflight import TransientInflightError
+from ..core.logs import get_logger
+from ..io.path import (
+    RELATIVE_PATH_CONFINEMENT_MESSAGE,
+    get_read_context,
+    is_unc_path,
+    is_within_resolved,
+    normalize_path,
+    read_scope_denial_message,
+)
+from ..io.scan import suggest_similar_paths
+from .validation import (
+    LocalImageCandidate,
+    iter_local_candidates,
+    read_and_decode_local_image,
+    resolve_local_image_candidate,
+    validate_image_input,
+    validate_image_path,
+)
+from .ref import classify_image_reference, require_image_str
+
+logger = get_logger()
+
+# 已完成候选定位的调用方经此传入 (路径, stat)，读取链复用同一候选不再二次定位，
+# 消除签名定位与读取定位之间文件被替换的错位窗口。
+local_candidate_ctx: ContextVar[LocalImageCandidate | None] = ContextVar(
+    "local_candidate", default=None
+)
+
+
+@asynccontextmanager
+async def local_candidate_scope(candidate: LocalImageCandidate | None) -> AsyncIterator[None]:
+    """在作用域内向读取链注入本地候选，退出时复位上下文不泄漏。"""
+    token = local_candidate_ctx.set(candidate)
+    try:
+        yield
+    finally:
+        local_candidate_ctx.reset(token)
+
+
+async def prepare_image_input(image: str) -> str:
+    """将单张图像输入归一化为 API 所需格式。
+
+    - HTTP/HTTPS URL：经统一校验拒绝 userinfo 凭据等不安全形态后原样返回。
+    - Data URI：经格式与维度校验后将 media type 归一化为小写标准 MIME 返回。
+    - 本地文件路径：读取并编码为 Base64 Data URI 返回。
+
+    全部分支在事件循环外执行：URL 与阈值之下的 Data URI 校验走默认工作线程，
+    本地读取编码与达阈值 Data URI 校验属长时 CPU 任务，下沉专用池执行。
+
+    Args:
+        image: 图像输入字符串，可为 HTTP/HTTPS URL、Data URI 或本地文件路径。
+
+    Raises:
+        SeedreamValidationError: 输入格式无效、路径越界、界内定位失败或本地文件
+            读取失败等本地预处理失败；本阶段不触网，不参与 client 的 API 重试。
+        SeedreamMCPError: CPU 卸载池已关闭，服务正在退出。
+        TransientInflightError: 链内共享在途瞬态标记携带者原样上抛，不经兜底重定型。
+    """
+    try:
+        normalized = require_image_str(image).strip()
+
+        kind = classify_image_reference(normalized)
+        if kind == "local":
+            # 本地分支成本随文件内容放大且读取前不可知，恒下沉专用池。
+            return await run_in_cpu_pool(_prepare_local_image, normalized, image)
+        if kind == "data_uri" and should_offload_size(len(normalized)):
+            return await run_in_cpu_pool(validate_image_input, normalized)
+        return await asyncio.to_thread(validate_image_input, normalized)
+    except SeedreamMCPError:
+        raise
+    except CpuOffloadPoolClosedError as exc:
+        # 池关闭只发生在退出清理窗口，归服务关闭而非输入缺陷。
+        raise SeedreamMCPError("服务正在关闭，图像预处理已中止") from exc
+    except TransientInflightError:
+        # 标记携带者原样上抛：兜底重定型为校验错误会抹掉标记，令计划层瞬态安全网失效。
+        raise
+    except Exception as e:
+        # 兜底异常均来自本地预处理，归校验档。
+        raise SeedreamValidationError(base_detail_error_text("图像处理失败", e)) from e
+
+
+def _resolves_outside_read_scope(
+    normalized: str, images_root: Path, read_scope: list[Path]
+) -> bool:
+    """判断输入路径解析后的物理位置是否落在读权限之外。
+
+    任一候选命中读权限任一目录即界内。UNC 路径不 resolve 以免触发 SMB 连接，
+    UNC 输入直接返回 False 交诊断分支处理。
+    """
+    if is_unc_path(normalized):
+        return False
+    return not any(iter_local_candidates(normalized, images_root, read_scope))
+
+
+def _format_local_read_error(exc: OSError, normalized: str) -> ErrorText:
+    """构建本地文件读取失败的错误文案，回显解析后的绝对路径。
+
+    路径取异常携带的 filename，缺失时回退调用方输入的原样字符串，与诊断分支
+    回显 resolve 后绝对路径的口径一致。系统错误语义取 strerror，缺失时回退
+    errno 数值。
+    """
+    if exc.strerror:
+        reason = as_detail(exc.strerror)
+    elif exc.errno is not None:
+        reason = as_plain(f"errno {exc.errno}")
+    else:
+        reason = as_plain("无法读取")
+    return error_text(
+        "读取图像文件失败: {reason}: {path}",
+        reason=reason,
+        path=as_text(exc.filename or normalized),
+    )
+
+
+def _prepare_local_image(normalized: str, original: str) -> str:
+    """校验本地图片路径并读取编码为 Base64 Data URI。
+
+    候选定位委托 resolve_local_image_candidate，锁定同一文件；调用方已完成定位时
+    经 local_candidate_ctx 传入，读取复用同一候选不再二次定位。(图片目录, 读权限)
+    经 get_read_context 在函数顶部单点求值，消除一次失败请求内的重复解析。
+    畸形形态透出 normalize_path 的拒绝原因；越界抛携带配置指引的错误；界内定位失败
+    经 validate_image_path 做诊断性校验，取具体失败原因并附图片目录内的相似路径建议。
+    各失败均属参数校验语义而非 API 调用失败，归 SeedreamValidationError。
+    需在工作线程中调用。
+    """
+    found = local_candidate_ctx.get()
+    if found is None:
+        _, images_root, read_scope = get_read_context()
+        found = resolve_local_image_candidate(
+            normalized, images_root=images_root, read_scope=read_scope
+        )
+        if found is None:
+            # 单次 normalize 探针同时供畸形拒绝与相对越界判定，各分支不再重复解析
+            try:
+                resolved_probe = normalize_path(normalized, str(images_root))
+            except ValueError as exc:
+                raise SeedreamValidationError(
+                    detail_error_text(exc),
+                    field="image",
+                    value=normalized,
+                ) from exc
+            if not os.path.isabs(normalized) and not is_within_resolved(
+                resolved_probe, images_root
+            ):
+                raise SeedreamValidationError(
+                    RELATIVE_PATH_CONFINEMENT_MESSAGE,
+                    field="image",
+                    value=normalized,
+                )
+            if _resolves_outside_read_scope(normalized, images_root, read_scope):
+                raise SeedreamValidationError(
+                    read_scope_denial_message("路径"),
+                    field="image",
+                    value=normalized,
+                )
+            error_msg = validate_image_path(normalized, skip_dimensions=True)
+            # 诊断文案可能内嵌上游异常原文，按最高不信等级进入最终错误文本。
+            diagnostic = error_msg or "图像路径校验失败"
+            suggestions = suggest_similar_paths(original, search_dirs=[str(images_root)])
+            suggestion_text = ""
+            if suggestions:
+                suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
+                    f"  • {suggestion}" for suggestion in suggestions[:3]
+                )
+            raise SeedreamValidationError(
+                error_text(
+                    "{diagnostic}{suggestions}",
+                    diagnostic=as_detail(diagnostic),
+                    suggestions=as_text(suggestion_text),
+                ),
+                field="image",
+                value=normalized,
+            )
+
+    validated_path, _ = found
+
+    # 读取、限额复核、格式维度与出站标签校验经共享辅助。
+    # 内存峰值：读取字节、b64 编码与 data URI 拼接约为单图的 5.5×，
+    # 并发 5 × 30MB 上限下瞬态约 800MB；PIL 解码成本落在工作线程而非事件循环。
+    image_bytes, media_type = read_and_decode_local_image(
+        validated_path,
+        field_value=normalized,
+        format_read_error=lambda exc: _format_local_read_error(exc, normalized),
+    )
+
+    logger.info("成功处理图片文件: {} ({} 字节)", validated_path, len(image_bytes))
+    return encode_data_uri(media_type, image_bytes)

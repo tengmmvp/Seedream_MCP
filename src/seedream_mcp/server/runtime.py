@@ -1,0 +1,562 @@
+"""Seedream MCP 共享资源模块。
+
+持有 MCPServer 实例 mcp 与其生命周期所需的共享资源管理：服务器元数据常量、
+app_lifespan 引用计数单例、活动与退役资源状态、同步与异步清理入口。
+_registration 导入 mcp 完成工具、资源与 prompt 注册，包门面 __init__ 再导出
+本模块符号；transport 模块直接从本模块导入 mcp 与清理函数，避免经包门面
+形成反向依赖。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
+
+from mcp.server.caching import CacheHint, CacheableMethod
+from mcp.server.mcpserver import MCPServer, RequestStateSecurity
+from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
+from mcp.server.request_state import RequestStateBoundary
+from mcp.shared.exceptions import MCPError
+from mcp.types import INVALID_PARAMS
+from pydantic import ValidationError
+
+from ..config import (
+    LIFESPAN_KEY_CLIENT,
+    LIFESPAN_KEY_CONFIG,
+    LIFESPAN_KEY_DOWNLOAD_MANAGER,
+    SeedreamConfig,
+    active_request_state_keys,
+    get_active_config,
+    set_active_config,
+)
+from ..utils.core.errors import as_plain, as_text, safe_error_text, validation_error_user_message
+from ..utils.core.executors import shutdown_cpu_offload_executor
+from ..utils.core.logs import get_logger
+from ..version import __version__
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from mcp.server.lowlevel.helper_types import ReadResourceContents
+    from mcp.server.mcpserver import Context
+    from mcp.types import CallToolResult, GetPromptResult, InputRequiredResult
+    from pydantic.networks import AnyUrl
+
+    from ..client import SeedreamClient
+    from ..utils.io.download import DownloadManager
+
+# ==================== 服务器元数据常量 ====================
+
+SERVER_NAME = "seedream_mcp"
+
+SERVER_VERSION = __version__
+
+SERVER_TITLE = "Seedream Image MCP"
+
+SERVER_DESCRIPTION = "基于火山引擎 Seedream API 的 MCP 图像生成服务器。"
+
+SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生图、多图融合、组图输出与图片浏览。"
+
+# ==================== MCP 服务器实例与共享资源状态 ====================
+
+logger = get_logger()
+
+
+class BorrowedSharedHandles(Protocol):
+    """借用方可见的共享句柄面：仅取 client 与 download_manager 使用。"""
+
+    @property
+    def client(self) -> "SeedreamClient": ...
+
+    @property
+    def download_manager(self) -> "DownloadManager": ...
+
+
+class _SharedResource:
+    """共享 client/download_manager 对及在途引用计数。"""
+
+    def __init__(
+        self,
+        client: "SeedreamClient",
+        download_manager: "DownloadManager",
+        config: SeedreamConfig,
+    ) -> None:
+        self.client = client
+        self.download_manager = download_manager
+        self.config = config
+        self.refcount = 0
+
+
+_active_resource: _SharedResource | None = None
+# 被重建取代但仍有在途引用的资源，引用归零时由 _release_resource 关闭并移出。
+_retired_resources: list[_SharedResource] = []
+# asyncio.Lock 绑定首次 acquire 的事件循环，跨循环复用会 RuntimeError；测试经
+# _reset_lifespan_state 重建规避。
+_shared_init_lock = asyncio.Lock()
+
+
+async def _safe_close(obj: Any) -> None:
+    """关闭共享资源，吞掉异常避免清理路径中断。"""
+    if obj is None:
+        return
+    try:
+        await obj.close()
+    except Exception as exc:
+        logger.warning("关闭共享资源失败: {}", exc)
+
+
+async def _build_active_resource(config: SeedreamConfig) -> _SharedResource:
+    """创建并初始化新的共享资源句柄，部分初始化失败时关闭已创建部分避免泄漏。"""
+    from ..client import SeedreamClient
+    from ..utils.io.download import DownloadManager
+
+    new_client = SeedreamClient(config)
+    # 下载并发上限经构造参数下沉，连接器重建的分支自动保持上限。
+    new_download_manager = DownloadManager(
+        timeout=config.auto_save_download_timeout,
+        max_retries=config.auto_save_max_retries,
+        max_file_size=config.auto_save_max_file_size,
+        connection_limit=config.auto_save_max_concurrent,
+    )
+    try:
+        await new_client.__aenter__()
+        await new_download_manager.__aenter__()
+    except Exception:
+        await _safe_close(new_client)
+        await _safe_close(new_download_manager)
+        raise
+    return _SharedResource(new_client, new_download_manager, config)
+
+
+async def _close_resource(resource: _SharedResource) -> None:
+    """关闭资源持有的 client 与 download_manager。"""
+    await _safe_close(resource.client)
+    await _safe_close(resource.download_manager)
+
+
+async def _retire_resource(resource: _SharedResource | None) -> None:
+    """退役被取代的共享资源。仍有在途引用时纳入退役追踪，否则立即关闭。"""
+    if resource is None:
+        return
+    if resource.refcount > 0:
+        _retired_resources.append(resource)
+    else:
+        await _close_resource(resource)
+
+
+async def _release_resource(resource: _SharedResource) -> None:
+    """递减在途引用；退役资源引用归零时关闭并移出追踪列表。"""
+    resource.refcount -= 1
+    if resource.refcount > 0 or resource is _active_resource:
+        return
+    if resource in _retired_resources:
+        _retired_resources.remove(resource)
+    await _close_resource(resource)
+
+
+def _has_inflight_references() -> bool:
+    """判定共享资源是否仍有在途 lifespan 引用。"""
+    active = _active_resource
+    return (active is not None and active.refcount > 0) or bool(_retired_resources)
+
+
+def borrow_shared_handles() -> "BorrowedSharedHandles | None":
+    """返回当前活动的共享资源对象，供 webapp 上下文替身借用共享句柄。
+
+    无活动资源时返回 None，调用方按资源不在场回退自建路径。借用限于单次请求内
+    取用，不得跨请求缓存引用——config 身份变化会替换活动槽位，缓存的引用会指向
+    退役资源。借用方仅读取 client 与 download_manager 使用，不得关闭句柄或改动
+    引用计数，资源的开启与关闭由 lifespan 引用计数统一管理。
+    """
+    return _active_resource
+
+
+@asynccontextmanager
+async def app_lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
+    """管理 MCPServer 生命周期，向 lifespan_context 注入共享配置、SeedreamClient
+    与 DownloadManager，键名见 config 模块 LIFESPAN_KEY_* 常量。
+
+    资源以引用计数的模块级单例持有，跨 lifespan 重入复用；teardown 仅递减在途引用，
+    归零前不清理。config 身份变化触发重建：新资源立即取代活动槽位，旧资源待最后一个
+    在途请求释放后再关闭，运行期配置身份变化经 set_active_config 行使，不影响在途
+    请求已持有的 HTTP 连接池。
+    """
+    global _active_resource
+    config = get_active_config()
+    if _active_resource is None or _active_resource.config is not config:
+        # 锁内二次判定，避免并发进入 lifespan 时重复构造共享资源。
+        async with _shared_init_lock:
+            if _active_resource is None or _active_resource.config is not config:
+                built = await _build_active_resource(config)
+                # 旧资源先退役再发布：发布点到进场登记之间无挂起点，零引用的
+                # 新发布资源不会暴露给并发 teardown 的 idle 清理。
+                await _retire_resource(_active_resource)
+                _active_resource = built
+    resource = _active_resource
+    resource.refcount += 1
+    try:
+        yield {
+            LIFESPAN_KEY_CONFIG: resource.config,
+            LIFESPAN_KEY_CLIENT: resource.client,
+            LIFESPAN_KEY_DOWNLOAD_MANAGER: resource.download_manager,
+        }
+    finally:
+        await _release_resource(resource)
+        # 清理须在 finally 内执行且以引用计数门控：并发在途引用存在时不得关闭其余
+        # 请求仍在使用的资源；drain 的让出点期间可能出现新引用，idle_only 使清理
+        # 在等待后复检引用。
+        if not _has_inflight_references():
+            await _cleanup_shared_resources(idle_only=True)
+
+
+async def _cleanup_shared_resources(*, idle_only: bool = False) -> None:
+    """关闭并清空活动与退役资源，并等待后台清理任务完成。
+
+    先经 drain_background_cleanup_tasks 等待自动保存的节流清理任务收尾再关闭资源。
+    idle_only 为 True 时以在途引用门控：drain 等待期间出现新引用即放弃本次清理，
+    交由最后一个在途引用的 teardown 重新触发；为 False 时无条件关闭，供进程退出
+    兜底。CPU 卸载线程池为进程级资源，idle 退役不关闭，仅在无条件路径关闭，
+    退出不等队列。
+    """
+    global _active_resource
+    from ..utils.io.save import drain_background_cleanup_tasks
+
+    await drain_background_cleanup_tasks()
+    if idle_only and _has_inflight_references():
+        logger.debug("清理等待期间出现新的在途 lifespan 引用，放弃本次共享资源清理")
+        return
+    retired = list(_retired_resources)
+    _retired_resources.clear()
+    active = _active_resource
+    _active_resource = None
+    for resource in retired:
+        await _close_resource(resource)
+    if active is not None:
+        await _close_resource(active)
+    if not idle_only:
+        shutdown_cpu_offload_executor()
+
+
+def sync_cleanup() -> None:
+    """同步入口的进程级兜底清理，覆盖异常退出未触发常规清理的情形。
+
+    先提取并清空全局引用，避免后续清理抛错使引用滞留。关闭在新事件循环上尽力而为：
+    httpx/aiohttp 传输绑定原循环，跨循环 aclose 常无效，残余连接交由进程退出回收。
+    CPU 卸载线程池一并关闭，前置清理被中断也不跳过，退出不等队列。全程拦
+    BaseException，中断不得从兜底清理逃逸到任何调用方。
+    """
+    global _active_resource
+    retired = list(_retired_resources)
+    _retired_resources.clear()
+    active = _active_resource
+    _active_resource = None
+
+    async def _close_held() -> None:
+        if active is not None:
+            await _safe_close(active.client)
+            await _safe_close(active.download_manager)
+        for resource in retired:
+            await _close_resource(resource)
+
+    try:
+        asyncio.run(_close_held())
+    except RuntimeError:
+        # 无事件循环或已有循环运行，无法安全 asyncio.run；引用已清空，余量交 GC/OS。
+        pass
+    except Exception as exc:
+        logger.warning("同步清理共享资源失败: {}", exc)
+    except BaseException as exc:
+        # 与 transport 的退出清理同口径：清理期间的中断只记告警，不替换在途返回值。
+        logger.warning("同步清理被中断: {}", exc)
+    finally:
+        # 池关闭独立拦 BaseException：前置清理被中断不得跳过本步。
+        try:
+            shutdown_cpu_offload_executor()
+        except BaseException as exc:
+            logger.warning("关闭 CPU 卸载线程池被中断: {}", exc)
+
+
+def _reset_lifespan_state() -> None:
+    """复位 lifespan 单例、全局配置、初始化锁与关联模块状态。
+
+    重建 _shared_init_lock 避免跨事件循环复用旧锁；_global_config 一并复位避免
+    跨用例残留，赋值经函数内延迟 import 取当前 config 模块对象，测试重载模块后
+    不会清错目标。CPU 卸载池随活动配置派生池深，关闭后待按需重建。path 的
+    resolve 缓存与 config 的构建告警缓冲同属复位协议，一并在此收口；conftest 仅
+    补充测试域专属状态。
+    """
+    global _shared_init_lock, _active_resource
+    _active_resource = None
+    _retired_resources.clear()
+    set_active_config(None)
+    from ..config import _builder as config_builder
+    from ..config.sources import _BUILD_WARNINGS
+
+    config_builder._global_config = None
+    _BUILD_WARNINGS.clear()
+    _shared_init_lock = asyncio.Lock()
+    shutdown_cpu_offload_executor()
+    from ..utils.images.thumbnail import reset_thumb_sweep_gate
+    from ..utils.io.files import reset_packaged_resolve_cache
+    from ..utils.io.path import clear_resolved_env_root_cache
+    from ..utils.io.save import reset_cleanup_state
+    from ..utils.io.scan import reset_directory_scan_cache
+    from ..utils.io.storage import reset_file_manager_cache
+
+    clear_resolved_env_root_cache()
+    reset_cleanup_state()
+    reset_directory_scan_cache()
+    reset_file_manager_cache()
+    reset_packaged_resolve_cache()
+    reset_thumb_sweep_gate()
+
+
+# ==================== 服务器构造 ====================
+
+# 静态列表面的客户端缓存提示时长与共享作用域。纳入的键均为 import 期固定的
+# 静态声明，对所有调用者一致，按规范指引声明 public 供共享缓存复用；
+# resources/read、server/info、workspace/roots 随会话与活动配置变化，不纳入。
+_STATIC_LIST_CACHE_TTL_MS = 60_000
+
+_STATIC_LIST_CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
+    "tools/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
+    "prompts/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
+    "resources/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
+    "resources/templates/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
+    "server/discover": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
+}
+
+
+def _build_request_state_security() -> RequestStateSecurity | None:
+    """按活动配置构造 requestState 密钥环策略，未配置时返回 None 保持 SDK 默认。"""
+    keys = active_request_state_keys()
+    if not keys:
+        return None
+    return RequestStateSecurity(keys=keys)
+
+
+def _locate_validation_error(exc: BaseException) -> ValidationError | None:
+    """沿异常因果链查找 pydantic ValidationError，旧版 SDK 无 raise-from 时退隐式链。
+
+    被 ``from None`` 显式抑制的隐式链不跟随；隐式链可成环，按 id 防环。
+    """
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ValidationError):
+            return current
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    return None
+
+
+def _targets_argument(exc: ValidationError, declared: set[str]) -> bool:
+    """校验错误的首个 loc 段命中已声明参数名时属参数面失败。"""
+    loc = exc.errors()[0].get("loc", ())
+    first = str(loc[0]) if loc else ""
+    return first in declared
+
+
+class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
+    """MCPServer 子类，协议错误码补偿：未知名与未知工具在查找点抛 -32602，
+    已知名 prompt 的参数缺失、未知参数与参数值校验失败转为 -32602。
+
+    SDK 2.3.0 对未知名抛裸 ValueError、未知工具 ToolError 走 isError 结果
+    通道、prompt 参数面 ValidationError 折叠为 -32603 或 code=0，三者线缆级
+    均应为 -32602；渲染期其余异常与工具参数校验经 super() 维持 SDK 原语义。
+    线缆级行为由 test_sdk_behavior_characterization 与 test_prompt_resources 守护。
+    """
+
+    async def get_prompt(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        context: Context[dict[str, Any], Any] | None = None,
+    ) -> GetPromptResult | InputRequiredResult:
+        prompt = self._prompt_manager.get_prompt(name)
+        if prompt is None:
+            raise MCPError(
+                INVALID_PARAMS,
+                safe_error_text("Unknown prompt: {name}", name=as_text(name)),
+            )
+        declared = {argument.name for argument in prompt.arguments or []}
+        missing = sorted(
+            argument.name
+            for argument in prompt.arguments or []
+            if argument.required and argument.name not in (arguments or {})
+        )
+        if missing:
+            raise MCPError(
+                INVALID_PARAMS,
+                safe_error_text("缺少必填参数: {missing}", missing=as_plain(", ".join(missing))),
+            )
+        unknown = sorted(set(arguments or {}) - declared)
+        if unknown:
+            raise MCPError(
+                INVALID_PARAMS,
+                safe_error_text("未知参数: {unknown}", unknown=as_text(", ".join(unknown))),
+            )
+        try:
+            return await super().get_prompt(name, arguments, context)
+        except ValueError as exc:
+            # 参数面 ValidationError 被 SDK 包装为 ValueError；首个 loc 段未命中已声明参数名的渲染期失败维持原语义放行。
+            validation_error = _locate_validation_error(exc)
+            if validation_error is None or not _targets_argument(validation_error, declared):
+                raise
+            raise MCPError(
+                INVALID_PARAMS, validation_error_user_message(validation_error).safe_text()
+            ) from validation_error
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[dict[str, Any], Any] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        if self._tool_manager.get_tool(name) is None:
+            raise MCPError(
+                INVALID_PARAMS,
+                safe_error_text("Unknown tool: {name}", name=as_text(name)),
+            )
+        return await super().call_tool(name, arguments, context)
+
+    async def read_resource(
+        self,
+        uri: "AnyUrl | str",
+        context: "Context[dict[str, Any], Any] | None" = None,
+    ) -> "Iterable[ReadResourceContents] | InputRequiredResult":
+        # mcp 2.0.0 把 handler 异常经资源函数层 ValueError 中转（无 from、仅
+        # __context__）后重包装为普通 ResourceError，子类判定丢失致 -32602 沉为
+        # -32603；沿因果链归位 ResourceNotFoundError。
+        try:
+            return await super().read_resource(uri, context)
+        except ResourceError as exc:
+            chained: BaseException | None = exc
+            seen: set[int] = set()
+            while chained is not None and id(chained) not in seen:
+                if isinstance(chained, ResourceNotFoundError):
+                    raise chained
+                seen.add(id(chained))
+                chained = chained.__cause__ or (
+                    chained.__context__ if not chained.__suppress_context__ else None
+                )
+            raise
+
+
+def _create_mcp_server() -> MCPServer:
+    """构造进程级 MCPServer 实例，静态列表面附缓存提示并按配置启用密钥环。"""
+    return _SeedreamMCPServer(
+        SERVER_NAME,
+        title=SERVER_TITLE,
+        description=SERVER_DESCRIPTION,
+        instructions=SERVER_INSTRUCTIONS,
+        version=SERVER_VERSION,
+        lifespan=app_lifespan,
+        cache_hints=_STATIC_LIST_CACHE_HINTS,
+        request_state_security=_build_request_state_security(),
+    )
+
+
+# 导入期默认环境源探测到的密钥环：单例已持该环时重绑失败不影响解封。
+_IMPORT_TIME_REQUEST_STATE_KEYS = active_request_state_keys()
+
+
+# 模块级单例：_registration 经此注册工具/prompt/resource，transport 与 lifespan 复用同一实例。
+# version 必须显式传入：SDK 2.0 起未传 version 的服务器在 initialize 结果的 serverInfo
+# 中报告空串而非 SDK 包版本。request_state_security 为 None 时 SDK 回退进程临时密钥；
+# 多副本 HTTP 部署经 SEEDREAM_REQUEST_STATE_KEYS 共享密钥环，重试落到其他实例仍可
+# 解封 requestState。密钥环经默认环境源在导入期固化，--config-file 场景由启动路径的
+# rebind_request_state_security 以最终活动配置重绑。
+mcp = _create_mcp_server()
+
+
+def _warn_rebind_failure_on_stderr(
+    source: tuple[bytes, ...] | RequestStateSecurity | None,
+) -> None:
+    """重绑失败且单例未在导入期固化同密钥环时向 stderr 告警解封退化。
+
+    密钥环来自系统环境变量时导入期构造已固化到单例，重绑失败不影响解封，
+    不告警；.env 与 --config-file 来源的密钥到不了导入期构造，失败即退化
+    为进程临时密钥，只看控制台的部署者依赖这行 stderr。
+    """
+    if not source:
+        return
+    if (
+        not isinstance(source, RequestStateSecurity)
+        and tuple(source) == _IMPORT_TIME_REQUEST_STATE_KEYS
+    ):
+        return
+    print(
+        "requestState 密钥环重绑失败：多副本部署的 requestState 解封将失败，"
+        "当前退化为进程临时密钥。",
+        file=sys.stderr,
+    )
+
+
+def locate_request_state_boundary() -> RequestStateBoundary | None:
+    """返回单例 middleware 链中的 requestState boundary，探测失败返回 None。
+
+    SDK 私有路径变更时只改此处。
+    """
+    return next(
+        (
+            middleware
+            for middleware in getattr(mcp, "middleware", None) or ()
+            if isinstance(middleware, RequestStateBoundary)
+        ),
+        None,
+    )
+
+
+def rebind_request_state_security(
+    source: tuple[bytes, ...] | RequestStateSecurity | None,
+) -> bool:
+    """以最终活动配置重绑单例的 requestState 策略，返回是否重绑成功。
+
+    单例密钥环在模块导入期经默认环境源构造，``--config-file`` 加载的密钥不会
+    到达它，故由启动路径在活动配置就绪后调用本函数；source 传密钥环字节时构造
+    密钥环策略，传 None 时重绑回 SDK 进程临时密钥，也可直接传入现成策略对象。
+    经 SDK provisional 属性 mcp.middleware 定位 RequestStateBoundary 并直写私有
+    _security；_audience 构造期自旧策略预计算、不随 _security 替换自动更新，按
+    构造器语义（声明值优先，回退 server name）一并重算。探测失败时记录错误并
+    返回 False，不阻断启动；source 非空且单例未在导入期固化同密钥环时探测失败
+    另向 stderr 输出多副本解封退化告警。属 SDK 升级适配点，
+    SDK 提供公开替换入口后应切换。
+
+    Args:
+        source: 密钥环字节、现成 RequestStateSecurity 策略或 None（未配置）。
+    """
+    if not hasattr(mcp, "middleware"):
+        logger.error(
+            "SDK 公开属性 mcp.middleware 不可用，requestState 密钥环重绑被跳过，"
+            "单例保持导入期形态；多副本部署的密钥共享可能失效"
+        )
+        _warn_rebind_failure_on_stderr(source)
+        return False
+    boundary = locate_request_state_boundary()
+    if boundary is None or not hasattr(boundary, "_security"):
+        logger.error(
+            "SDK 私有路径中未找到 RequestStateBoundary，requestState 密钥环"
+            "重绑被跳过，单例保持导入期形态；多副本部署的密钥共享可能失效"
+        )
+        _warn_rebind_failure_on_stderr(source)
+        return False
+    if isinstance(source, RequestStateSecurity):
+        policy = source
+    elif source:
+        policy = RequestStateSecurity(keys=source)
+    else:
+        policy = RequestStateSecurity.ephemeral()
+    boundary._security = policy
+    # _audience 是构造期从旧 policy 预计算的封签取值来源，不随 _security 替换
+    # 自动更新；回退值与 SDK 构造器同源（MCPServer 以 server name 作 default_audience），
+    # 直接落 None 会使滚动重启拒解封旧 state 并停止绑定服务身份。
+    boundary._audience = policy.audience if policy.audience is not None else SERVER_NAME
+    return True

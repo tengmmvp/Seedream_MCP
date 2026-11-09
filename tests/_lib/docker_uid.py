@@ -1,0 +1,39 @@
+"""Docker 挂载属主契约的 uid 单一事实源。
+
+uid 只在 Dockerfile 的 useradd --uid 声明一处落值，属主契约相关测试的期望串
+经此模块组装，改 uid 时测试无需逐处同步字面量。
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# useradd 属主声明行形态：--uid 固定 uid，--user-group 建同名组。
+_USERADD_DECLARATION_PATTERN = re.compile(r"useradd --uid (\d+) --user-group")
+
+
+def _match_useradd_declaration() -> re.Match[str]:
+    """匹配 Dockerfile 的 useradd 属主声明行，缺失即断言失败。"""
+    dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    declaration = _USERADD_DECLARATION_PATTERN.search(dockerfile)
+    assert declaration is not None, "Dockerfile 必须经 useradd --uid --user-group 显式声明容器用户"
+    return declaration
+
+
+def useradd_line() -> str:
+    """提取 Dockerfile 的 useradd 属主声明行文本。"""
+    return _match_useradd_declaration().group(0)
+
+
+def mount_uid() -> str:
+    """提取 Dockerfile useradd --uid 声明的容器用户 uid。"""
+    return _match_useradd_declaration().group(1)
+
+
+def chown_owner_pair() -> str:
+    """按 mount_uid 组装 chown 命令的属主对。"""
+    uid = mount_uid()
+    return f"{uid}:{uid}"

@@ -1,0 +1,175 @@
+"""Web 操作台装配入口：custom_route 注册与静态资源挂载。
+
+注册须在 streamable_http_app 调用之前完成，SDK 构造 app 时一次性拷贝自定义
+路由引用；挂载则在 app 构造之后向 Starlette 活体路由表追加 Mount。两步的调用
+点由 transport 的 _build_streamable_app 依序触发，时序约束在该调用处本地可见。
+
+handler 按域拆分：meta（入口页/重定向/config-info）、generate（四个生成端点）、
+gallery（图库浏览）、files（缩略图与原图）；新增端点时在对应域模块实现后于
+下方注册表登记一行。
+"""
+
+from __future__ import annotations
+
+import os
+import weakref
+from typing import Any
+
+from starlette.datastructures import Headers
+from starlette.responses import FileResponse, Response
+from starlette.staticfiles import NotModifiedResponse, StaticFiles
+from starlette.types import Scope
+
+from ..utils.core.logs import get_logger
+from . import constants
+from .constants import (
+    STATIC_MIME_ALLOWLIST,
+    STATIC_PAGE_EXTENSIONS,
+    STATIC_SECURITY_HEADERS,
+    WEB_API_BROWSE,
+    WEB_API_CONFIG_INFO,
+    WEB_API_GENERATE_IMAGE_TO_IMAGE,
+    WEB_API_GENERATE_MULTI_IMAGE_FUSION,
+    WEB_API_GENERATE_SEQUENTIAL_GENERATION,
+    WEB_API_GENERATE_TEXT_TO_IMAGE,
+    WEB_API_IMAGE,
+    WEB_API_THUMBNAIL,
+    WEB_INDEX_PATH,
+    WEB_ROOT_PATH,
+    WEB_STATIC_MOUNT_PATH,
+)
+
+logger = get_logger()
+
+# 注册守卫登记表：按 MCPServer 实例身份弱引用登记已完成注册的对象，宿主或测试
+# 重造实例时守卫不误跳过新实例的注册。
+_registered_servers: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+
+class _GuardedStaticFiles(StaticFiles):
+    """封禁页面文件直达、按封闭清单裁定静态 MIME 并为直出附安全头的静态资源应用。
+
+    index 与 404 页须经 meta 域端点直出以携带 CSP 与 nosniff 安全头，StaticFiles
+    直出会绕过该头，故页面文件在 GET/HEAD 服务路径上 404；其余方法到不了
+    file_response，由 Starlette 以 405 拒绝，同样不出页面内容。封禁与 MIME 判定
+    均按解析后的物理路径后缀执行，.html、.htm 与 .xhtml 均封且大小写不敏感：
+    Starlette lookup_path 以 realpath 定位文件，8.3 短名、大小写变体与尾随字符
+    等别名族都解析到真实页面文件，请求路径后缀判定覆盖不了这些形态。后缀不在
+    封闭清单内的资产同样 404，content-type 在构造响应时按清单登记值显式给定，
+    响应路径不触碰 mimetypes 猜型，Windows 注册表污染无从进入响应头；条件请求
+    分支沿用上游 is_not_modified 与 NotModifiedResponse，304 保持无 content-type
+    形态；静态直出统一附 nosniff 与静态 CSP 阻断对 css/js/svg 的 MIME 嗅探与
+    svg 直出的同源脚本面。
+    """
+
+    def file_response(
+        self,
+        full_path: "str | os.PathLike[str]",
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        """物理路径以页面扩展或清单外扩展结尾时回 404，清单内扩展显式给定 MIME，304 分支仅附安全头。
+
+        页面封禁独立于 MIME 清单，防误登记页面扩展后复活。
+        """
+        lower_path = os.fspath(full_path).lower()
+        if lower_path.endswith(STATIC_PAGE_EXTENSIONS):
+            return Response(status_code=404)
+        media_type = STATIC_MIME_ALLOWLIST.get(os.path.splitext(lower_path)[1])
+        if media_type is None:
+            return Response(status_code=404)
+        # media_type 须在构造点显式给出，不经 super().file_response 以避开 guess_type 猜型。
+        response: Response = FileResponse(
+            full_path,
+            status_code=status_code,
+            stat_result=stat_result,
+            media_type=media_type,
+        )
+        if self.is_not_modified(response.headers, Headers(scope=scope)):
+            response = NotModifiedResponse(response.headers)
+        for name, value in STATIC_SECURITY_HEADERS.items():
+            response.headers[name] = value
+        return response
+
+
+def register_web_routes() -> None:
+    """向调用方 MCPServer 注册全部 Web 路由，按实例身份守卫并复查路径交集保持幂等。"""
+    from ..server.runtime import mcp
+    from . import files, gallery, generate, meta
+
+    # 路径交集复查依赖 SDK 私有路由表，getattr 探测缺失时告警并回退纯身份守卫；
+    # 注册本身经 custom_route 公开 API 完成，不受探测结果影响。
+    custom_routes = getattr(mcp, "_custom_starlette_routes", None)
+    if custom_routes is None:
+        logger.error(
+            "SDK 私有路由表 mcp._custom_starlette_routes 缺失，跳过路径交集复查，"
+            "请适配新版 MCP SDK"
+        )
+        existing_paths: set[str | None] = set()
+    else:
+        existing_paths = {getattr(route, "path", None) for route in custom_routes}
+    routes: list[tuple[str, list[str], Any]] = [
+        (WEB_ROOT_PATH, ["GET"], meta.web_root_redirect),
+        (WEB_INDEX_PATH, ["GET"], meta.web_index),
+        (WEB_API_CONFIG_INFO, ["GET"], meta.web_config_info),
+        (WEB_API_GENERATE_TEXT_TO_IMAGE, ["POST"], generate.web_generate_text_to_image),
+        (WEB_API_GENERATE_IMAGE_TO_IMAGE, ["POST"], generate.web_generate_image_to_image),
+        (WEB_API_GENERATE_MULTI_IMAGE_FUSION, ["POST"], generate.web_generate_multi_image_fusion),
+        (
+            WEB_API_GENERATE_SEQUENTIAL_GENERATION,
+            ["POST"],
+            generate.web_generate_sequential_generation,
+        ),
+        (WEB_API_BROWSE, ["POST"], gallery.web_browse),
+        (WEB_API_THUMBNAIL, ["GET"], files.web_thumbnail),
+        (WEB_API_IMAGE, ["GET"], files.web_image),
+    ]
+    # 表可得时以循环内的逐路径跳过为唯一幂等机制，路由表被清空或截断自动
+    # 补注册缺失项。
+    if custom_routes is None:
+        if mcp in _registered_servers:
+            return
+    for path, methods, handler in routes:
+        if path in existing_paths:
+            logger.warning("Web 路由 {} 已注册，跳过重复注册", path)
+            continue
+        mcp.custom_route(path, methods=methods, include_in_schema=False)(handler)
+    _registered_servers.add(mcp)
+    logger.info("Web 操作台路由已注册，共 {} 条", len(routes))
+
+
+def mount_web_static(app: Any) -> None:
+    """向 Starlette app 追加静态资源挂载与兜底 404 路由，幂等且目录缺失时跳过。
+
+    兜底路由必须排在静态挂载之后：Starlette 按注册顺序匹配路径，先注册的
+    ``/{path:path}`` 会吞掉全部静态资源请求。custom_route 注册表无法保证该
+    顺序，其路由固定先于挂载进入路由表，故兜底在此处与挂载成对追加。
+    """
+    from starlette.routing import Mount, Route
+
+    from .meta import web_not_found
+
+    for route in getattr(app, "routes", []):
+        if isinstance(route, Mount) and route.path == WEB_STATIC_MOUNT_PATH:
+            return
+    # STATIC_DIR 经模块属性访问而非导入期绑定；注意挂载点在构造时固化目录
+    # 字符串，运行期替换目录只对页面端点生效，静态挂载保持挂载时的目录。
+    if not constants.STATIC_DIR.is_dir():
+        logger.error("Web 静态资源目录不存在，跳过挂载: {}", constants.STATIC_DIR)
+        return
+    app.routes.append(
+        Mount(
+            WEB_STATIC_MOUNT_PATH,
+            app=_GuardedStaticFiles(directory=str(constants.STATIC_DIR)),
+        )
+    )
+    app.routes.append(
+        Route(
+            "/{path:path}",
+            web_not_found,
+            methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+            include_in_schema=False,
+        )
+    )
+    logger.info("Web 静态资源已挂载于 {}，兜底 404 已就位", WEB_STATIC_MOUNT_PATH)

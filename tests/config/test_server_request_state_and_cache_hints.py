@@ -1,0 +1,284 @@
+"""MCPServer 构造的 requestState 密钥环与静态列表缓存提示测试。
+
+server/runtime 在模块 import 期构造进程级 MCPServer 单例，requestState 密钥环经
+config 的活动配置访问器取值，配置不可用时回退 None 保持 SDK 默认临时密钥，
+import 链不因缺配置中断；静态列表缓存提示仅覆盖进程内不变的面。
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+from mcp.server.mcpserver import MCPServer, RequestStateSecurity
+from mcp.server.request_state import RequestStateBoundary
+
+import seedream_mcp.server.runtime as runtime_module
+from seedream_mcp.config import _builder as config_module
+from seedream_mcp.config import sources as config_sources
+
+
+def test_active_request_state_keys_reads_active_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """活动配置就绪时返回其密钥环字段。"""
+    keys = (b"\x01" * 32,)
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(
+        config_module, "_global_config", SimpleNamespace(request_state_secret_keys=keys)
+    )
+
+    assert config_module.active_request_state_keys() == keys
+
+
+def test_active_request_state_keys_none_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """活动配置未配置密钥环时返回 None。"""
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(
+        config_module, "_global_config", SimpleNamespace(request_state_secret_keys=None)
+    )
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+
+    assert config_module.active_request_state_keys() is None
+
+
+def test_active_request_state_keys_import_time_reads_env_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置未构建的导入期仅读系统环境变量，不触发完整配置构建。"""
+
+    def _fail_build() -> None:
+        raise AssertionError("导入期取密钥环不得构建完整配置")
+
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setattr(config_module, "get_global_config", _fail_build)
+    monkeypatch.setattr(config_module, "SeedreamConfig", _fail_build)
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+
+    assert config_module.active_request_state_keys() is None
+
+    key_hex = "ab" * 32
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", key_hex)
+    before_warnings = config_sources._BUILD_WARNINGS.snapshot()
+    assert config_module.active_request_state_keys() == (bytes.fromhex(key_hex),)
+    # 导入期取值不写构建告警缓冲，drain 输出与启动期声明的配置来源一致。
+    assert config_sources._BUILD_WARNINGS.snapshot() == before_warnings
+
+
+def test_active_request_state_keys_import_time_bad_hex_falls_back_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """导入期先行取值解码失败按未配置处理，配置错误由启动路径报告。"""
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", "zz" * 32)
+
+    assert config_module.active_request_state_keys() is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["abcd", "ab" * 32 + ",abcd", ("cd" * 32) + "," + ("cd" * 32)],
+    ids=["short", "short-after-valid", "duplicate"],
+)
+def test_active_request_state_keys_import_time_invalid_ring_falls_back_to_none(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """导入期先行取值做与配置构建同口径的强度与重复校验，不合法按未配置处理。
+
+    短密钥或重复密钥若原样喂给 SDK，requestState 策略构造会在导入期抛
+    ValueError 使进程崩溃，而非以配置错误形态由启动路径报告。
+    """
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", raw)
+
+    assert config_module.active_request_state_keys() is None
+
+
+@pytest.mark.parametrize(
+    "ring",
+    [
+        (b"\x01" * 32,),
+        (b"\x01" * 32, b"\x02" * 32),
+        (b"\x01" * 31,),
+        (b"\x01" * 32, b"\x02" * 31),
+        (b"\x01" * 32, b"\x01" * 32),
+        (b"\x01" * 31, b"\x01" * 31),
+    ],
+    ids=[
+        "valid-single",
+        "valid-multi",
+        "short-first",
+        "short-after-valid",
+        "duplicate",
+        "short-duplicate",
+    ],
+)
+def test_request_state_ring_rules_agree_between_validate_and_import_probe(
+    monkeypatch: pytest.MonkeyPatch, ring: tuple[bytes, ...]
+) -> None:
+    """validate 与导入期预检对同一密钥环的接受性一致，环规则漂移时在此转红。
+
+    环经 hex 编码写入环境变量驱动预检路径，与直接构造 SeedreamConfig 的校验
+    路径逐环比对；规则若只在单侧新增，另一侧静默放行即被本用例捕获。
+    """
+    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    accepted = True
+    try:
+        SeedreamConfig(api_key="k", request_state_secret_keys=ring)
+    except SeedreamConfigError:
+        accepted = False
+
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", ",".join(key.hex() for key in ring))
+
+    probed = config_module.active_request_state_keys()
+
+    assert accepted == (probed is not None)
+    if accepted:
+        assert probed == ring
+
+
+def test_build_request_state_security_returns_none_without_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未配置密钥时不构造策略，MCPServer 保持 SDK 默认临时密钥。"""
+    monkeypatch.setattr(runtime_module, "active_request_state_keys", lambda: None)
+
+    assert runtime_module._build_request_state_security() is None
+
+
+def test_build_request_state_security_builds_policy_from_key_ring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置密钥环后构造 RequestStateSecurity，密钥经 config 校验满足强度下限。"""
+    keys = (b"\x02" * 32, b"\x03" * 32)
+    monkeypatch.setattr(runtime_module, "active_request_state_keys", lambda: keys)
+
+    security = runtime_module._build_request_state_security()
+
+    assert isinstance(security, RequestStateSecurity)
+
+
+@pytest.mark.parametrize("keys", [None, (b"\x02" * 32,)])
+def test_create_mcp_server_constructs_in_both_key_forms(
+    monkeypatch: pytest.MonkeyPatch, keys: tuple[bytes, ...] | None
+) -> None:
+    """密钥环两种形态下 MCPServer 构造成功，None 形态保持 SDK 默认。"""
+    monkeypatch.setattr(runtime_module, "active_request_state_keys", lambda: keys)
+
+    server = runtime_module._create_mcp_server()
+
+    assert server.name == runtime_module.SERVER_NAME
+
+
+def test_static_list_cache_hints_cover_only_static_faces() -> None:
+    """缓存提示仅覆盖五个静态面并声明 public 作用域，resources/read 不在内。"""
+    hints = runtime_module._STATIC_LIST_CACHE_HINTS
+
+    assert set(hints) == {
+        "tools/list",
+        "prompts/list",
+        "resources/list",
+        "resources/templates/list",
+        "server/discover",
+    }
+    assert all(hint.ttl_ms == runtime_module._STATIC_LIST_CACHE_TTL_MS for hint in hints.values())
+    assert all(hint.scope == "public" for hint in hints.values())
+
+
+def _singleton_boundary() -> RequestStateBoundary:
+    """返回单例 middleware 中的 requestState boundary，供重绑用例定位。"""
+    boundary = runtime_module.locate_request_state_boundary()
+    assert boundary is not None
+    return boundary
+
+
+@pytest.mark.parametrize("keys", [None, (b"\x02" * 32,)])
+def test_rebind_request_state_security_updates_boundary(
+    keys: tuple[bytes, ...] | None,
+) -> None:
+    """重绑以传入密钥环替换 boundary 的 security，None 形态重绑回 SDK 默认。"""
+    boundary = _singleton_boundary()
+    before = boundary._security
+
+    assert runtime_module.rebind_request_state_security(keys) is True
+
+    after = boundary._security
+    assert after is not before
+    if keys:
+        assert isinstance(after, RequestStateSecurity)
+
+
+def test_rebind_request_state_security_keeps_default_audience_fallback() -> None:
+    """策略未声明 audience 时重绑回退 server name，与 SDK 构造器语义一致。
+
+    直接落 None 会使滚动重启拒解封重启前封签的 requestState（aud 声明漂移），
+    并停止绑定服务身份。
+    """
+    boundary = _singleton_boundary()
+
+    assert runtime_module.rebind_request_state_security((b"\x03" * 32,)) is True
+
+    assert boundary._audience == runtime_module.SERVER_NAME
+
+
+def test_rebind_request_state_security_skips_when_boundary_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """SDK 私有路径中找不到 boundary 时告警跳过，返回 False 且不抛异常。
+
+    配置了密钥环的场景额外向 stderr 输出多副本解封退化告警，未配置时不输出。
+    """
+    monkeypatch.setattr(runtime_module.mcp._lowlevel_server, "middleware", [], raising=False)
+
+    assert runtime_module.rebind_request_state_security((b"\x01" * 32,)) is False
+
+    stderr = capsys.readouterr().err
+    assert "多副本部署的 requestState 解封将失败" in stderr
+    assert "进程临时密钥" in stderr
+
+    assert runtime_module.rebind_request_state_security(None) is False
+    assert capsys.readouterr().err == ""
+
+
+def test_rebind_request_state_security_survives_missing_public_attribute(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """公开属性 mcp.middleware 缺失时告警返回 False，探测失败不阻断启动。"""
+    # middleware 定义于 SDK 基类，删基类属性使子类单例的继承链上缺席。
+    monkeypatch.delattr(MCPServer, "middleware")
+
+    assert runtime_module.rebind_request_state_security((b"\x01" * 32,)) is False
+
+    assert "退化为进程临时密钥" in capsys.readouterr().err
+
+
+def test_rebind_failure_silent_when_import_time_ring_matches_source(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """密钥环与导入期固化一致时重绑失败不输出 stderr 告警：单例已持正确密钥环。
+
+    系统环境变量来源的密钥环在导入期已进入单例，重绑失败不改变解封能力，
+    告警会误导部署者以为已退化。
+    """
+    monkeypatch.setattr(runtime_module, "_IMPORT_TIME_REQUEST_STATE_KEYS", (b"\x01" * 32,))
+    monkeypatch.setattr(runtime_module.mcp._lowlevel_server, "middleware", [], raising=False)
+
+    assert runtime_module.rebind_request_state_security((b"\x01" * 32,)) is False
+
+    assert capsys.readouterr().err == ""
+
+
+def test_conftest_session_manager_private_path_still_exists() -> None:
+    """conftest 会话隔离探测的私有路径存在，SDK 升级改名时先转红而非静默 no-op。"""
+    lowlevel_server = getattr(runtime_module.mcp, "_lowlevel_server", None)
+    assert lowlevel_server is not None
+    assert hasattr(lowlevel_server, "_session_manager")

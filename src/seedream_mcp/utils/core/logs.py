@@ -1,0 +1,312 @@
+"""Seedream MCP 日志配置模块。
+
+基于 loguru 初始化日志系统，配置控制台与文件双通道输出。文件日志按配置的大小
+轮换、保留天数超期清理并压缩归档。通过 InterceptHandler 将标准库 logging 调用
+重定向至 loguru，统一第三方库与项目内部的日志通道。全局 patcher 在每条日志
+格式化前剥离消息与异常文本的控制字符，防文件名、上游错误体等经日志注入伪造
+日志行。
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+import threading
+from collections.abc import Callable
+from pathlib import Path
+from types import FrameType
+from typing import TYPE_CHECKING, Any, Iterable
+
+from loguru import logger
+
+from .errors import as_text, raw_error_text
+
+from .sanitizers import CONTROL_CHARS_PATTERN
+from ...definitions.conventions import DATA_DIR_NAME
+from ...definitions.defaults import (
+    DEFAULT_LOG_LEVEL,
+    DEFAULT_LOG_RETENTION_DAYS,
+    DEFAULT_LOG_ROTATION_SIZE_MB,
+)
+
+if TYPE_CHECKING:
+    # loguru 顶层运行时仅导出 logger 实例，Logger 类只在随包存根中声明，类型检查期导入。
+    from loguru import Logger
+
+
+class EarlyMessageBuffer:
+    """早于日志初始化的消息缓冲，冲刷与回滚由内部锁串行化。
+
+    config 构建告警与 path 目录回退提示共用同一机制，drain 在 setup_logging
+    之后由 server 调用。
+    """
+
+    def __init__(self) -> None:
+        self._messages: list[tuple[str, str]] = []
+        self._lock = threading.Lock()
+
+    def append(self, level: str, message: str) -> None:
+        """缓冲一条消息。"""
+        with self._lock:
+            self._messages.append((level, message))
+
+    def append_once(self, level: str, message: str) -> None:
+        """缓冲一条消息，同内容在缓冲窗口内去重。"""
+        with self._lock:
+            if (level, message) not in self._messages:
+                self._messages.append((level, message))
+
+    def extend(self, messages: Iterable[tuple[str, str]]) -> None:
+        """缓冲多条消息。"""
+        with self._lock:
+            self._messages.extend(messages)
+
+    def mark(self) -> int:
+        """当前长度作为回滚锚点。"""
+        with self._lock:
+            return len(self._messages)
+
+    def rollback(self, mark: int) -> None:
+        """丢弃锚点之后缓冲的消息。"""
+        with self._lock:
+            del self._messages[mark:]
+
+    def snapshot(self) -> list[tuple[str, str]]:
+        """当前缓冲内容的浅拷贝。"""
+        with self._lock:
+            return list(self._messages)
+
+    def clear(self) -> None:
+        """清空缓冲，供测试隔离复位。"""
+        with self._lock:
+            self._messages.clear()
+
+    def take_all(self) -> list[tuple[str, str]]:
+        """原子取走缓冲的全部消息，供调用方在任意锁外输出。"""
+        with self._lock:
+            pending = self._messages
+            self._messages = []
+            return pending
+
+    def drain(self) -> None:
+        """输出并清空缓冲的全部消息。"""
+        for level, message in self.take_all():
+            logger.log(level, message)
+
+
+class InterceptHandler(logging.Handler):
+    """将标准库 logging 的调用重定向至 loguru 的桥接处理器。"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """将标准库日志记录转写为 loguru 日志调用。
+
+        级别名经 loguru 级别表映射，未注册的级别名回退为数值级别；日志深度
+        回溯至 logging 模块之外的原始调用帧，使记录的调用位置为真实调用者。
+        第三方库的畸形记录经 handleError 吞掉，异常不外泄进对方调用点。
+        """
+        try:
+            log_level: str | int
+            try:
+                log_level = logger.level(record.levelname).name
+            except ValueError:
+                log_level = record.levelno
+
+            # 向上跳过 emit 自身帧与 logging 模块内部的帧，定位真实调用者以计算日志深度。
+            frame: FrameType | None = logging.currentframe()
+            depth = 0
+            while frame is not None and (
+                depth == 0 or frame.f_code.co_filename == logging.__file__
+            ):
+                depth += 1
+                frame = frame.f_back
+
+            logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
+        except Exception:
+            self.handleError(record)
+
+
+# 字符类取 sanitizers.CONTROL_CHARS_PATTERN 单一来源，与错误文本脱敏通道保持同一口径。
+_LOG_MESSAGE_CONTROL_CHARS = CONTROL_CHARS_PATTERN
+
+
+def _strip_message_control_chars(record: Any) -> None:
+    """剥离日志消息与异常消息的控制字符，防日志注入。
+
+    作为全局 patcher 在每条日志格式化前剥离，一处覆盖所有日志点：路径名、上游错误
+    体中的 CR/LF 原样记录会在日志文件中伪造额外行。exc_info 的异常消息文本经
+    _strip_exception_control_chars 同步清洗，traceback 帧源代码行来自本地文件不受
+    影响。本层只压平控制字符，不剥离键值形态的凭据：日志通道有意保留异常原文便于
+    排障，键值脱敏由调用点承担。非字符串消息跳过不改写；异常清洗的意外失败不外泄
+    进业务日志调用点，记录按已清洗部分落日志并输出 warning。
+    """
+    message = record.get("message")
+    if isinstance(message, str) and _LOG_MESSAGE_CONTROL_CHARS.search(message):
+        record["message"] = _LOG_MESSAGE_CONTROL_CHARS.sub(" ", message)
+    try:
+        _strip_exception_control_chars(record)
+    except Exception as exc:
+        # patcher 异常外泄会打进业务日志调用点；warning 使清洗失败可见。
+        logger.warning(
+            "日志异常消息控制字符清洗失败({})，记录按已清洗部分落日志", type(exc).__name__
+        )
+
+
+def _strip_exception_control_chars(record: Any) -> None:
+    """清洗 exc_info 记录携带的异常消息文本中的控制字符。
+
+    异常 str 输出由 args 派生，原地清洗 args 即同时修正本条与后续对该异常实例的
+    字符串化显示，携带换行的上游错误消息无法在日志文件中伪造行；仅处理含字符串
+    args 的异常，无 args 或重写 __str__ 的保持原样。
+    """
+    exc = record.get("exception")
+    if exc is None:
+        return
+    value = exc.value
+    args = getattr(value, "args", None)
+    if not args:
+        return
+    cleaned = tuple(
+        _LOG_MESSAGE_CONTROL_CHARS.sub(" ", arg) if isinstance(arg, str) else arg for arg in args
+    )
+    if cleaned != args:
+        value.args = cleaned
+
+
+# 级别名到严重度序号的映射；不查 loguru 注册表，测试替换 logger 后仍可用。
+_LEVEL_SEVERITY = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
+# 合法级别名单一来源，config 校验与 CLI choices 引用，防与序号映射键集漂移。
+LEGAL_LOG_LEVELS: tuple[str, ...] = tuple(_LEVEL_SEVERITY)
+
+
+def _floor_severity(floor: str) -> int:
+    """级别名转严重度序号；未知级别名抛 ValueError，与原生 level= 参数同口径。"""
+    try:
+        return _LEVEL_SEVERITY[floor]
+    except KeyError:
+        raise ValueError(raw_error_text("未知日志级别: {level}", level=as_text(floor))) from None
+
+
+def _sink_filter(floor: str) -> Callable[[Any], bool]:
+    """按配置级别过滤并放行 security 标记的安全告警。"""
+    severity = _floor_severity(floor)
+
+    def _filter(record: Any) -> bool:
+        if record["extra"].get("security"):
+            return True
+        return bool(record["level"].no >= severity)
+
+    return _filter
+
+
+def setup_logging(
+    log_level: str = DEFAULT_LOG_LEVEL,
+    log_file: str | None = None,
+    enable_console: bool = True,
+    enable_file: bool = True,
+    force_standard_logging: bool = False,
+    rotation_mb: int = DEFAULT_LOG_ROTATION_SIZE_MB,
+    retention_days: int = DEFAULT_LOG_RETENTION_DAYS,
+) -> None:
+    """设置日志配置。
+
+    未显式传入 log_file 时，默认路径 ``.seedream/logs/seedream_mcp.log`` 相对进程
+    工作目录解析；生产入口传入按数据根目录推导的路径。两通道均内联写入，不开
+    enqueue：写入串行由 loguru handler 内置锁承担，免去队列序列化成本与队列
+    管道满时的永久回压；轮转压缩与慢 stderr 消费者的内联停顿为有界代价，属
+    知情取舍。
+
+    Args:
+        log_level: 日志级别，取 DEBUG、INFO、WARNING、ERROR 或 CRITICAL。
+        log_file: 日志文件路径；None 时默认 ``.seedream/logs/seedream_mcp.log``
+            相对进程工作目录解析。
+        enable_console: 是否启用控制台通道，输出至 stderr；security 标记的
+            WARNING 告警不受配置级别过滤。
+        enable_file: 是否启用文件通道，按 rotation_mb 轮换、保留 retention_days
+            并压缩归档。
+        force_standard_logging: 是否强制接管标准库 logging 配置；未强制且 root
+            logger 已有外来 handler 时标准库日志不被拦截、第三方噪音压制不执行，
+            输出 warning 提示，已有 handler 均为本桥接器（重复初始化）时不告警。
+        rotation_mb: 单个日志文件的大小上限 MB，超过即轮转。
+        retention_days: 轮转日志的保留天数，超期自动清理。
+    """
+    logger.remove()
+    logger.configure(patcher=_strip_message_control_chars)
+
+    level = log_level.upper()
+    # sink 级别门取配置与 WARNING 的较小者：security 告警均为 WARNING，先经
+    # handler 级别门丢弃低级别记录，filter 再按配置级别过滤普通记录。
+    sink_level = min(_floor_severity(level), _LEVEL_SEVERITY["WARNING"])
+
+    if enable_console:
+        logger.add(
+            sys.stderr,
+            level=sink_level,
+            filter=_sink_filter(level),
+            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+            "<level>{message}</level>",
+            # colorize=None 交由 loguru 按流是否 TTY 自动决定，非终端 sink 不输出 ANSI 转义。
+            colorize=None,
+            backtrace=True,
+            diagnose=False,
+        )
+
+    if enable_file:
+        if log_file is None:
+            log_dir = Path(DATA_DIR_NAME) / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "seedream_mcp.log"
+        else:
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.add(
+            str(log_path),
+            level=sink_level,
+            filter=_sink_filter(level),
+            format=(
+                "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | " "{name}:{function}:{line} - {message}"
+            ),
+            rotation=f"{rotation_mb} MB",
+            retention=f"{retention_days} days",
+            compression="zip",
+            backtrace=True,
+            diagnose=False,
+        )
+        logger.info("日志文件: {}", log_path.resolve())
+
+    # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru；root
+    # logger 已有 handler 且未强制接管时 basicConfig 整体 no-op。已有 handler 均为
+    # 本桥接器（重复初始化）时拦截已在位，与首次安装同享噪音压制。
+    existing_handlers = logging.getLogger().handlers
+    bridged = all(isinstance(handler, InterceptHandler) for handler in existing_handlers)
+    interception_installed = force_standard_logging or not existing_handlers or bridged
+    if not interception_installed:
+        logger.warning(
+            "标准库 root logger 已有非本桥接器的 handler 且 force_standard_logging=False，"
+            "标准库日志未被 loguru 拦截，也不经控制字符防护；"
+            "函数入口的 logger.remove 已清除宿主先前配置的 loguru sink"
+        )
+    logging.basicConfig(
+        handlers=[InterceptHandler()],
+        level=0,
+        force=force_standard_logging,
+    )
+
+    # 压制第三方库的 DEBUG/INFO 噪音：httpx 每次 API 调用、httpcore 每个连接均输出
+    # INFO 日志，桥接后全量进入会淹没项目业务日志；httpx2/httpcore2 为 mcp SDK v2
+    # 的 HTTP 客户端日志源，一并压制。拦截未安装时不执行，宿主自行配置的级别不被改写。
+    if interception_installed:
+        for name in ("urllib3", "aiohttp", "asyncio", "httpx", "httpcore", "httpx2", "httpcore2"):
+            logging.getLogger(name).setLevel(logging.WARNING)
+
+    logger.info("日志系统初始化完成，级别: {}", level)
+
+
+def get_logger() -> Logger:
+    """返回项目统一的 loguru logger 实例。
+
+    输出中渲染的模块名由 sink 从真实调用帧取值，无需调用方传入名称。
+    """
+    return logger

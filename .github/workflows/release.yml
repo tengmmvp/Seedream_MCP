@@ -58,7 +58,7 @@ jobs:
           version: 0.12.19
           enable-cache: true
 
-      - name: 🎁 Build distributions
+      - name: 🧱 Build distributions
         run: uv build
 
       - name: 📤 Publish to PyPI
@@ -77,6 +77,10 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # git-cliff 需要全部历史与 tag 解析版本段落。
+          fetch-depth: 0
+          fetch-tags: true
 
       # 取最近一个非当前 tag 作对比基线，首个版本无前序时回退 main 分支。
       - name: 📜 Resolve previous tag
@@ -89,6 +93,15 @@ jobs:
               '[.[].tag_name | select(. != null)] | map(select(. != $current)) | first // empty')
           echo "tag=${prev:-main}" >> "$GITHUB_OUTPUT"
 
+      # 生成当前 tag 的版本段落，填入 Release 更新内容节。
+      - name: 📄 Generate changelog section
+        id: changelog
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        with:
+          config: cliff.toml
+          version: 2.14.2
+          args: --latest --strip header
+
       - name: 🏷️ Create Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -98,7 +111,9 @@ jobs:
             ## ✨ Seedream MCP ${{ github.ref_name }}
 
             ### 📝 更新内容
-            [查看自上一版本以来的全部提交](https://github.com/tengmmvp/Seedream_MCP/compare/${{ steps.prev_tag.outputs.tag }}...${{ github.ref_name }})
+            ${{ steps.changelog.outputs.content }}
+
+            [查看完整提交对比](https://github.com/tengmmvp/Seedream_MCP/compare/${{ steps.prev_tag.outputs.tag }}...${{ github.ref_name }})
 
             ### 🛠️ 安装方式
 
@@ -139,6 +154,23 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 版本段落前插 CHANGELOG.md 并回写 main；此时 PyPI 与 Release 已发布，
+      # main 已前进导致推送被拒时不影响线上产物，本地补跑前插与提交即可。
+      - name: ➕ Prepend changelog file
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        with:
+          config: cliff.toml
+          version: 2.14.2
+          args: --latest --prepend CHANGELOG.md
+
+      - name: 💾 Commit changelog to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore(release): 更新 CHANGELOG 至 ${GITHUB_REF_NAME} [skip ci]"
+          git push origin HEAD:main
 
   # 构建多架构镜像推送 GHCR：从源码构建，与 PyPI 发布相互独立、并行执行。
   docker-release:

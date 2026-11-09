@@ -1,0 +1,67 @@
+"""_file_uri_to_path 的 file:// URI 解析与主机拒绝测试。
+
+将 MCP Roots 声明的 file:// URI 转为本地路径，拒绝非 localhost 主机的
+file://host/share，避免 Windows 下触发 SMB 连接泄露凭据。
+
+file://localhost//server/share 的 path 部分为 UNC 形态，resolve 前经
+is_unc_path 拒绝，行为跨平台确定；SMB 防护由 netloc 与 path 两层拒绝共同保证。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+from seedream_mcp.utils.io.roots import _file_uri_to_path
+
+
+def test_file_uri_to_path_rejects_non_localhost_host() -> None:
+    """file://host/share 的 netloc 非空且非 localhost 时拒绝并返回 None，跨平台一致。"""
+    assert _file_uri_to_path("file://host/share") is None
+    assert _file_uri_to_path("file://server/share/path.png") is None
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="win32 为有根无盘符形态拒绝，POSIX 绝对路径恒放行"
+)
+def test_file_uri_to_path_accepts_absolute_local_path_on_posix() -> None:
+    """file:///abs/path.png 在 POSIX 放行为本地 Path。"""
+    resolved = _file_uri_to_path("file:///abs/path.png")
+
+    assert resolved is not None
+    assert isinstance(resolved, Path)
+    assert "abs" in resolved.parts
+    assert "path.png" in resolved.parts
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="有根无盘符拒绝仅 win32 生效，POSIX 绝对路径恒放行"
+)
+def test_file_uri_to_path_rejects_rooted_without_drive_on_windows() -> None:
+    """win32 上有根无盘符形态（file:///foo）拒绝，与 normalize_path 口径一致。"""
+    assert _file_uri_to_path("file:///foo/bar.png") is None
+
+
+def test_file_uri_to_path_rejects_non_file_scheme() -> None:
+    """非 file scheme 一律拒绝。"""
+    assert _file_uri_to_path("http://example.com/x.png") is None
+    assert _file_uri_to_path("https://example.com/x.png") is None
+
+
+def test_file_uri_to_path_accepts_localhost_with_drive() -> None:
+    """file://localhost/C:/path.png 等同本地路径，放行。"""
+    resolved = _file_uri_to_path("file://localhost/C:/path.png")
+
+    assert resolved is not None
+
+
+def test_file_uri_to_path_rejects_localhost_unc_path() -> None:
+    """file://localhost//server/share 的 path 部分为 UNC 形态，resolve 前拒绝。"""
+    assert _file_uri_to_path("file://localhost//server/share") is None
+
+
+def test_file_uri_to_path_expands_tilde_segment_to_user_home() -> None:
+    """file:~/x 的 ~ 段展开到用户主目录，不相对解析进进程 CWD。"""
+    assert _file_uri_to_path("file:~/x") == (Path.home() / "x").resolve()

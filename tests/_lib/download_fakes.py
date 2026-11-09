@@ -1,0 +1,316 @@
+"""下载域（utils/io/download）测试共享的伪网络对象与辅助函数。
+
+供 test_download_manager_security、test_download_manager_ssrf、
+test_download_image_branches 与 test_auto_save_and_download 复用，避免多处重复
+定义与语义漂移。流式内容采用多分块语义，支持单块与多块场景；对端 IP、连接、
+响应、session 与 DNS 解析 loop 均按 aiohttp 公开接口的最小子集模拟。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, cast
+
+import aiohttp
+import pytest
+
+from seedream_mcp.utils.io.download import (
+    DownloadManager,
+    _RangeClassification,
+    _ResumeState,
+)
+
+# 合法 PNG 魔法字节，供成功路径与签名校验对照。
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+
+
+class _FakeStreamContent:
+    """模拟 aiohttp 响应体的分块流，支持逐块迭代与限额 read 两种消费方式。"""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self._chunk_idx = 0
+        self._chunk_offset = 0
+
+    async def iter_chunked(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        while self._chunk_idx < len(self._chunks):
+            chunk = self._chunks[self._chunk_idx]
+            self._chunk_idx += 1
+            self._chunk_offset = 0
+            yield chunk
+
+    async def read(self, size: int = -1) -> bytes:
+        """取走至多 size 字节的剩余响应体，模拟 aiohttp StreamReader 的限额排空。"""
+        parts: list[bytes] = []
+        taken = 0
+        while self._chunk_idx < len(self._chunks) and (size < 0 or taken < size):
+            chunk = self._chunks[self._chunk_idx]
+            piece = chunk[self._chunk_offset :]
+            if size >= 0:
+                piece = piece[: size - taken]
+            self._chunk_offset += len(piece)
+            if self._chunk_offset >= len(self._chunks[self._chunk_idx]):
+                self._chunk_idx += 1
+                self._chunk_offset = 0
+            parts.append(piece)
+            taken += len(piece)
+        return b"".join(parts)
+
+
+class _FakeLoop:
+    """模拟事件循环的 getaddrinfo，返回指定 IP 列表并累计调用次数。"""
+
+    def __init__(self, ips: list[str]) -> None:
+        self._ips = list(ips)
+        self.calls = 0
+
+    async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
+        del host, port, proto
+        self.calls += 1
+        return [(None, None, None, None, (ip, 0)) for ip in self._ips]
+
+
+class _GatedFailingLoop:
+    """getaddrinfo 阻塞在 gate 上，放行后抛 OSError 构造延迟的解析失败。
+
+    Attributes:
+        calls: getaddrinfo 调用次数，供等待调度时序的断言，不使用时可忽略。
+        gate: 控制解析完成的放行事件。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.gate = asyncio.Event()
+
+    async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
+        del host, port, proto
+        self.calls += 1
+        await self.gate.wait()
+        raise OSError("dns boom")
+
+
+class _FakeTransport:
+    """模拟底层传输，供 _validate_connected_peer_ip 提取公网对端 IP。"""
+
+    def __init__(self, peer_ip: str = "8.8.8.8") -> None:
+        self._peer_ip = peer_ip
+
+    def get_extra_info(self, key: str) -> Any:
+        if key == "peername":
+            return (self._peer_ip, 443)
+        return None
+
+
+class _FakeConnection:
+    """模拟 aiohttp 连接，暴露携带对端 IP 的 transport。"""
+
+    def __init__(self, peer_ip: str = "8.8.8.8") -> None:
+        self.transport = _FakeTransport(peer_ip)
+
+
+class _FakeResponse:
+    """模拟 aiohttp.ClientResponse：暴露 status/headers/content/connection。
+
+    实现异步上下文管理器协议以支持 ``async with session.get(...) as response``。
+
+    Attributes:
+        status: HTTP 状态码。
+        headers: 响应头映射。
+        content: 响应体，经多分块流产出。
+        connection: 伪连接，供 download_image 主循环复核对端 IP。
+    """
+
+    def __init__(
+        self,
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+        content_chunks: list[bytes] | None = None,
+        peer_ip: str = "8.8.8.8",
+    ) -> None:
+        self.status = status
+        self.headers = headers or {}
+        self.content = _FakeStreamContent(content_chunks or [])
+        self.connection = _FakeConnection(peer_ip)
+
+    async def __aenter__(self) -> "_FakeResponse":
+        return self
+
+    async def __aexit__(self, *args: object) -> bool:
+        return False
+
+
+class _FakeSession:
+    """按序返回预设响应序列，超出后重复返回最后一个。
+
+    Attributes:
+        captured_headers: 每次 get 收到的请求头副本，供 Range/If-Range、
+            Accept-Encoding 钉死与跨源请求头剥离断言。
+    """
+
+    def __init__(self, responses: Sequence[_FakeResponse]) -> None:
+        self._responses = responses
+        self._idx = 0
+        self.captured_headers: list[dict[str, str]] = []
+
+    def get(self, url: str, **kwargs: object):  # type: ignore[no-untyped-def]
+        del url
+        # SSRF 防护：download_image 须显式传 allow_redirects=False 以逐跳手动校验，
+        # 断言该参数防止退化为自动跟随重定向绕过安全校验。
+        assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
+        headers = cast("dict[str, str]", kwargs.get("headers") or {})
+        self.captured_headers.append(dict(headers))
+        resp = self._responses[min(self._idx, len(self._responses) - 1)]
+        self._idx += 1
+        return resp
+
+
+class _InterruptedStreamContent:
+    """产出预设分块后抛 ClientPayloadError，模拟传输中断下的部分下载。"""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self._idx = 0
+
+    async def iter_chunked(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        while self._idx < len(self._chunks):
+            chunk = self._chunks[self._idx]
+            self._idx += 1
+            yield chunk
+        raise aiohttp.ClientPayloadError("connection dropped")
+
+    async def read(self, size: int = -1) -> bytes:
+        del size
+        return b""
+
+
+class _InterruptedResponse(_FakeResponse):
+    """中途断流的 200 响应，携带 ETag 供重试续传。"""
+
+    def __init__(self, chunks: list[bytes], etag: str, total: int) -> None:
+        super().__init__(
+            status=200,
+            headers={
+                "content-type": "image/png",
+                "etag": etag,
+                "content-length": str(total),
+            },
+        )
+        self.content = cast("_FakeStreamContent", _InterruptedStreamContent(chunks))
+
+
+class _RaisingThenSuccessSession:
+    """首次 get 抛指定异常，之后返回预设成功响应。
+
+    覆盖 download_image 各 except 臂的重试路径：get 直接抛出而非经上下文管理器，
+    等效模拟网络层在建立连接前即失败的场景，异常仍被同一 except 臂捕获。
+
+    Attributes:
+        call_count: get 调用次数，供断言重试次数。
+    """
+
+    def __init__(self, exc: BaseException, success_response: _FakeResponse) -> None:
+        self._exc = exc
+        self._success = success_response
+        self.call_count = 0
+
+    def get(self, url: str, **kwargs: object) -> _FakeResponse:
+        del url
+        assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
+        self.call_count += 1
+        if self.call_count == 1:
+            raise self._exc
+        return self._success
+
+
+class _TimeoutThenSuccessSession:
+    """首次 get 抛出 asyncio.TimeoutError，之后返回预设成功响应。
+
+    覆盖 download_image 中 ``except asyncio.TimeoutError`` 重试分支：连接或读取阶段
+    超时经退避后由后续尝试成功落盘。
+
+    Attributes:
+        call_count: get 调用次数，供断言重试次数。
+    """
+
+    def __init__(self, success_response: _FakeResponse) -> None:
+        self._success = success_response
+        self.call_count = 0
+
+    def get(self, url: str, **kwargs: object) -> _FakeResponse:
+        del url
+        assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
+        self.call_count += 1
+        if self.call_count == 1:
+            raise asyncio.TimeoutError()
+        return self._success
+
+
+def _patch_download_network(
+    monkeypatch: pytest.MonkeyPatch, manager: DownloadManager, session: Any
+) -> None:
+    """跳过依赖真实网络的 URL 校验并注入 fake session，聚焦主循环与分支逻辑。
+
+    _validate_connected_peer_ip 不 mock：fake response 携带公网 peer_ip，真实运行以
+    覆盖成功路径中对端 IP 复核的串联。
+
+    Args:
+        monkeypatch: pytest 补丁入口。
+        manager: 被注入伪网络的下载管理器。
+        session: 替换真实网络会话的伪会话。
+    """
+
+    async def _pass_url(url: str) -> None:
+        del url
+
+    async def _fake_ensure_session() -> Any:
+        return session
+
+    monkeypatch.setattr(manager, "_validate_url_for_request", _pass_url)
+    monkeypatch.setattr(manager, "_ensure_session", _fake_ensure_session)
+
+
+def _png_success_response() -> _FakeResponse:
+    """构造合法 200 PNG 响应。"""
+    return _FakeResponse(
+        status=200,
+        headers={"content-type": "image/png", "content-length": str(len(_PNG_BYTES))},
+        content_chunks=[_PNG_BYTES],
+    )
+
+
+async def _single_trip_to_temp(
+    manager: DownloadManager,
+    response: Any,
+    save_path: Path,
+    content_type: str = "image/png",
+    attempt: int = 0,
+    wall_start_time: float | None = None,
+    *,
+    fsync: bool = False,
+) -> dict[str, Any]:
+    """单趟落盘便捷封装：独立续传状态走 _stream_response_to_resume，结束 dispose。
+
+    直连用例均为 200 响应，续传分类传非续传默认描述符；尾参缺省取各用例
+    通行常量。
+    """
+    if wall_start_time is None:
+        wall_start_time = time.time()
+    resume = _ResumeState(
+        max_file_size=manager.max_file_size,
+        save_path=save_path,
+        mono_start_time=time.monotonic(),
+        wall_start_time=wall_start_time,
+        fsync=fsync,
+    )
+    resume.attempt = attempt
+    try:
+        return await manager._stream_response_to_resume(
+            response, resume, content_type, _RangeClassification()
+        )
+    finally:
+        await resume.dispose()

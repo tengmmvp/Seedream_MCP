@@ -1,0 +1,64 @@
+"""Seedream MCP 工具包入口，聚合再导出 runners 适配器与输入模型。
+
+handlers 的 ``handle_*`` 处理器封装各工具的客户端调用与结果组装，经直接子模块路径
+导入消费，不在包门面重导出；runners 的 ``run_*`` 适配器作为 composition root
+注入工作区边界后委托 handler；schemas 的输入模型是参数校验的单一来源，
+inputSchema 由 server/_registration.py 的平铺签名镜像生成。依赖方向为 pipeline <- handlers <- runners。
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # as 同名形态为 PEP 484 显式再导出，供 mypy 识别 __getattr__ 延迟加载的导出面。
+    from .schemas import (  # noqa: F401
+        BrowseImagesInput as BrowseImagesInput,
+        ImageToImageInput as ImageToImageInput,
+        MultiImageFusionInput as MultiImageFusionInput,
+        SequentialGenerationInput as SequentialGenerationInput,
+        TextToImageInput as TextToImageInput,
+    )
+    from .runners import (  # noqa: F401
+        run_browse_images as run_browse_images,
+        run_get_model_info as run_get_model_info,
+        run_image_to_image as run_image_to_image,
+        run_multi_image_fusion as run_multi_image_fusion,
+        run_sequential_generation as run_sequential_generation,
+        run_text_to_image as run_text_to_image,
+    )
+
+# 延迟加载映射：导出名 -> (子模块相对名，子模块内属性名)
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    "run_browse_images": (".runners", "run_browse_images"),
+    "run_get_model_info": (".runners", "run_get_model_info"),
+    "run_image_to_image": (".runners", "run_image_to_image"),
+    "run_multi_image_fusion": (".runners", "run_multi_image_fusion"),
+    "run_sequential_generation": (".runners", "run_sequential_generation"),
+    "run_text_to_image": (".runners", "run_text_to_image"),
+    "BrowseImagesInput": (".schemas", "BrowseImagesInput"),
+    "ImageToImageInput": (".schemas", "ImageToImageInput"),
+    "MultiImageFusionInput": (".schemas", "MultiImageFusionInput"),
+    "SequentialGenerationInput": (".schemas", "SequentialGenerationInput"),
+    "TextToImageInput": (".schemas", "TextToImageInput"),
+}
+
+__all__ = list(_LAZY_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    """按 PEP 562 延迟加载公开导出，首次访问时导入对应子模块。"""
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = target
+    module = import_module(module_name, __name__)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    """补全 dir() 结果，纳入尚未触发导入的延迟导出公开名。"""
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))

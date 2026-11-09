@@ -1,0 +1,204 @@
+"""共享 lifespan 资源的多消费者引用计数测试。
+
+mcp 2.0 下 streamable-http 的 lifespan 只在会话管理器启动时进入一次、状态进程级
+共享。本套件以直调嵌套的 app_lifespan 锁定契约：任一消费者退出不得关闭其余在途
+引用仍在使用的共享资源，全部在途引用归零后才清理。
+"""
+
+import asyncio
+
+import pytest
+
+from seedream_mcp.config import _builder as config_module
+import seedream_mcp.server.runtime as runtime
+import seedream_mcp.server as server
+from seedream_mcp.config import SeedreamConfig
+
+
+def _activate_config(monkeypatch: pytest.MonkeyPatch, config: SeedreamConfig) -> None:
+    """注入活动配置。"""
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+
+async def test_second_session_exit_keeps_shared_resource_for_first(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """双会话并发时会话 2 退出仅递减引用，会话 1 的连接池保持可用。"""
+    _activate_config(monkeypatch, SeedreamConfig(api_key="test_key"))
+
+    async with server.app_lifespan(server.mcp) as first_state:
+        shared_client = first_state["client"]
+        shared_download_manager = first_state["download_manager"]
+        async with server.app_lifespan(server.mcp) as second_state:
+            assert second_state["client"] is shared_client
+            assert second_state["download_manager"] is shared_download_manager
+
+        active = runtime._active_resource
+        assert active is not None
+        assert active.refcount == 1
+        # close 会把 client._client 与 download_manager._session 置 None，
+        # 两者非 None 即证明会话 2 的 teardown 未关闭共享资源。
+        assert shared_client._client is not None
+        assert shared_download_manager._session is not None
+
+    # 最后一个会话退出后引用归零，teardown 清理生效
+    assert runtime._active_resource is None
+    assert shared_client._client is None
+    assert shared_download_manager._session is None
+
+
+async def test_exit_skips_cleanup_while_retired_resource_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """退役资源仍有在途会话时，活动槽位归零也不触发清理。
+
+    会话 1 持有旧资源期间 config 变更、会话 2 进入使旧资源退役；会话 2 先退出时
+    活动引用已归零，清理仍搁置至会话 1 退出。
+    """
+    _activate_config(monkeypatch, SeedreamConfig(api_key="key_a"))
+
+    async with server.app_lifespan(server.mcp) as first_state:
+        old_client = first_state["client"]
+        _activate_config(monkeypatch, SeedreamConfig(api_key="key_b"))
+        async with server.app_lifespan(server.mcp) as second_state:
+            new_client = second_state["client"]
+        assert new_client is not old_client
+
+        active = runtime._active_resource
+        assert active is not None
+        assert active.client is new_client
+        # 退役资源仍被会话 1 持有，清理被门控搁置
+        assert runtime._retired_resources
+        assert old_client._client is not None
+        assert new_client._client is not None
+
+    # 会话 1 退出后退役与活动资源全部清理
+    assert runtime._active_resource is None
+    assert runtime._retired_resources == []
+    assert old_client._client is None
+    assert new_client._client is None
+
+
+async def test_new_session_rebuilds_after_all_sessions_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """全部会话退出触发清理后，新会话进入重建共享资源而非复用已关闭实例。"""
+    _activate_config(monkeypatch, SeedreamConfig(api_key="test_key"))
+
+    async with server.app_lifespan(server.mcp) as first_state:
+        first_client = first_state["client"]
+    assert runtime._active_resource is None
+
+    async with server.app_lifespan(server.mcp) as second_state:
+        assert second_state["client"] is not first_client
+        assert second_state["client"]._client is not None
+
+
+async def test_session_entering_during_cleanup_drain_keeps_resource_alive(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """teardown 清理在 drain 让出期间有新会话进入时放弃关闭，复用的资源保持可用。
+
+    复现归零判定与实际关闭间的交错：会话 1 的 teardown 挂起在
+    drain_background_cleanup_tasks 处，期间会话 2 复用仍挂活动槽位的资源；清理
+    恢复后须复检在途引用并放弃关闭。
+    """
+    from seedream_mcp.utils.io import save as io_save
+
+    drain_entered = asyncio.Event()
+    drain_release = asyncio.Event()
+
+    async def hanging_drain() -> None:
+        drain_entered.set()
+        await drain_release.wait()
+
+    monkeypatch.setattr(io_save, "drain_background_cleanup_tasks", hanging_drain)
+    _activate_config(monkeypatch, SeedreamConfig(api_key="test_key"))
+
+    first_lifespan = server.app_lifespan(server.mcp)
+    first_state = await first_lifespan.__aenter__()
+    shared_client = first_state["client"]
+    shared_download_manager = first_state["download_manager"]
+
+    teardown = asyncio.ensure_future(first_lifespan.__aexit__(None, None, None))
+    await drain_entered.wait()
+
+    second_lifespan = server.app_lifespan(server.mcp)
+    second_state = await second_lifespan.__aenter__()
+    assert second_state["client"] is shared_client
+    assert second_state["download_manager"] is shared_download_manager
+
+    drain_release.set()
+    await teardown
+
+    # 清理放弃后资源仍挂活动槽位且未被关闭，会话 2 继续持有可用连接池
+    active = runtime._active_resource
+    assert active is not None
+    assert active.client is shared_client
+    assert active.refcount == 1
+    assert shared_client._client is not None
+    assert shared_download_manager._session is not None
+
+    # 会话 2 退出时引用归零，清理正常完成
+    await second_lifespan.__aexit__(None, None, None)
+    assert runtime._active_resource is None
+    assert shared_client._client is None
+    assert shared_download_manager._session is None
+
+
+async def test_new_config_session_during_drain_closes_zero_refcount_resource_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """drain 让出期间以不同 config 进入的第二会话使引用已归零的旧资源立即关闭。
+
+    会话 1 的 teardown 挂起在 drain 处，期间 config 变更的第二会话重建资源并退役
+    旧槽位；旧资源 refcount 已为 0，退役即关闭而非进入退役追踪列表。
+    """
+    from seedream_mcp.utils.io import save as io_save
+
+    drain_entered = asyncio.Event()
+    drain_release = asyncio.Event()
+
+    async def hanging_drain() -> None:
+        drain_entered.set()
+        await drain_release.wait()
+
+    monkeypatch.setattr(io_save, "drain_background_cleanup_tasks", hanging_drain)
+    _activate_config(monkeypatch, SeedreamConfig(api_key="key_a"))
+
+    first_lifespan = server.app_lifespan(server.mcp)
+    first_state = await first_lifespan.__aenter__()
+    old_client = first_state["client"]
+    old_download_manager = first_state["download_manager"]
+
+    teardown = asyncio.ensure_future(first_lifespan.__aexit__(None, None, None))
+    await drain_entered.wait()
+
+    _activate_config(monkeypatch, SeedreamConfig(api_key="key_b"))
+    second_lifespan = server.app_lifespan(server.mcp)
+    second_state = await second_lifespan.__aenter__()
+    new_client = second_state["client"]
+
+    assert new_client is not old_client
+    # 旧资源引用已归零，退役路径立即关闭，不滞留退役追踪
+    assert runtime._retired_resources == []
+    assert old_client._client is None
+    assert old_download_manager._session is None
+
+    drain_release.set()
+    await teardown
+
+    # teardown 的清理在 drain 后复检引用，第二会话在途使新资源保持可用
+    active = runtime._active_resource
+    assert active is not None
+    assert active.client is new_client
+    assert new_client._client is not None
+
+    await second_lifespan.__aexit__(None, None, None)
+    assert runtime._active_resource is None
+    assert new_client._client is None

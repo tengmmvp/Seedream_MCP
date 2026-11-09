@@ -1,0 +1,1072 @@
+"""AutoSaveManager 与 DownloadManager 关键路径测试。
+
+覆盖自动保存成功/降级、清理节流按 base_dir 跨实例共享与按目录隔离、下载内容
+类型校验与对端 IP fail-closed、fsync 开关透传。
+"""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from seedream_mcp.utils.core.inflight import InflightTaskCancelledError
+from seedream_mcp.utils.io.save import AutoSaveError, AutoSaveManager, AutoSaveResult
+from seedream_mcp.utils.io.download import (
+    DownloadError,
+    DownloadManager,
+    _is_image_compatible_content_type,
+)
+from seedream_mcp.utils.io.path import resolved_form_violation
+
+from _lib.download_fakes import (
+    _PNG_BYTES,
+    _FakeResponse,
+    _FakeSession,
+    _patch_download_network,
+    _png_success_response,
+)
+from _lib.os_fakes import _install_fsync_counter
+from _lib.path_helpers import FORM_VIOLATION_CASES, form_violation_params
+from _lib.time_fakes import _assert_due_flips_at_window_edges, _install_dual_clock
+
+# 1x1 透明 PNG 的 base64 编码
+_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+
+def test_is_image_compatible_content_type_accepts_image_and_binary() -> None:
+    """图片与二进制内容类型视为兼容。"""
+    assert _is_image_compatible_content_type("image/png")
+    assert _is_image_compatible_content_type("image/jpeg; charset=utf-8")
+    assert _is_image_compatible_content_type("application/octet-stream")
+    assert _is_image_compatible_content_type("application/binary")
+    # 空内容类型视为兼容，交由字节签名嗅探兜底
+    assert _is_image_compatible_content_type("")
+
+
+def test_is_image_compatible_content_type_rejects_non_image() -> None:
+    """非图片内容类型被拒绝，image/svg 同在拒绝之列。"""
+    assert not _is_image_compatible_content_type("text/html")
+    assert not _is_image_compatible_content_type("text/html; charset=utf-8")
+    assert not _is_image_compatible_content_type("application/json")
+    # SVG 可内嵌脚本/实体，存在 XSS 与 XXE 风险，即使属 image/* 也拒绝
+    assert not _is_image_compatible_content_type("image/svg+xml")
+    assert not _is_image_compatible_content_type("image/svg")
+
+
+class _FakeResponseNoConnection:
+    """connection 为 None 的伪响应，驱动对端 IP 提取失败的 fail-closed 路径。"""
+
+    connection = None
+
+
+def test_validate_connected_peer_ip_fails_closed_without_peer() -> None:
+    """无法提取对端 IP 时 fail-closed 拒绝下载，避免绕过连接后校验。"""
+    manager = DownloadManager()
+
+    with pytest.raises(DownloadError, match="无法获取连接对端IP"):
+        manager._validate_connected_peer_ip(
+            _FakeResponseNoConnection(),  # type: ignore[arg-type]
+            "https://example.com/x.png",
+        )
+
+
+async def test_save_base64_image_writes_file(tmp_path: Path) -> None:
+    """合法 PNG base64 落盘为实际存在的 .png 文件。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试图片")
+        assert result.success is True
+        assert result.local_path is not None
+        saved = Path(result.local_path)
+        assert saved.exists()
+        assert saved.stat().st_size > 0
+        assert saved.suffix.lower() == ".png"
+    finally:
+        await manager.close()
+
+
+async def test_save_image_returns_failure_on_download_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """下载失败时返回失败结果而非抛出异常，保留原始 URL 供降级。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        async def fake_download(  # type: ignore[no-untyped-def]
+            url, save_path, headers=None, fsync=False, max_file_size=None
+        ):
+            raise DownloadError("网络错误")
+
+        monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+
+        result = await manager.save_image("https://example.com/image.png", prompt="测试")
+
+        assert result.success is False
+        assert "网络错误" in (result.error or "")
+        assert result.original_url == "https://example.com/image.png"
+    finally:
+        await manager.close()
+
+
+async def test_save_image_degrades_on_static_url_rejection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """静态校验拒绝的 URL 在保存层降级为失败结果，不发起下载。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        async def fail_fast_download(*args: object, **kwargs: object) -> dict[str, Any]:
+            del args, kwargs
+            raise AssertionError("静态拒绝的 URL 不应进入下载")
+
+        monkeypatch.setattr(manager.download_manager, "download_image", fail_fast_download)
+
+        result = await manager.save_image("ftp://example.com/x.png", prompt="p")
+
+        assert result.success is False
+        assert "无效的URL" in (result.error or "")
+        assert result.original_url == "ftp://example.com/x.png"
+    finally:
+        await manager.close()
+
+
+async def test_save_image_reports_sniffed_final_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """URL 派生后缀与响应体实际格式不符时，local_path 报告实际落盘文件。
+
+    URL 无后缀派生 .jpeg 而响应体为 PNG：字节签名嗅探会把落盘路径修正为 .png 后缀；
+    save_image 必须基于下载结果的 file_path 构造对外路径，报告 URL 派生的原始路径
+    会指向不存在的文件，markdown_ref 同理。
+    """
+    download_manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, download_manager, session)
+    manager = AutoSaveManager(base_dir=tmp_path, download_manager=download_manager)
+
+    async with manager:
+        result = await manager.save_image("https://cdn.example.com/signed", prompt="测试图片")
+
+    assert result.success is True
+    assert result.local_path is not None
+    final_path = Path(result.local_path)
+    assert final_path.suffix.lower() == ".png"
+    assert final_path.exists()
+    assert final_path.read_bytes() == _PNG_BYTES
+    assert result.markdown_ref is not None
+    assert final_path.name in result.markdown_ref
+    assert result.markdown_ref.endswith(".png)")
+
+
+async def test_save_image_enforces_instance_limit_with_injected_manager(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """注入异上限下载管理器时本实例限额穿入下载流中检查点，超限在流中被拒。
+
+    下载管理器自持上限放宽到 1MB 而实例上限为 100 字节：无声明总量的超限响应
+    在流式累计检查点按两上限较小者（100）拒绝，不落盘不改名，按保存失败降级
+    保留原始 URL；Base64 路径仍按本实例上限在解码前拒绝。
+    """
+    from base64 import b64encode
+
+    oversized = _PNG_BYTES + b"x" * 200
+    download_manager = DownloadManager(max_file_size=1_000_000)
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                status=200,
+                headers={"content-type": "image/png"},
+                content_chunks=[oversized],
+            )
+        ]
+    )
+    _patch_download_network(monkeypatch, download_manager, session)
+    manager = AutoSaveManager(
+        base_dir=tmp_path, max_file_size=100, download_manager=download_manager
+    )
+
+    async with manager:
+        result = await manager.save_image("https://example.com/big.png", prompt="超限")
+
+        assert result.success is False
+        assert result.original_url == "https://example.com/big.png"
+        # 232 字节为流式累计检查点读数：无声明总量的响应只有该检查点给出实际字节数。
+        assert "过大" in (result.error or "")
+        assert "232" in (result.error or "")
+        # 流中被拒先于落盘与改名：目标文件与续传临时文件均不存在。
+        assert not list(tmp_path.rglob("*.png"))
+        assert not list(tmp_path.rglob("*.part"))
+
+        b64_result = await manager.save_base64_image(b64encode(b"x" * 200).decode(), prompt="超限")
+
+    assert b64_result.success is False
+    assert "过大" in (b64_result.error or "")
+
+
+async def test_maybe_cleanup_throttle_shared_per_base_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """节流按 base_dir 跨请求共享：同目录仅触发一次，不同目录各自触发。"""
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module._cleanup_gate.clear()
+    cleanup_calls: list[int] = []
+
+    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        cleanup_calls.append(days)
+        return {"deleted_files": 0, "deleted_size": 0, "errors": []}
+
+    # 同一 base_dir 的两个实例共享节流
+    manager_a = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    manager_b = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    assert manager_a._cleanup_file_manager is not None
+    assert manager_b._cleanup_file_manager is not None
+    monkeypatch.setattr(manager_a._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
+    monkeypatch.setattr(manager_b._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
+
+    await manager_a._maybe_cleanup()
+    await manager_b._maybe_cleanup()  # 同 base_dir，被节流
+    # 后台清理异步执行，等待完成后再断言调用次数
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert cleanup_calls == [30]
+
+    # 不同 base_dir 独立节流
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    manager_c = AutoSaveManager(base_dir=other_dir, cleanup_base_dir=other_dir, cleanup_days=30)
+    assert manager_c._cleanup_file_manager is not None
+    monkeypatch.setattr(manager_c._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
+    await manager_c._maybe_cleanup()
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert cleanup_calls == [30, 30]
+
+
+async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """节流表容量驱逐按最近使用序进行，刚推进到期时间戳的键不被移除。
+
+    对已存在键 mark 不移动条目位置：按插入位置驱逐会把链首刚推进到期时间戳的
+    键整条移除，同目录的下一次保存视为从未节流而再次触发并发清理，
+    正常清理被并发方的删除竞争误判为失败。写入后移到链尾保证驱逐的是真正
+    最久未用的键。
+    """
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module._cleanup_gate.clear()
+    cleanup_calls: list[int] = []
+
+    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        cleanup_calls.append(days)
+        return {"deleted_files": 0, "deleted_size": 0, "errors": []}
+
+    # 预置过期键占满容量上限，目标目录居链首，写入不移动位置时恰为被逐出的链首键；
+    # 负间隔产生与代码同基准（time.monotonic）的已过期时间戳。
+    auto_save_module._cleanup_gate.mark(str(tmp_path), -7200.0)
+    for i in range(auto_save_module._CLEANUP_GATE_MAX_ENTRIES - 1):
+        auto_save_module._cleanup_gate.mark(f"old-{i}", -7200.0)
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    assert manager._cleanup_file_manager is not None
+    monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
+    await manager._maybe_cleanup()
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert cleanup_calls == [30]
+
+    # 超出容量上限的新键触发驱逐：被逐出的是最久未用的 old 键，目标目录的到期
+    # 时间戳随最近使用序保留。
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    manager_other = AutoSaveManager(base_dir=other_dir, cleanup_base_dir=other_dir, cleanup_days=30)
+    assert manager_other._cleanup_file_manager is not None
+    monkeypatch.setattr(
+        manager_other._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup
+    )
+    await manager_other._maybe_cleanup()
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert cleanup_calls == [30, 30]
+
+    # 紧随其后同目录的请求被节流，不再次触发清理。
+    await manager._maybe_cleanup()
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert cleanup_calls == [30, 30]
+
+
+async def test_maybe_cleanup_sweeps_orphan_part_with_cleanup_disabled(
+    tmp_path: Path,
+) -> None:
+    """cleanup_days=0 且 max_total_bytes=None 时遗留 .part 孤儿仍被清扫。
+
+    遗留临时文件清扫不受清理开关门控：auto-save 启用但两项清理均显式关闭的部署下，
+    进程崩溃遗留的 .part 不无界累积。宽限期内的 .part 不受清扫影响。
+    """
+    import os
+    from datetime import datetime, timedelta
+
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module._cleanup_gate.clear()
+    stale_part = tmp_path / "tmpabc123.png.part"
+    stale_part.write_bytes(b"x" * 30)
+    stale_time = (datetime.now() - timedelta(days=2)).timestamp()
+    os.utime(stale_part, (stale_time, stale_time))
+    fresh_part = tmp_path / "tmpdef456.png.part"
+    fresh_part.write_bytes(b"y" * 10)
+
+    manager = AutoSaveManager(
+        base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=0, max_total_bytes=None
+    )
+    try:
+        await manager._maybe_cleanup()
+        await auto_save_module.drain_background_cleanup_tasks()
+
+        assert not stale_part.exists()
+        assert fresh_part.exists()
+    finally:
+        await manager.close()
+
+
+async def test_maybe_cleanup_failure_backoff_throttles_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """清理失败时改写为短退避到期，失败重试有独立于完整节流间隔的下限。
+
+    旧行为回滚到清理前旧值，失败后的首次调用立即再次触发全目录扫描，高频保存下
+    持续失败的清理退化为每次保存都扫描；退避到期使下次重试至少等待 60 秒。
+    """
+    import time as time_module
+
+    from seedream_mcp.utils.core import throttles as throttles_module
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module._cleanup_gate.clear()
+    calls: list[int] = []
+
+    def failing_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        calls.append(days)
+        raise RuntimeError("persistent cleanup failure")
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        assert manager._cleanup_file_manager is not None
+        monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", failing_cleanup)
+
+        # 首次清理失败：异常被吞，改写为短退避到期
+        t_before = time_module.monotonic()
+        await manager._maybe_cleanup()
+        await auto_save_module.drain_background_cleanup_tasks()
+        t_after = time_module.monotonic()
+        assert calls == [30]
+
+        # 紧接着的第二次调用被退避到期节流，不再立即重试
+        await manager._maybe_cleanup()
+        await auto_save_module.drain_background_cleanup_tasks()
+        assert calls == [30]
+
+        # 退避到期时间戳形态为 now + backoff，经 due 在首次清理前后时钟窗口两端的
+        # 翻转锁定写入公式，断言不依赖用例执行速度
+        backoff = auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
+        base_key = str(manager.file_manager.base_dir)
+        _assert_due_flips_at_window_edges(
+            monkeypatch,
+            throttles_module,
+            auto_save_module._cleanup_gate,
+            base_key,
+            t_before,
+            t_after,
+            backoff,
+        )
+    finally:
+        await manager.close()
+
+
+async def test_cleanup_persistent_failure_backoff_escalates_and_caps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """单文件持续锁定（逐项失败每轮复现）时重试间隔按 2 的幂放大并封顶完整节流间隔。
+
+    旧行为任一 error 恒写 60 秒退避，锁存留期间每个退避窗口后都全量重扫整树并
+    在同一文件再失败；放大后重扫频率收敛到正常清理档。首败仍为最短退避，
+    配额驱逐待处理时的尽快重试语义保留。
+    """
+    from seedream_mcp.utils.core import throttles as throttles_module
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+    _, mono = _install_dual_clock(monkeypatch, throttles_module)
+    calls: list[int] = []
+
+    def failing_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        calls.append(days)
+        return {"deleted_files": 0, "deleted_size": 0, "errors": ["删除文件失败 locked.png"]}
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        assert manager._cleanup_file_manager is not None
+        monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", failing_cleanup)
+
+        now = 1000.0
+        mono[0] = now
+        for index, window in enumerate((60, 120, 240, 480, 960, 1920, 3600, 3600)):
+            await manager._maybe_cleanup()
+            await auto_save_module.drain_background_cleanup_tasks()
+            assert len(calls) == index + 1
+            # 退避窗口内清理门未到期，不触发全目录重扫。
+            mono[0] = now + window - 1.0
+            await manager._maybe_cleanup()
+            await auto_save_module.drain_background_cleanup_tasks()
+            assert len(calls) == index + 1
+            now += window + 1.0
+            mono[0] = now
+    finally:
+        await manager.close()
+
+
+async def test_cleanup_failure_streak_resets_on_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """清理成功清零连续失败计数，后续失败从最短退避重新起算。
+
+    两连败已放大到 120 秒档后一次成功回归完整节流间隔，清零后再败回到
+    60 秒，不继承放大间隔。
+    """
+    from seedream_mcp.utils.core import throttles as throttles_module
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+    outcomes: list[dict[str, Any]] = [
+        {"deleted_files": 0, "deleted_size": 0, "errors": ["删除文件失败 x"]},
+        {"deleted_files": 0, "deleted_size": 0, "errors": ["删除文件失败 x"]},
+        {"deleted_files": 0, "deleted_size": 0, "errors": []},
+        {"deleted_files": 0, "deleted_size": 0, "errors": ["删除文件失败 x"]},
+    ]
+    pending = list(outcomes)
+
+    def scripted_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        del days, max_total_bytes
+        return pending.pop(0)
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        assert manager._cleanup_file_manager is not None
+        monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", scripted_cleanup)
+
+        _, mono = _install_dual_clock(monkeypatch, throttles_module)
+        cleanup_key = str(manager._cleanup_file_manager.base_dir)
+        now = 1000.0
+        for expected_window in (60, 120, 3600, 60):
+            mono[0] = now
+            await manager._maybe_cleanup()
+            await auto_save_module.drain_background_cleanup_tasks()
+            # 本轮过后的到期窗口：两连败放大到 120，成功回归完整节流并清零计数，
+            # 再败从最短退避重新起算。
+            mono[0] = now + expected_window - 1.0
+            assert not auto_save_module._cleanup_gate.due(cleanup_key)
+            mono[0] = now + expected_window + 1.0
+            assert auto_save_module._cleanup_gate.due(cleanup_key)
+            now = mono[0]
+        assert not pending
+    finally:
+        await manager.close()
+
+
+async def test_cleanup_gate_evicts_least_recently_used(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """清理门的容量驱逐按最近使用序，活跃失败根的退避放大档不因新键回退。
+
+    驱逐若不随写入刷新位置（纯插入序），最早写入但持续在败的键在新键写入时被
+    整条移除，失败计数清零使退避档回退 60 秒重新放大；写入移到最近使用端后被
+    逐出的是真正最久未用的键，四连败根在容量驱逐压力下仍按 480 秒档续算。
+    """
+    from seedream_mcp.utils.core import throttles as throttles_module
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        assert manager._cleanup_file_manager is not None
+        _, mono = _install_dual_clock(monkeypatch, throttles_module)
+        gate = auto_save_module._cleanup_gate
+        target_key = str(manager._cleanup_file_manager.base_dir)
+
+        # 目标键最早写入并两连败；其余键随后写满容量，两种序下目标键均居链首
+        # （最久未用端）。
+        for _ in range(2):
+            await manager._apply_cleanup_failure_backoff(target_key)
+        filler_keys = [
+            f"{tmp_path}-filler-{i}" for i in range(auto_save_module._CLEANUP_GATE_MAX_ENTRIES - 1)
+        ]
+        for key in filler_keys:
+            await manager._apply_cleanup_failure_backoff(key)
+        # 目标键三败写入移到最近使用端（链尾）。
+        await manager._apply_cleanup_failure_backoff(target_key)
+
+        # 容量已满，新键写入触发驱逐：被逐出的是最久未使用的首个占位键。
+        await manager._apply_cleanup_failure_backoff(f"{tmp_path}-newcomer")
+        assert filler_keys[0] not in gate
+        assert target_key in gate
+
+        # 目标键再败续算第四档（60 * 2^3 = 480 秒），计数未因驱逐压力回退到 60 秒档。
+        now = mono[0]
+        await manager._apply_cleanup_failure_backoff(target_key)
+        _assert_due_flips_at_window_edges(
+            monkeypatch,
+            throttles_module,
+            auto_save_module._cleanup_gate,
+            target_key,
+            now,
+            now,
+            480.0,
+        )
+    finally:
+        await manager.close()
+
+
+async def test_close_does_not_wait_for_background_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """close 不等待在途后台清理，请求返回路径不被全量目录遍历阻塞。
+
+    清理收尾由 drain_background_cleanup_tasks 在进程级退出清理时等待；此前 close 上的
+    gather 使节流触发的请求同步挂起整个清理时长，且模块级任务集合造成跨请求延迟耦合。
+    """
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+    release = asyncio.Event()
+    started = asyncio.Event()
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+
+    async def held_cleanup(base_key: str) -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(manager, "_run_cleanup_in_background", held_cleanup)
+
+    async with manager:
+        await manager._maybe_cleanup()
+        # 让出控制权使后台任务开始执行，确认清理确已启动且被 release 挂起
+        await asyncio.sleep(0)
+        assert started.is_set()
+
+    # async with 退出即 close 完成，而清理任务仍在途，证明 close 未等待清理
+    assert not release.is_set()
+
+    release.set()
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert not auto_save_module._cleanup_tasks
+
+
+async def test_save_base64_image_rejects_non_image_bytes(tmp_path: Path) -> None:
+    """base64 解码后非图片字节须拒绝，对称下载路径的字节签名校验。"""
+    from base64 import b64encode
+
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+        bad_b64 = b64encode(b"<html><script>x</script></html>").decode()
+        result = await manager.save_base64_image(bad_b64)
+        assert result.success is False
+        assert "不是受支持的图片格式" in (result.error or "")
+    finally:
+        await manager.close()
+
+
+async def test_download_image_rejects_html_content_type_single_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """200 + text/html 驱动 download_image 主循环：终态 DownloadError、单次尝试、不落盘。
+
+    HTML 错误页属语义明确的非图片响应，内容类型校验在写盘前拒绝；误入可重试分类
+    会徒增退避等待且最终仍不可能成功。拒绝前先排空错误页使连接回池复用。
+    """
+    response = _FakeResponse(
+        status=200, headers={"content-type": "text/html"}, content_chunks=[b"<html>err</html>"]
+    )
+    manager = DownloadManager()
+    session = _FakeSession([response])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="响应内容类型非图片"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert session._idx == 1
+    assert response.content._chunk_idx == 1
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+class _ExplodingContent:
+    """read 即抛 RuntimeError 的伪响应体，驱动排空失败路径。"""
+
+    async def read(self, size: int = -1) -> bytes:
+        raise RuntimeError("connection reset")
+
+
+async def test_download_image_content_type_rejection_survives_drain_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """排空失败不影响终态拒绝：内容类型错误仍是 DownloadError 而非可重试网络错误。"""
+    response = _FakeResponse(status=200, headers={"content-type": "text/html"})
+    response.content = _ExplodingContent()  # type: ignore[assignment]
+    manager = DownloadManager()
+    session = _FakeSession([response])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="响应内容类型非图片"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert session._idx == 1
+    assert not save_path.exists()
+
+
+async def test_download_image_terminal_http_error_survives_drain_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """终态 HTTP 错误不被排空失败转化为可重试网络错误，单次尝试即失败。"""
+    response = _FakeResponse(status=404, headers={"content-type": "text/plain"})
+    response.content = _ExplodingContent()  # type: ignore[assignment]
+    manager = DownloadManager()
+    session = _FakeSession([response])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="HTTP错误: 404"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert session._idx == 1
+    assert not save_path.exists()
+
+
+def test_validate_url_wrapper_returns_false_for_ftp_scheme() -> None:
+    """wrapper 契约：ftp 协议的静态拒绝经 validate_url 归约为返回 False，不向调用方抛 DownloadError。
+
+    抛错形态的静态校验分支由 test_download_manager_ssrf.py 的
+    test_validate_url_static_rejects_non_http_scheme 专属套件覆盖，此处仅锁定
+    wrapper 特有的 bool 返回契约。
+    """
+    assert DownloadManager().validate_url("ftp://x/1.png") is False
+
+
+async def test_download_retries_after_shared_inflight_task_cancelled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """共享在途 task 被取消按可重试归类：退避后重试成功，不落编程错误终态跳过重试。"""
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    validation_calls = 0
+
+    async def _cancelled_then_pass(url: str) -> None:
+        nonlocal validation_calls
+        del url
+        validation_calls += 1
+        if validation_calls == 1:
+            raise InflightTaskCancelledError("共享在途任务已被取消")
+
+    monkeypatch.setattr(manager, "_validate_url_for_request", _cancelled_then_pass)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert validation_calls == 2
+    assert result["attempts"] == 2
+    assert save_path.exists()
+
+
+async def test_download_retries_after_transient_marker_beyond_cancellation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """非取消的瞬态标记携带者同样按可重试归类：分类器检查标记而非枚举类型。"""
+    from seedream_mcp.utils.core.inflight import TransientInflightError
+
+    class _ExternalTransientError(RuntimeError, TransientInflightError):
+        """非取消的标记携带者替身：源头混入标记声明瞬态。"""
+
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    validation_calls = 0
+
+    async def _transient_then_pass(url: str) -> None:
+        nonlocal validation_calls
+        del url
+        validation_calls += 1
+        if validation_calls == 1:
+            raise _ExternalTransientError("外部瞬态失败")
+
+    monkeypatch.setattr(manager, "_validate_url_for_request", _transient_then_pass)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert validation_calls == 2
+    assert result["attempts"] == 2
+    assert save_path.exists()
+
+
+async def test_download_transient_marker_on_oserror_wins_over_permanent_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """兼属 OSError 且携带永久 errno 的标记携带者按标记归类可重试，不被 OSError 永久分支拦为终态。"""
+    import errno
+
+    from seedream_mcp.utils.core.inflight import TransientInflightError
+
+    class _OSErrorTransientError(OSError, TransientInflightError):
+        """兼属 OSError 的标记携带者替身：锁定标记子句位于 OSError 分支之前。"""
+
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    validation_calls = 0
+
+    async def _enospc_transient_then_pass(url: str) -> None:
+        nonlocal validation_calls
+        del url
+        validation_calls += 1
+        if validation_calls == 1:
+            raise _OSErrorTransientError(errno.ENOSPC, "mock no space")
+
+    monkeypatch.setattr(manager, "_validate_url_for_request", _enospc_transient_then_pass)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert validation_calls == 2
+    assert result["attempts"] == 2
+    assert save_path.exists()
+
+
+# ==================== fsync 开关透传 ====================
+
+
+async def test_save_base64_image_fsync_true_calls_os_fsync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """fsync=True 经 AutoSaveManager 透传到 save_bytes 落盘，os.fsync 被调用。"""
+    fsync_calls = _install_fsync_counter(monkeypatch)
+
+    manager = AutoSaveManager(base_dir=tmp_path, fsync=True)
+    try:
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试图片")
+        assert result.success is True
+        assert result.local_path is not None
+        assert Path(result.local_path).read_bytes()
+        assert len(fsync_calls) == 1
+    finally:
+        await manager.close()
+
+
+async def test_save_image_fsync_true_passes_through_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """fsync=True 经 AutoSaveManager 透传到下载落盘路径，下载完成后 os.fsync 被调用。"""
+    fsync_calls = _install_fsync_counter(monkeypatch)
+
+    download_manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, download_manager, session)
+    manager = AutoSaveManager(base_dir=tmp_path, download_manager=download_manager, fsync=True)
+
+    async with manager:
+        result = await manager.save_image("https://example.com/img.png", prompt="测试图片")
+
+    assert result.success is True
+    assert result.local_path is not None
+    assert Path(result.local_path).read_bytes() == _PNG_BYTES
+    assert len(fsync_calls) == 1
+
+
+async def test_save_base64_image_fsync_default_off_skips_os_fsync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """默认 fsync 关闭：落盘成功但不调用 os.fsync，不产生同步刷盘开销。"""
+    fsync_calls = _install_fsync_counter(monkeypatch)
+
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试图片")
+        assert result.success is True
+        assert fsync_calls == []
+    finally:
+        await manager.close()
+
+
+# ==================== local_path 已 resolve 形态守护 ====================
+
+
+async def test_save_image_local_path_is_resolved_absolute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """URL 保存链 local_path 恒为已 resolve 的绝对路径，Web 消费端按纯词法相对化。"""
+    download_manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, download_manager, session)
+    manager = AutoSaveManager(base_dir=tmp_path, download_manager=download_manager)
+
+    async with manager:
+        result = await manager.save_image("https://example.com/img.png", prompt="测试图片")
+
+    assert result.success is True
+    assert result.local_path is not None
+    assert resolved_form_violation(result.local_path) is None
+
+
+async def test_save_base64_image_local_path_is_resolved_absolute(tmp_path: Path) -> None:
+    """Base64 保存链 local_path 与 URL 路径同口径，恒为已 resolve 的绝对路径。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试图片")
+
+        assert result.success is True
+        assert result.local_path is not None
+        assert resolved_form_violation(result.local_path) is None
+    finally:
+        await manager.close()
+
+
+async def test_save_image_degrades_on_unresolved_local_path_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """下载结果 file_path 非已 resolve 绝对形态时保存响亮失败降级，不外泄坏形态。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        async def fake_download(
+            url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+        ) -> dict[str, Any]:
+            del url, save_path, fsync, max_file_size
+            return {
+                "success": True,
+                "file_path": "rel/../out.png",
+                "file_size": 10,
+                "download_time": 0.0,
+                "content_type": "image/png",
+                "attempts": 1,
+            }
+
+        monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+
+        result = await manager.save_image("https://example.com/img.png", prompt="测试")
+
+        assert result.success is False
+        assert result.local_path is None
+        assert "local_path" in (result.error or "")
+        assert result.original_url == "https://example.com/img.png"
+    finally:
+        await manager.close()
+
+
+async def test_save_base64_image_degrades_on_unresolved_local_path_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """写入结果 file_path 非已 resolve 绝对形态时同样响亮失败降级，两路径同守护。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        def fake_save_bytes(
+            file_path: Path, data: bytes, overwrite: bool = False, fsync: bool = False
+        ) -> dict[str, Any]:
+            del file_path, overwrite, fsync
+            return {
+                "file_path": "rel/out.png",
+                "file_size": len(data),
+                "save_time": "2026-01-01T00:00:00",
+            }
+
+        monkeypatch.setattr(manager.file_manager, "save_bytes", fake_save_bytes)
+
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试")
+
+        assert result.success is False
+        assert result.local_path is None
+        assert "local_path" in (result.error or "")
+    finally:
+        await manager.close()
+
+
+# 保存流用例取共享违约表的 nul/ads-colon 两形态（可安全通过像素上限校验，open
+# 快速失败不触设备）；保留名形态不经保存流用例——Windows 上该名解析为控制台
+# 设备，像素上限校验的 Image.open 会打开设备而非快速失败。
+_MALFORMED_PATH_FORMS = form_violation_params(FORM_VIOLATION_CASES[2:4])
+
+
+@pytest.mark.parametrize(("path_factory", "reason"), form_violation_params())
+def test_auto_save_result_gate_rejects_form_violations(
+    tmp_path: Path, path_factory: Any, reason: str
+) -> None:
+    """构造门拒绝背离已 resolve 绝对形态的 local_path，违约原因进入错误文案。"""
+    with pytest.raises(AutoSaveError) as excinfo:
+        AutoSaveResult(
+            success=True,
+            original_url="https://example.com/a.png",
+            local_path=path_factory(tmp_path),
+        )
+
+    assert reason in str(excinfo.value)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 冒号与保留名是合法文件名字符")
+@pytest.mark.parametrize(
+    "local_path", ["/srv/con/a.png", "/data/a:b/img.png"], ids=["reserved-seg", "colon-seg"]
+)
+def test_auto_save_result_gate_accepts_posix_colon_and_reserved_segments(
+    local_path: str,
+) -> None:
+    """POSIX 数据根含 CON 段或冒号段时构造门放行，目录段合法性由运行平台判定。"""
+    result = AutoSaveResult(
+        success=True,
+        original_url="https://example.com/a.png",
+        local_path=local_path,
+    )
+
+    assert result.local_path == local_path
+
+
+@pytest.mark.parametrize(("path_factory", "reason"), _MALFORMED_PATH_FORMS)
+async def test_save_image_degrades_on_malformed_absolute_local_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, path_factory: Any, reason: str
+) -> None:
+    """下载结果 file_path 为 malformed-but-absolute 形态时构造门拒绝并降级，回退 URL。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        async def fake_download(
+            url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+        ) -> dict[str, Any]:
+            del url, save_path, fsync, max_file_size
+            return {
+                "success": True,
+                "file_path": path_factory(tmp_path),
+                "file_size": 10,
+                "download_time": 0.0,
+                "content_type": "image/png",
+                "attempts": 1,
+            }
+
+        monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+
+        result = await manager.save_image("https://example.com/img.png", prompt="测试")
+
+        assert result.success is False
+        assert result.local_path is None
+        assert "local_path" in (result.error or "")
+        assert reason in (result.error or "")
+        assert result.original_url == "https://example.com/img.png"
+    finally:
+        await manager.close()
+
+
+@pytest.mark.parametrize(("path_factory", "reason"), _MALFORMED_PATH_FORMS)
+async def test_save_base64_image_degrades_on_malformed_absolute_local_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, path_factory: Any, reason: str
+) -> None:
+    """写入结果 file_path 为 malformed-but-absolute 形态时同样拒绝降级，两路径同守护。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        def fake_save_bytes(
+            file_path: Path, data: bytes, overwrite: bool = False, fsync: bool = False
+        ) -> dict[str, Any]:
+            del file_path, overwrite, fsync
+            return {
+                "file_path": path_factory(tmp_path),
+                "file_size": len(data),
+                "save_time": "2026-01-01T00:00:00",
+            }
+
+        monkeypatch.setattr(manager.file_manager, "save_bytes", fake_save_bytes)
+
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试")
+
+        assert result.success is False
+        assert result.local_path is None
+        assert "local_path" in (result.error or "")
+        assert reason in (result.error or "")
+    finally:
+        await manager.close()
+
+
+def _install_unlink_recorder(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """monkeypatch os.unlink 为透传记录实现，返回被删除路径记录列表。"""
+    unlinked: list[str] = []
+    real_unlink = os.unlink
+
+    def _tracking_unlink(path: Any) -> None:
+        unlinked.append(str(path))
+        real_unlink(path)
+
+    monkeypatch.setattr(os, "unlink", _tracking_unlink)
+    return unlinked
+
+
+async def test_save_image_cleans_file_when_gate_rejects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """构造门在文件落盘后触发时先删除该文件再降级，对齐像素上限拒绝分支。"""
+    # 冒号形态仅 win32 违约，取 NUL 形态保持清理守护跨平台成立。
+    gate_path = str(tmp_path / "a\x00.png")
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        async def fake_download(
+            url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+        ) -> dict[str, Any]:
+            del url, save_path, fsync, max_file_size
+            return {
+                "success": True,
+                "file_path": gate_path,
+                "file_size": 10,
+                "download_time": 0.0,
+                "content_type": "image/png",
+                "attempts": 1,
+            }
+
+        monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+        unlinked = _install_unlink_recorder(monkeypatch)
+
+        result = await manager.save_image("https://example.com/img.png", prompt="测试")
+
+        assert result.success is False
+        assert result.original_url == "https://example.com/img.png"
+        assert gate_path in unlinked
+    finally:
+        await manager.close()
+
+
+async def test_save_base64_image_cleans_file_when_gate_rejects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Base64 路径构造门触发时的文件清理与 URL 路径同口径。"""
+    gate_path = str(tmp_path / "b\x00.png")
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        def fake_save_bytes(
+            file_path: Path, data: bytes, overwrite: bool = False, fsync: bool = False
+        ) -> dict[str, Any]:
+            del file_path, overwrite, fsync
+            return {
+                "file_path": gate_path,
+                "file_size": len(data),
+                "save_time": "2026-01-01T00:00:00",
+            }
+
+        monkeypatch.setattr(manager.file_manager, "save_bytes", fake_save_bytes)
+        unlinked = _install_unlink_recorder(monkeypatch)
+
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试")
+
+        assert result.success is False
+        assert gate_path in unlinked
+    finally:
+        await manager.close()

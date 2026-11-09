@@ -1,0 +1,716 @@
+"""图像输入校验：URL、本地文件路径与 Data URI 的格式与维度校验。
+
+涉及 I/O 的图像校验归本模块：本地文件经 no-follow 打开并复核常规文件形态后
+读取字节，交 PIL 解码校验格式与维度，Data URI 经 base64 解码后同样校验；
+纯参数校验（尺寸、水印、prompt 等）与宽高比常量归 validators。
+validate_image_path 组合读权限边界判定与统一规则校验。首次使用时进程级覆写
+PIL.Image.MAX_IMAGE_PIXELS 为 36M，
+嵌入本包的宿主进程须感知该副作用。
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import os
+import stat
+import sys
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from ...definitions.conventions import MAX_IMAGE_PIXELS
+from ..core.errors import (
+    ErrorText,
+    SeedreamValidationError,
+    as_detail,
+    as_plain,
+    as_text,
+    base_detail_error_text,
+    error_text,
+    raw_error_text,
+)
+from ..core.formats import (
+    EXTENSIONS_BY_PIL_FORMAT,
+    MIME_BY_EXTENSION,
+    SUPPORTED_IMAGE_EXTENSIONS,
+    SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
+    ensure_image_decoders_ready,
+    estimate_base64_decoded_size,
+    format_file_too_large,
+    parse_data_uri,
+)
+from ..core.validators import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
+from ..core.logs import get_logger
+from ..io.files import open_no_follow_read
+from ..io.path import (
+    get_read_scope,
+    has_null_byte,
+    has_windows_colon_component,
+    is_drive_relative,
+    is_unc_path,
+    is_within_any,
+    is_within_resolved,
+    is_windows_rooted_without_drive,
+    normalize_path,
+    resolve_images_root,
+)
+from .ref import classify_image_reference
+
+logger = get_logger()
+
+# 无法识别图像内容的固定错误文案。UnidentifiedImageError 的 str 嵌有 BytesIO
+# 对象的内存地址，直接拼入用户可见消息会把服务器侧对象地址带给调用方。
+UNIDENTIFIED_IMAGE_MESSAGE = "无法识别的图像内容"
+
+# 输入图像文件大小上限。
+MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024
+
+# 参考图即输入图像：最短边上限在此，总像素上限由 definitions/conventions 单一来源提供，
+# 宽高比上下限由 validators 持有。
+MIN_IMAGE_EDGE = 15
+
+# 本地候选定位结果：(resolve 后物理路径, stat)，缓存签名计算与读取链共用同一候选。
+LocalImageCandidate = tuple[Path, os.stat_result]
+
+
+def _unsupported_format_error(offender: str, value_label: str) -> SeedreamValidationError:
+    """组装格式不支持的统一拒绝错误，白名单子句单点拼接防两条拒绝路径文案漂移。"""
+    return SeedreamValidationError(
+        error_text(
+            "不支持的图像格式: {offender}，支持的格式: {supported}",
+            offender=as_text(offender),
+            supported=as_plain("/".join(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)),
+        ),
+        field="image",
+        value=value_label,
+    )
+
+
+def _validate_pil_format(pil_format: str | None, value_label: str) -> str:
+    """校验 PIL 识别的实际格式在受支持映射内，返回原样格式名供声明比对。
+
+    弱魔数格式（PPM/XBM 等）可被 PIL 完整解码，但借白名单扩展名取得的
+    白名单 MIME 标签与实际内容不符，送上游只会得到模糊报错或按内容嗅探处理，
+    须在本地拒绝。
+
+    Raises:
+        SeedreamValidationError: 实际格式不在受支持映射内。
+    """
+    if pil_format is None or pil_format not in EXTENSIONS_BY_PIL_FORMAT:
+        raise _unsupported_format_error((pil_format or "未知").lower(), value_label)
+    return pil_format
+
+
+def outbound_media_type(extension: str, actual_format: str) -> str | None:
+    """出站 MIME 标签一致性的单一判定点：扩展名与 PIL 实际格式同族返回对应 MIME，跨族返回 None。
+
+    Data URI 的声明子类型与本地文件的扩展名同为出站标签，经本函数
+    对实际格式做同族比对，使同一字节经两条路径得到同一判定；
+    映射直取使键缺失以 KeyError 显式暴露而非静默回落。
+    """
+    if extension not in EXTENSIONS_BY_PIL_FORMAT[actual_format]:
+        return None
+    return MIME_BY_EXTENSION[extension]
+
+
+def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> str:
+    """解码图像字节并校验格式、像素维度与数据完整性，供本地文件与 Data URI 两条路径复用。
+
+    image_bytes 为已读取的完整图像字节，value_label 用于错误信息。
+    实际格式不在受支持映射内或维度超限抛 SeedreamValidationError；
+    img.verify 校验像素数据完整性，头合法但数据截断的文件在本地即被拒；
+    解码与校验异常抛 PIL 原生类型，由调用方按所属模块的异常基类包装。
+    返回的实际格式名供调用方做出站标签比对。
+
+    Args:
+        image_bytes: 已读取的完整图像字节。
+        value_label: 出现在错误信息中的输入标识。
+
+    Returns:
+        PIL 识别的实际格式名，如 ``PNG``。
+
+    Raises:
+        SeedreamValidationError: 实际格式不受支持，或宽高下限、宽高比、总像素任一
+            约束不满足。
+    """
+    from PIL import Image
+
+    ensure_image_decoders_ready()
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        pil_format = _validate_pil_format(img.format, value_label)
+        _validate_image_dimensions(img.size[0], img.size[1], value_label)
+        # verify 不解码像素，仅校验数据完整性；本路径不复用解码结果，verify 后
+        # 图像不可用的限制无影响。
+        img.verify()
+        return pil_format
+
+
+def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> str:
+    """解码校验格式与维度并把 PIL 原生异常统一包装为固定文案的校验错误。
+
+    异常包装单一来源，透传解码得到的实际格式名。
+
+    Returns:
+        PIL 识别的实际格式名，如 ``PNG``。
+
+    Raises:
+        SeedreamValidationError: 实际格式不受支持、维度约束不满足或解码失败。
+    """
+    from PIL import Image
+
+    try:
+        return decode_and_validate_dimensions(image_bytes, field_value)
+    except SeedreamValidationError:
+        raise
+    except (ValueError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
+        # SyntaxError：Pillow 的 PNG 插件对损坏 chunk 抛原生 SyntaxError，归一为
+        # 校验错误，保留 field/value 元数据。
+        message: str | ErrorText = (
+            UNIDENTIFIED_IMAGE_MESSAGE
+            if is_unidentified_image_error(exc)
+            else base_detail_error_text("图像维度解析失败", exc)
+        )
+        raise SeedreamValidationError(message, field="image", value=field_value) from exc
+
+
+def is_unidentified_image_error(exc: BaseException) -> bool:
+    """判断异常是否为 PIL.UnidentifiedImageError。"""
+    from PIL import UnidentifiedImageError
+
+    return isinstance(exc, UnidentifiedImageError)
+
+
+def read_and_decode_local_image(
+    path: Path,
+    *,
+    field_value: str,
+    format_read_error: Callable[[OSError], str | ErrorText],
+) -> tuple[bytes, str]:
+    """no-follow 读取本地图像字节并做形态复核、限额复核、格式维度校验与出站标签一致性判定。
+
+    非常规文件由 files.open_no_follow_read 在打开单点拒绝。读取失败的文案由
+    调用方经 format_read_error 生成；超限、格式、维度与解码失败用
+    两条路径一致的固定文案，UnidentifiedImageError 用固定文案避免对象地址进入用户消息。
+    扩展名与实际格式跨族在此单点拒绝，validate 与 prepare 两个公共入口对
+    同一文件同判定。返回读取的字节与出站 MIME 标签，标签取扩展名映射：
+    HEIF 家族 ftyp brand 枚举非穷尽，魔数不可判的合法内容依赖扩展名定标签。
+
+    Args:
+        path: 已通过候选定位的本地文件路径。
+        field_value: 出现在错误信息中的调用方输入标识。
+        format_read_error: 读取阶段 OSError 的文案生成函数，返回 str 或 ErrorText。
+
+    Returns:
+        读取并通过限额复核的完整图像字节与经一致性判定的出站 MIME 标签。
+
+    Raises:
+        SeedreamValidationError: 读取失败、非常规文件、超出大小上限、扩展名与
+            实际内容跨族不一致或格式、维度与解码校验失败。
+    """
+    try:
+        with open_no_follow_read(path) as f:
+            # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存。
+            image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
+    except OSError as exc:
+        raise SeedreamValidationError(
+            format_read_error(exc), field="image", value=field_value
+        ) from exc
+    if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
+        raise SeedreamValidationError(
+            format_file_too_large(len(image_bytes), MAX_IMAGE_FILE_SIZE),
+            field="image",
+            value=field_value,
+        )
+    actual_format = decode_and_validate_image_bytes(image_bytes, field_value)
+    extension = path.suffix.lower()
+    media_type = outbound_media_type(extension, actual_format)
+    if media_type is None:
+        raise SeedreamValidationError(
+            error_text(
+                "文件扩展名与实际内容不一致: {extension}，实际 {actual}",
+                extension=as_text(extension),
+                actual=as_text(actual_format.lower()),
+            ),
+            field="image",
+            value=field_value,
+        )
+    return image_bytes, media_type
+
+
+def _get_validation_base_dir() -> Path:
+    """本地文件校验的基目录，取图片目录，与参考图读取链的解析基准一致。"""
+    return resolve_images_root()
+
+
+def _resolve_local_image_path(file_path: str) -> Path:
+    """解析本地图片路径，相对路径以图片目录为基准，绝对路径保持原样。
+
+    不做 ~ 前缀展开，与 resolve_local_image_candidate、normalize_path 的定位口径
+    一致。UNC 路径在 resolve 前抛 ValueError 拒绝，避免 Windows 下 resolve 触发
+    SMB 认证。
+
+    Raises:
+        ValueError: 路径为 UNC 形式，或为盘符相对、win32 有根无盘符这类绕过
+            基目录解析的形态，或 win32 分量含冒号即 NTFS 备用数据流形态。
+    """
+    if is_unc_path(file_path):
+        raise ValueError(
+            raw_error_text("拒绝 UNC 路径以避免触发 SMB 连接: {path}", path=as_text(file_path))
+        )
+    raw_path = Path(file_path)
+    # 盘符相对与有根无盘符形态的 pathlib 拼接会丢弃基目录重设锚点，静默逃逸图片目录。
+    if is_drive_relative(raw_path):
+        raise ValueError(
+            raw_error_text(
+                "拒绝驱动器相对路径以避免绕过基目录解析: {path}", path=as_text(file_path)
+            )
+        )
+    if is_windows_rooted_without_drive(raw_path):
+        raise ValueError(
+            raw_error_text(
+                "拒绝有根无盘符路径以避免绕过基目录解析: {path}", path=as_text(file_path)
+            )
+        )
+    # 分量含冒号是 NTFS 备用数据流形态，读取会命中同文件的另一数据流。
+    if has_windows_colon_component(file_path):
+        raise ValueError(
+            raw_error_text(
+                "拒绝路径分量含冒号以避免访问 NTFS 备用数据流: {path}", path=as_text(file_path)
+            )
+        )
+    if raw_path.is_absolute():
+        return raw_path.resolve()
+    return (_get_validation_base_dir() / raw_path).resolve()
+
+
+def _validate_url(url: str) -> str:
+    """验证 HTTP/HTTPS URL 的格式，scheme 与 netloc 须完整且不携带 userinfo 凭据。"""
+    try:
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in {"http", "https"} or not parsed.netloc:
+            raise SeedreamValidationError("无效的URL格式", field="image", value=url)
+        # 拒绝 userinfo，参考图 URL 不应携带凭据，且含凭据 URL 会被送往上游 API 致泄露。
+        if parsed.username or parsed.password:
+            raise SeedreamValidationError("URL 不允许携带用户名密码", field="image", value=url)
+        return url
+    except ValueError as e:
+        raise SeedreamValidationError(
+            base_detail_error_text("URL验证失败", e),
+            field="image",
+            value=url,
+        ) from e
+
+
+def image_candidate_stat(path: Path) -> os.stat_result | None:
+    """返回通过图片文件资格检查的 stat。
+
+    资格规则：常规文件、扩展名在支持白名单、大小不超过 MAX_IMAGE_FILE_SIZE；
+    任一不满足或 stat 失败返回 None。
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+        return None
+    if st.st_size > MAX_IMAGE_FILE_SIZE:
+        return None
+    return st
+
+
+def iter_local_candidates(
+    image: str, base_dir: str | Path, read_scope: list[Path]
+) -> Iterator[Path]:
+    """迭代界内的候选物理路径：绝对路径判读权限，相对路径仅限图片目录内。
+
+    绝对路径直接作为候选，相对路径以 base_dir（图片目录）拼接；候选 resolve 一次
+    后按形态判定：绝对候选与读权限集合逐项比较，相对候选须落在图片目录之内，
+    ``..`` 与符号链接逃逸同样被拦截。UNC 前缀的候选不 resolve，避免在 Windows
+    触发 SMB 认证。
+
+    Args:
+        image: 输入路径字符串，可为绝对或相对路径。
+        base_dir: 相对路径的解析基准与边界，为图片目录。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 图片目录）。
+
+    Yields:
+        resolve 后落在对应边界内的候选物理路径。
+    """
+    is_absolute = os.path.isabs(image)
+    raw_path = Path(image)
+    # win32 有根无盘符形态（/foo）的 pathlib 拼接锚定重置会丢弃 base_dir 落到所在
+    # 盘盘根，按输入形态前置跳过。POSIX 该形态即合法绝对路径。
+    if is_windows_rooted_without_drive(raw_path):
+        return
+    candidates = [raw_path] if is_absolute else [Path(base_dir) / image]
+    for candidate in candidates:
+        # 驱动器相对形态（C:foo）pathlib 拼接会丢弃 base_dir 锚定到该盘进程 CWD。
+        if is_drive_relative(candidate):
+            continue
+        # UNC 根拼接出的候选仍以 UNC 前缀开头，resolve 会触发 SMB 连接，跳过。
+        if is_unc_path(str(candidate)):
+            continue
+        try:
+            resolved_candidate = candidate.resolve()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if is_absolute:
+            # 基集合只用一次，判定走 is_within_any，内部逐基现算恰宜。
+            if is_within_any(resolved_candidate, read_scope):
+                yield resolved_candidate
+        elif is_within_resolved(resolved_candidate, Path(base_dir)):
+            yield resolved_candidate
+
+
+def resolve_local_image_candidate(
+    image: str,
+    *,
+    images_root: Path | None = None,
+    read_scope: list[Path] | None = None,
+) -> LocalImageCandidate | None:
+    """定位可读取的候选图片文件：绝对路径判读权限，相对路径仅限图片目录内。
+
+    界内候选逐一做 image_candidate_stat 资格检查，返回首个命中的
+    (resolve 后物理路径, stat)，未命中返回 None。ImagePreparer 的缓存签名与
+    inputs 的读取路径共用此定位，保证签名与实际读取锁定同一文件。
+    images_root 与 read_scope 未提供时按当前请求现取；调用方在一次请求内多次
+    定位时传入 get_read_context 的共享结果，消除重复求值。
+
+    Args:
+        image: 输入路径字符串，可为绝对或相对路径。
+        images_root: 已 resolve 的图片目录，相对路径的解析基准。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 图片目录）。
+
+    Returns:
+        首个命中候选的 (物理路径, stat)；无命中时为 None。
+
+    Raises:
+        SeedreamValidationError: 输入携带不支持的 scheme（win32 单字母盘符除外）、
+            win32 路径分量含冒号即 NTFS 备用数据流形态、路径含空字节或 win32
+            有根无盘符形态时抛出，均先于候选构造与文件读取。
+    """
+    # UNC 的 resolve 在 Windows 会触发 SMB 认证，须在候选构造前判定；反斜杠形态
+    # 的 UNC 在 POSIX 上非绝对路径，先拼后查会丢失 UNC 前缀。
+    if is_unc_path(image):
+        return None
+    # classify 将 http(s)（不论斜杠数）与 data 归为非本地，file:// 等其余 scheme
+    # 形态落入本地分支；先按形态给出诊断，不落入冒号分量拒绝被误报为 NTFS 备用
+    # 数据流。单字母前缀仅 win32 按盘符放行（C://x 为冗余斜杠的合法路径），其余
+    # 平台与空前缀均按不支持的 scheme 拒绝，不落本地分支产出误导性「文件不存在」。
+    if "://" in image:
+        scheme = image.partition("://")[0]
+        if not (len(scheme) == 1 and sys.platform == "win32"):
+            raise SeedreamValidationError(
+                error_text(
+                    "仅支持图像 URL（http/https）、Data URI 或本地路径: {image}",
+                    image=as_text(image),
+                ),
+                field="image",
+                value=image,
+            )
+    # 分量含冒号是 NTFS 备用数据流形态，流名不参与越界判定，界内文件名携带流
+    # 后缀时读取命中的是同文件的另一数据流。参考图链与浏览、保存链拒绝口径一致。
+    if has_windows_colon_component(image):
+        raise SeedreamValidationError(
+            error_text(
+                "拒绝参考图路径分量含冒号以避免访问 NTFS 备用数据流: {image}",
+                image=as_text(image),
+            ),
+            field="image",
+            value=image,
+        )
+    # 空字节在候选构造前显式拒绝：stat 对其抛 ValueError 而非 OSError，会穿透
+    # 候选资格检查归为未知错误。
+    if has_null_byte(image):
+        raise SeedreamValidationError(
+            error_text("路径含空字节: {image}", image=as_text(image)),
+            field="image",
+            value=image,
+        )
+    # 有根无盘符形态在候选定位入口显式拒绝，避免退化为含糊的找不到文件。
+    if is_windows_rooted_without_drive(Path(image)):
+        raise SeedreamValidationError(
+            error_text("拒绝有根无盘符路径以避免绕过基目录解析: {image}", image=as_text(image)),
+            field="image",
+            value=image,
+        )
+    if images_root is None:
+        images_root = resolve_images_root()
+    if read_scope is None:
+        read_scope = get_read_scope()
+    for resolved_candidate in iter_local_candidates(image, images_root, read_scope):
+        st = image_candidate_stat(resolved_candidate)
+        if st is not None:
+            return resolved_candidate, st
+    return None
+
+
+def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
+    """校验图像宽高下限、宽高比与总像素约束，供本地文件与 Data URI 两条路径复用。"""
+    if width < MIN_IMAGE_EDGE or height < MIN_IMAGE_EDGE:
+        raise SeedreamValidationError(
+            error_text("图像宽高长度至少{min_edge}px", min_edge=as_plain(MIN_IMAGE_EDGE)),
+            field="image",
+            value=value,
+        )
+
+    ratio = width / height
+    if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
+        raise SeedreamValidationError(
+            error_text(
+                "图像宽高比需在[{min_ratio}, {max_ratio}]范围内",
+                min_ratio=as_plain(MIN_IMAGE_RATIO),
+                max_ratio=as_plain(MAX_IMAGE_RATIO),
+            ),
+            field="image",
+            value=value,
+        )
+
+    if width * height > MAX_IMAGE_PIXELS:
+        raise SeedreamValidationError(
+            error_text("图像总像素不能超过 {max_pixels}", max_pixels=as_plain(MAX_IMAGE_PIXELS)),
+            field="image",
+            value=value,
+        )
+
+
+def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
+    """验证本地文件路径的存在性、文件类型、扩展名与大小，默认还校验图像内容格式、扩展名一致性与维度。
+
+    越界判定由调用方按读权限集合完成：本函数解析相对路径的基目录仅为图片目录，
+    函数内不做边界断言以免误拒读权限内授权的合法路径。格式与维度校验的读取经
+    no-follow 打开最终分量并复核常规文件形态；path 已由 _resolve_local_image_path
+    resolve 跟随符号链接，O_NOFOLLOW 仅防 resolve 与 open 之间的 TOCTOU 窗口，
+    主要越界防御由调用方的边界 resolve 与比较提供。
+
+    Args:
+        file_path: 本地文件的完整路径。
+        skip_dimensions: 是否跳过图像像素维度校验。
+
+    Returns:
+        文件的绝对路径。
+
+    Raises:
+        SeedreamValidationError: 文件不存在、格式不支持、扩展名与实际内容不一致
+            或尺寸超限时抛出。
+    """
+    try:
+        path = _resolve_local_image_path(file_path)
+
+        # 单次 stat 完成存在性、文件类型与大小检查。
+        try:
+            stat_result = path.stat()
+        except FileNotFoundError:
+            raise SeedreamValidationError(
+                error_text("文件不存在: {path}", path=as_text(path)),
+                field="image",
+                value=file_path,
+            )
+        except OSError as exc:
+            raise SeedreamValidationError(
+                error_text(
+                    "无法访问文件: {path} -> {reason}",
+                    path=as_text(path),
+                    reason=as_detail(exc),
+                ),
+                field="image",
+                value=file_path,
+            ) from exc
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise SeedreamValidationError(
+                error_text("路径不是文件: {path}", path=as_text(path)),
+                field="image",
+                value=file_path,
+            )
+
+        if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+            raise _unsupported_format_error(path.suffix, file_path)
+
+        file_size = stat_result.st_size
+        if file_size > MAX_IMAGE_FILE_SIZE:
+            raise SeedreamValidationError(
+                format_file_too_large(file_size, MAX_IMAGE_FILE_SIZE),
+                field="image",
+                value=file_path,
+            )
+
+        if not skip_dimensions:
+            read_and_decode_local_image(
+                path,
+                field_value=file_path,
+                format_read_error=lambda exc: error_text(
+                    "无法读取文件: {path} -> {reason}", path=as_text(path), reason=as_detail(exc)
+                ),
+            )
+
+        return str(path.absolute())
+
+    except (OSError, ValueError, RuntimeError, SyntaxError) as e:
+        raise SeedreamValidationError(
+            base_detail_error_text("文件路径验证失败", e),
+            field="image",
+            value=file_path,
+        ) from e
+
+
+# Data URI 允许的格式标识白名单，派生自 SUPPORTED_IMAGE_EXTENSIONS，避免每次
+# 校验重建集合。
+_DATA_URI_ALLOWED_FORMATS: frozenset[str] = frozenset(
+    ext.lstrip(".") for ext in SUPPORTED_IMAGE_EXTENSIONS
+)
+
+
+def _validate_data_uri(data_uri: str) -> str:
+    """验证 Data URI 的格式、可解码性、大小、像素维度与声明格式真实性。
+
+    校验通过后把 media type 归一化为小写标准 MIME（``image/jpg`` 一并归一为
+    ``image/jpeg``）重建 Data URI 返回，使送往上游的载荷恒为官方要求的标准形态，
+    用户侧大小写误写不再依赖上游报错。
+    """
+    try:
+        # 经 formats.parse_data_uri 统一拆分。
+        media_type, b64, is_base64 = parse_data_uri(data_uri)
+        if media_type is None or not b64:
+            raise SeedreamValidationError("Data URI 格式无效", field="image", value=data_uri)
+
+        if not is_base64 or not media_type.lower().startswith("image/"):
+            raise SeedreamValidationError(
+                "Data URI 必须为 data:image/<格式>;base64, 前缀（scheme 大小写不敏感）",
+                field="image",
+                value=data_uri,
+            )
+
+        # 格式标识取 media_type 斜杠后部分。
+        fmt = media_type.lower().split("image/")[-1]
+        if fmt not in _DATA_URI_ALLOWED_FORMATS:
+            raise SeedreamValidationError(
+                error_text("不支持的Data URI图片格式: {format}", format=as_text(fmt)),
+                field="image",
+                value=data_uri,
+            )
+        # 官方要求格式小写；标准 MIME 子类型经 formats 单一映射派生，jpg 随之归一为 jpeg。
+        canonical_fmt = MIME_BY_EXTENSION[f".{fmt}"].split("/", 1)[1]
+
+        # 先按 base64 文本长度估算解码后大小，避免对巨型文本先解码触发内存放大；
+        # 估算经 formats 单一估算器收口。
+        estimated_bytes = estimate_base64_decoded_size(b64, MAX_IMAGE_FILE_SIZE)
+        if estimated_bytes > MAX_IMAGE_FILE_SIZE:
+            raise SeedreamValidationError(
+                format_file_too_large(estimated_bytes, MAX_IMAGE_FILE_SIZE, label="数据"),
+                field="image",
+                value=data_uri,
+            )
+
+        try:
+            raw = base64.b64decode(b64, validate=True)
+        except ValueError as e:
+            raise SeedreamValidationError(
+                base_detail_error_text("Base64 解码失败", e),
+                field="image",
+                value=data_uri,
+            ) from e
+
+        size_bytes = len(raw)
+        if size_bytes > MAX_IMAGE_FILE_SIZE:
+            raise SeedreamValidationError(
+                format_file_too_large(size_bytes, MAX_IMAGE_FILE_SIZE, label="数据"),
+                field="image",
+                value=data_uri,
+            )
+
+        actual_format = decode_and_validate_image_bytes(raw, data_uri)
+        media_type = outbound_media_type(f".{canonical_fmt}", actual_format)
+        if media_type is None:
+            raise SeedreamValidationError(
+                error_text(
+                    "Data URI 声明格式与实际内容不一致: 声明 {declared}，实际 {actual}",
+                    declared=as_text(canonical_fmt),
+                    actual=as_text(actual_format.lower()),
+                ),
+                field="image",
+                value=data_uri,
+            )
+
+        return f"data:{media_type};base64,{b64}"
+
+    except (OSError, ValueError, SyntaxError) as e:
+        raise SeedreamValidationError(
+            base_detail_error_text("Data URI 验证失败", e),
+            field="image",
+            value=data_uri,
+        ) from e
+
+
+def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
+    """验证图像输入的有效性，支持 HTTP/HTTPS URL、本地文件路径与 Data URI 三种格式。
+
+    本函数对本地文件路径不做读权限越界校验，界内判定由调用方先行完成（读取链经
+    候选定位、诊断链经 validate_image_path），避免本地路径绕过读取边界。
+
+    Args:
+        image: 图像 URL、文件路径或 Data URI。
+        skip_dimensions: 是否跳过本地文件的像素维度校验。
+
+    Returns:
+        验证通过的图像输入：URL 原样返回，本地文件为绝对路径，Data URI 以归一化的 media type 重建返回。
+
+    Raises:
+        SeedreamValidationError: 图像输入格式无效或不可访问时抛出。
+    """
+    if not isinstance(image, str):
+        raise SeedreamValidationError("图像输入必须是字符串", field="image", value=image)
+    if not image:
+        raise SeedreamValidationError("图像路径不能为空", field="image", value=image)
+
+    image = image.strip()
+    if not image:
+        raise SeedreamValidationError("图像路径不能为空", field="image", value=image)
+
+    kind = classify_image_reference(image)
+    if kind == "data_uri":
+        return _validate_data_uri(image)
+    if kind == "url":
+        return _validate_url(image)
+    return _validate_file_path(image, skip_dimensions=skip_dimensions)
+
+
+def validate_image_path(path: str, skip_dimensions: bool = False) -> str | None:
+    """诊断图片路径的校验失败原因，有效或非本地引用返回 None。
+
+    HTTP(S) URL 与 Data URI 为非本地引用，无读取范围可言，恒无错误；Data URI
+    的内容校验由 validate_image_input 承担。
+
+    Args:
+        path: 图片文件路径；HTTP(S) URL 与 Data URI 恒无错误。
+        skip_dimensions: 是否跳过图片像素维度校验。
+
+    Returns:
+        错误消息；有效时为 None。
+    """
+    try:
+        path = path.strip()
+        kind = classify_image_reference(path)
+        if kind in ("url", "data_uri"):
+            return None
+
+        normalized_path = normalize_path(path, str(resolve_images_root()))
+        # 基集合只用一次，判定走 is_within_any，内部逐基现算恰宜。
+        if not is_within_any(normalized_path, get_read_scope()):
+            return "路径不在读取范围内"
+
+        try:
+            validate_image_input(str(normalized_path), skip_dimensions=skip_dimensions)
+            return None
+        except SeedreamValidationError as e:
+            return e.message
+
+    except Exception as e:
+        logger.opt(exception=True).error("路径验证失败 {}: {}", path, e)
+        # 诊断链返回 str 契约不变：结构化构造后取 raw 渲染，嵌入层（inputs）再整体
+        # 以 as_detail 参数进入最终错误文本。
+        return raw_error_text("路径验证错误: {reason}", reason=as_detail(e))

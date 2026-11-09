@@ -260,6 +260,8 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 
 鉴权方式：网页本身无需令牌即可打开；网页的功能接口在部署配置了令牌时需要验证——在页面中输入后令牌仅存于当前标签页会话，关闭标签页即失效，下次使用需重新输入，不会出现在网址中。仅本机使用且未配置令牌时，全程无需输入任何东西，接口也只接受来自本页面与本机程序的请求。
 
+上传较大的图片（如参考图）时，服务器会限制同时处理的大上传数量，并为每次上传计时——这些开箱即用，无需配置。只有当网络较慢、频繁遇到 408 报错时，才需要在环境变量中调大 `SEEDREAM_BODY_READ_TIMEOUT`（默认 300 秒）。
+
 ## 🛠️ 可用工具
 
 <details>
@@ -696,7 +698,7 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
 
 ```bash
 # 配置来源
---config-file TEXT                                 # .env 配置文件路径；指定后不再读取项目根与当前目录的 .env
+--config-file TEXT                                 # .env 配置文件路径，留空视同未指定；指定后不再读取项目根与当前目录的 .env
 
 # 必需配置
 --api-key TEXT                                     # API 密钥（推荐用环境变量 ARK_API_KEY；命令行传入会留在进程列表与 shell 历史中）

@@ -203,9 +203,6 @@ temp/
 # 运行时产物目录
 .seedream/
 
-# 项目构建产物
-seedream_mcp.egg-info/
-
 # 代理/说明文件
 .codex/
 .claude/

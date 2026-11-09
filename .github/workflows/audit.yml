@@ -28,7 +28,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - name: 📜 Export locked requirements
+      - name: 📄 Export locked requirements
         # 审计对象为第三方依赖，不导出项目自身与哈希
         run: uv export --locked --no-emit-project --no-hashes --format requirements-txt -o requirements.txt
 

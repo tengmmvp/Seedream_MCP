@@ -260,6 +260,8 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 
 鑑權方式：網頁本身無需權杖即可開啟；網頁的功能介面在部署設定了權杖時需要驗證——在頁面中輸入後權杖僅存於目前分頁的工作階段，關閉分頁即失效，下次使用需重新輸入，不會出現在網址中。僅本機使用且未設定權杖時，全程無需輸入任何東西，介面也只接受來自本頁面與本機程式的請求。
 
+上傳較大的圖片（如參考圖）時，伺服器會限制同時處理的大型上傳數量，並為每次上傳計時——這些開箱即用，無需設定。只有當網路較慢、頻繁遇到 408 錯誤時，才需要在環境變數中調大 `SEEDREAM_BODY_READ_TIMEOUT`（預設 300 秒）。
+
 ## 🛠️ 可用工具
 
 <details>
@@ -696,7 +698,7 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
 
 ```bash
 # 設定來源
---config-file TEXT                                 # .env 設定檔路徑；指定後不再讀取專案根與目前目錄的 .env
+--config-file TEXT                                 # .env 設定檔路徑，留空視同未指定；指定後不再讀取專案根與目前目錄的 .env
 
 # 必要設定
 --api-key TEXT                                     # API 金鑰（推薦使用環境變數 ARK_API_KEY；命令列傳入會留在行程清單與 shell 歷史中）

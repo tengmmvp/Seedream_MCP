@@ -1,0 +1,1009 @@
+"""Seedream MCP 路径处理工具：目录体系的位置求值与读权限判定。
+
+位置求值按 docs/development/directory-system.md：数据根目录 =
+SEEDREAM_DATA_ROOT > 工作根目录；工作根目录 = MCP Roots 首项 >
+SEEDREAM_WORKSPACE_ROOT > 进程启动目录 > 用户主目录；图片目录恒为
+``<数据根目录>/.seedream/images``。
+读权限 = 工作区 ∪ 图片目录。
+提供路径规范化、越界判定原语，拦截包含 ``..`` 或经由符号链接指向权限范围
+之外的路径。MCP Roots 的会话取回与应用位于同组 roots 模块，工作区状态经
+本模块的上下文变量共享，置位与复位走 apply_workspace_roots/reset_workspace_roots。
+"""
+
+from __future__ import annotations
+
+import errno
+import os
+import sys
+import tempfile
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import Iterable
+from contextvars import ContextVar, Token
+from pathlib import Path
+from typing import Callable, Generic, NamedTuple, TypeVar
+
+from ..core.errors import (
+    SeedreamConfigError,
+    as_detail,
+    as_plain,
+    as_text,
+    assemble_error_segments,
+    error_text,
+    raw_error_text,
+)
+from ...definitions.conventions import DATA_DIR_NAME
+from ..core.logs import EarlyMessageBuffer, get_logger
+from ..core.bounded_store import store_bounded_entry
+
+logger = get_logger()
+
+_WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
+    "seedream_workspace_roots",
+    default=None,
+)
+
+
+def apply_workspace_roots(roots: tuple[Path, ...]) -> Token[tuple[Path, ...] | None]:
+    """置位当前请求的工作区根集合，返回复位 token；写入口供 roots 专用。"""
+    return _WORKSPACE_ROOTS_VAR.set(roots)
+
+
+def reset_workspace_roots(token: Token[tuple[Path, ...] | None]) -> None:
+    """按 apply_workspace_roots 返回的 token 复位工作区根集合。"""
+    _WORKSPACE_ROOTS_VAR.reset(token)
+
+
+# Windows 保留设备名清单：CON/NUL/COM1 等作最终分量时被解释为设备而非文件。
+WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    }
+)
+
+
+def is_windows_reserved_name(name: str) -> bool:
+    """判断文件名是否命中 Windows 保留设备名。
+
+    Windows 解析前剥离前导点与首尾空格并取首个点前词干，CON.txt、con. 与 .CON
+    同样命中。
+
+    Args:
+        name: 待判定的文件名。
+
+    Returns:
+        词干命中保留设备名清单返回 True。
+    """
+    normalized_stem = name.lstrip(". ").split(".", 1)[0].strip(". ")
+    return normalized_stem.upper() in WINDOWS_RESERVED_NAMES
+
+
+def has_null_byte(path: str) -> bool:
+    """空字节在任何文件系统都不是合法路径分量。"""
+    return "\x00" in path
+
+
+# 已 resolve 回退根的进程级缓存：首次探测结果复用到进程结束，消除回退边界下
+# 每次位置求值的重复探测。
+_fallback_root: Path | None = None
+
+# 已 resolve 回退根的进程级缓存，键为配置原始字符串，消除回退边界下每次文件访问的
+# 重复 expanduser/resolve 文件系统调用。仅缓存 expanduser 后为绝对路径的配置值：
+# 相对路径的 resolve 结果随进程 CWD 变化，须每次现算；解析失败不缓存，下次访问
+# 重试。活动配置变更时经 clear_resolved_env_root_cache 显式失效。
+_RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
+
+# 已 resolve 数据根目录与图片目录的进程级缓存，缓存口径与回退根一致。键三类：
+# "data-root:"+数据根目录声明、"explicit-images:"+数据根目录声明、
+# "default-images:"+工作根目录字符串，前缀隔离防撞车；默认分支的键含客户端可控
+# 的 roots 字符串，按 LRU 限容防轮换 roots 的无界增长。活动配置变更时随
+# clear_resolved_env_root_cache 一并失效。
+_DATA_ROOT_CACHE_MAX_ENTRIES = 64
+
+
+_CacheValueT = TypeVar("_CacheValueT")
+
+
+class ResolveResultCache(Generic[_CacheValueT]):
+    """带锁与可选 TTL 的 LRU 缓存。
+
+    映射协议供测试的预热与断言，同样经锁与容量上限约束；TTL 为 None 时条目
+    仅经 clear 与容量驱逐失效。
+    """
+
+    def __init__(self, max_entries: int, ttl_seconds: float | None = None) -> None:
+        self._entries: OrderedDict[str, tuple[_CacheValueT, float]] = OrderedDict()
+        self._max_entries = max_entries
+        self._ttl_seconds = ttl_seconds
+        self._lock = threading.Lock()
+
+    def get_or_resolve(self, cache_key: str, resolver: Callable[[], _CacheValueT]) -> _CacheValueT:
+        """命中且未过期返回缓存值，否则执行 resolver 并写入。"""
+        now = time.monotonic() if self._ttl_seconds is not None else 0.0
+        with self._lock:
+            hit = self._entries.get(cache_key)
+            if hit is not None:
+                resolved, captured_at = hit
+                if self._ttl_seconds is None or now - captured_at < self._ttl_seconds:
+                    self._entries.move_to_end(cache_key)
+                    return resolved
+                del self._entries[cache_key]
+        resolved = resolver()
+        with self._lock:
+            self._store(cache_key, resolved)
+        return resolved
+
+    def fresh_keys(self) -> set[str]:
+        """单次锁定小节遍历缓存条目，返回未过 TTL 的键快照，不改变驱逐序。"""
+        now = time.monotonic() if self._ttl_seconds is not None else 0.0
+        with self._lock:
+            return {
+                cache_key
+                for cache_key, (_, captured_at) in self._entries.items()
+                if self._ttl_seconds is None or now - captured_at < self._ttl_seconds
+            }
+
+    def update(self, pairs: Iterable[tuple[str, _CacheValueT]]) -> None:
+        """批量写入条目，共用单次时间戳与单个锁定小节，免逐键锁往返。"""
+        now = time.monotonic() if self._ttl_seconds is not None else 0.0
+        with self._lock:
+            for cache_key, value in pairs:
+                store_bounded_entry(self._entries, cache_key, (value, now), self._max_entries)
+
+    def clear(self) -> None:
+        """清空全部条目。"""
+        with self._lock:
+            self._entries.clear()
+
+    def _store(self, cache_key: str, value: _CacheValueT) -> None:
+        """以写入时刻时间戳落条目、无 TTL 记 0，并刷新 LRU 位，超容逐出最旧条目；须在持锁下调用。"""
+        now = time.monotonic() if self._ttl_seconds is not None else 0.0
+        store_bounded_entry(self._entries, cache_key, (value, now), self._max_entries)
+
+    def __contains__(self, cache_key: object) -> bool:
+        with self._lock:
+            return cache_key in self._entries
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def __getitem__(self, cache_key: str) -> _CacheValueT:
+        with self._lock:
+            return self._entries[cache_key][0]
+
+    def __setitem__(self, cache_key: str, value: _CacheValueT) -> None:
+        with self._lock:
+            self._store(cache_key, value)
+
+
+_DATA_ROOT_RESOLVE_CACHE = ResolveResultCache[Path](_DATA_ROOT_CACHE_MAX_ENTRIES)
+
+# 位置声明提供者：由 config 模块加载时注入，返回活动配置的原始字符串，未配置
+# 返回 None；依赖方向为 config 向下注入，本模块不向上 import。两个声明各占一槽，
+# 键为对应的环境变量名，取值先调提供者，未注册即 config 模块未加载时回退读取
+# 同名环境变量。
+EnvValueProvider = Callable[[], str | None]
+
+_WORKSPACE_ROOT_ENV = "SEEDREAM_WORKSPACE_ROOT"
+_DATA_ROOT_ENV = "SEEDREAM_DATA_ROOT"
+
+# 读取范围授权指引的环境变量尾段，env 改名时单点维护。
+READ_SCOPE_AUTH_ENV_HINT = f"{_WORKSPACE_ROOT_ENV} 或 {_DATA_ROOT_ENV}"
+
+
+def read_scope_denial_message(noun: str) -> str:
+    """构造越出读取范围的拒绝消息，noun 取目录或路径。"""
+    return assemble_error_segments(
+        error_text("{noun}不在读取范围内", noun=as_plain(noun)),
+        error_text(
+            "可通过客户端工作区（MCP Roots）、{env_hint} 授权该{noun}",
+            env_hint=as_plain(READ_SCOPE_AUTH_ENV_HINT),
+            noun=as_plain(noun),
+        ),
+    )
+
+
+# 相对路径仅限图片目录的策略提示。
+RELATIVE_PATH_CONFINEMENT_MESSAGE = "相对路径仅限图片保存目录内，其他位置请使用绝对路径"
+
+
+_env_value_providers: dict[str, EnvValueProvider] = {}
+
+
+# ==================== 工作区根目录管理 ====================
+
+
+def _configured_env_value(env_var: str) -> str | None:
+    """取位置声明的原始配置值：注册的提供者优先，未注册时回退同名环境变量。"""
+    provider = _env_value_providers.get(env_var)
+    if provider is not None:
+        return provider()
+    env_value = os.getenv(env_var)
+    return env_value.strip() if env_value else None
+
+
+def register_env_workspace_root_provider(provider: EnvValueProvider) -> None:
+    """注册工作区根目录提供者，config 侧在模块加载时注入取值入口。
+
+    Args:
+        provider: 返回活动配置的 workspace_root 原始字符串，未配置返回 None。
+    """
+    _env_value_providers[_WORKSPACE_ROOT_ENV] = provider
+
+
+def register_data_root_provider(provider: EnvValueProvider) -> None:
+    """注册数据根目录提供者，config 侧在模块加载时注入取值入口。
+
+    Args:
+        provider: 返回活动配置的 data_root 原始字符串，未配置返回 None。
+    """
+    _env_value_providers[_DATA_ROOT_ENV] = provider
+
+
+def clear_resolved_env_root_cache() -> None:
+    """清空已 resolve 配置路径与回退根的进程级缓存。
+
+    覆盖回退工作区根、数据根目录与回退根三处缓存。活动配置变更时由
+    config 侧调用，测试隔离经 conftest 复位协议调用，使后续访问按新配置与
+    当前环境重新解析。
+    """
+    global _fallback_root
+    _RESOLVED_ENV_ROOT_CACHE.clear()
+    _DATA_ROOT_RESOLVE_CACHE.clear()
+    _fallback_root = None
+    # 配置变化后缓存的回退提示一并作废，防陈旧提示混入下次 drain。
+    _START_MESSAGES.clear()
+
+
+def _resolve_with_cache(cache_key: str, resolver: Callable[[], Path]) -> Path:
+    """按键缓存 resolve 结果，命中移到链尾保持真 LRU，超容逐出最旧条目。"""
+    return _DATA_ROOT_RESOLVE_CACHE.get_or_resolve(cache_key, resolver)
+
+
+def resolve_cached_data_root(configured_dir: str) -> Path:
+    """解析已显式配置的数据根目录，按 "data-root:"+配置串做进程级缓存。
+
+    缓存口径与回退工作区根一致，随 clear_resolved_env_root_cache 一并失效。
+
+    Args:
+        configured_dir: 配置的数据根目录原始字符串。
+
+    Returns:
+        resolve 后的数据根目录。
+    """
+    expanded_dir = Path(configured_dir).expanduser()
+    if not expanded_dir.is_absolute():
+        return resolve_rejecting_cycle(expanded_dir)
+    return _resolve_with_cache(
+        f"data-root:{configured_dir}", lambda: resolve_rejecting_cycle(expanded_dir)
+    )
+
+
+def _reject_root_landing(resolved: Path, path_display: str) -> None:
+    """落点为文件系统根时抛 ValueError，用户路径与配置声明两入口同口径。"""
+    if not resolved.name:
+        raise ValueError(
+            raw_error_text("拒绝落点为文件系统根的路径: {path}", path=as_text(path_display))
+        )
+
+
+def resolve_rejecting_cycle(path: Path) -> Path:
+    """单次严格 realpath 解析，仅不可解析的链接失败（ELOOP 或 Windows 1921）抛 OSError 交调用方归档。
+
+    该组错误码同时覆盖链接环与超过系统解析深度的合法深链（Windows 约 64 跳、
+    Linux 约 40 层），超深链与环同码不可区分、被同口径拒绝；其余 OSError（尾段
+    未创建、前缀非目录、权限等环境性错误）一律回退非严格 resolve，
+    保持旧容忍语义，resolve 自身失败自然传播。
+    落点为文件系统根抛 ValueError，与 normalize_path 落点门同口径：根不可声明、不可寻址。
+    """
+    try:
+        resolved = Path(os.path.realpath(path, strict=True))
+    except OSError as e:
+        if e.errno == errno.ELOOP or getattr(e, "winerror", None) == 1921:
+            raise
+        resolved = path.resolve()
+    _reject_root_landing(resolved, str(path))
+    return resolved
+
+
+def resolve_cached_default_images_root(workspace_root: Path) -> Path:
+    """解析工作根目录下的默认图片目录，按 "default-images:"+工作根目录字符串做进程级缓存。
+
+    Args:
+        workspace_root: 已 resolve 的工作根目录。
+
+    Returns:
+        resolve 后的 workspace_root/.seedream/images。
+    """
+    return _resolve_with_cache(
+        f"default-images:{workspace_root}",
+        lambda: resolve_rejecting_cycle(workspace_root / DATA_DIR_NAME / "images"),
+    )
+
+
+def resolve_cached_explicit_images_root(configured_dir: str) -> Path:
+    """解析显式声明的图片目录整条路径，绝对声明按 "explicit-images:"+配置串做进程级缓存。
+
+    相对声明不缓存，与 resolve_cached_data_root 的缓存口径一致，按调用时的
+    进程位置重新解析。
+
+    Args:
+        configured_dir: 配置的数据根目录原始字符串。
+
+    Returns:
+        resolve 后的 <数据根目录>/.seedream/images；.seedream 为符号链接时
+        尾部 resolve 使结果与其指向一致。
+    """
+    expanded_dir = Path(configured_dir).expanduser()
+    if not expanded_dir.is_absolute():
+        return resolve_rejecting_cycle(expanded_dir / DATA_DIR_NAME / "images")
+    return _resolve_with_cache(
+        f"explicit-images:{configured_dir}",
+        lambda: resolve_rejecting_cycle(
+            resolve_cached_data_root(configured_dir) / DATA_DIR_NAME / "images"
+        ),
+    )
+
+
+def _resolve_configured_workspace_root(configured_root: str) -> Path:
+    """解析工作区根目录声明，绝对形态走进程级缓存，相对形态随进程位置现算。"""
+    expanded_root = Path(configured_root).expanduser()
+    cacheable = expanded_root.is_absolute()
+    if cacheable:
+        cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root)
+        if cached_root is not None:
+            return cached_root
+    resolved_root = resolve_rejecting_cycle(expanded_root)
+    if cacheable:
+        _RESOLVED_ENV_ROOT_CACHE[configured_root] = resolved_root
+    return resolved_root
+
+
+def _resolve_configured_root() -> Path | None:
+    """解析已配置的工作区根目录，未配置返回 None，解析失败抛配置错误。
+
+    供 resolve_env_workspace_root 的声明链兜底取配置根。UNC 声明与
+    resolve_images_root 同口径在 resolve 前拒绝。
+
+    Raises:
+        SeedreamConfigError: 工作区根目录声明为 UNC 形态或无法解析。
+    """
+    configured_root = _configured_env_value(_WORKSPACE_ROOT_ENV)
+    if not configured_root:
+        return None
+    reject_unc_declaration(configured_root, label="工作区根目录")
+    return _resolve_declaration("工作区根目录", configured_root, _resolve_configured_workspace_root)
+
+
+def _resolve_home_root() -> Path:
+    """解析用户主目录，供回退链的最终回退。
+
+    Returns:
+        已 resolve 的用户主目录。
+
+    Raises:
+        SeedreamConfigError: 主目录不可解析（剥离 HOME 的容器、无 passwd 条目的
+            任意 UID），属部署环境缺陷而非调用方参数错误，携带配置指引归配置
+            错误档案。
+    """
+    try:
+        return Path.home().resolve()
+    except (RuntimeError, OSError) as exc:
+        raise SeedreamConfigError(
+            error_text(
+                "无法确定用户主目录，请配置 {env_hint}",
+                env_hint=as_plain(READ_SCOPE_AUTH_ENV_HINT),
+            ),
+        ) from exc
+
+
+def _usable_cwd_root() -> Path | None:
+    """返回可写的进程启动目录；UNC 形态或不可写返回 None。
+
+    可写性以创建并删除临时探测文件实测，不在目录留下副作用。
+    """
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        return None
+    if is_unc_path(str(cwd)):
+        logger.debug("进程启动目录为 UNC 形态，不作为回退根")
+        return None
+    try:
+        fd, probe_name = tempfile.mkstemp(prefix=".seedream-probe-", dir=cwd)
+    except OSError:
+        return None
+    # 清理失败不影响可写判定，记录 warning 暴露残留而非静默吞掉，与 files 的
+    # 临时文件清理同口径。
+    try:
+        os.close(fd)
+    except OSError as exc:
+        logger.warning("关闭探测文件失败: {} -> {}", probe_name, exc)
+    try:
+        os.unlink(probe_name)
+    except OSError as exc:
+        logger.warning("清理探测文件失败: {} -> {}", probe_name, exc)
+    try:
+        return cwd.resolve()
+    except OSError:
+        return None
+
+
+# 启动期消息缓冲：日志目录求值可能早于日志系统初始化，回退提示先进队列，由
+# drain_pending_start_messages 在 setup_logging 之后冲刷，不经 loguru 导入期
+# 默认 sink 输出。
+_START_MESSAGES = EarlyMessageBuffer()
+
+
+def drain_pending_start_messages() -> None:
+    """输出并清空启动期缓冲的回退提示。
+
+    server 启动后调用；嵌入式调用方需自行调用。回退提示同内容在缓冲窗口内
+    去重，drain 后再次发生回退会重新提示。
+    """
+    _START_MESSAGES.drain()
+
+
+def _resolve_fallback_root() -> Path:
+    """解析无任何声明时的回退根：进程启动目录可写时采用，否则回退用户主目录。
+
+    成功结果进程级缓存。回退提示进启动缓冲队列，不经 loguru 导入期默认
+    sink 输出。
+
+    Returns:
+        已 resolve 的回退根目录。
+
+    Raises:
+        SeedreamConfigError: 进程启动目录与用户主目录均不可用，携带配置指引归
+            配置错误档案。
+    """
+    global _fallback_root
+    if _fallback_root is not None:
+        return _fallback_root
+    cwd_root = _usable_cwd_root()
+    if cwd_root is not None:
+        root = cwd_root
+        message = (
+            "未声明 MCP Roots 且未配置 SEEDREAM_WORKSPACE_ROOT，工作根目录回退为"
+            "进程启动目录 {}，默认图片目录为 {}"
+        )
+    else:
+        root = _resolve_home_root()
+        message = "进程启动目录不可用作回退根，工作根目录回退为用户主目录 {}，默认图片目录为 {}"
+    _fallback_root = root
+    _START_MESSAGES.append_once(
+        "INFO", message.format(str(root), str(root / DATA_DIR_NAME / "images"))
+    )
+    return root
+
+
+def resolve_env_workspace_root() -> Path:
+    """解析环境回退的工作根目录：已配置根，无配置时走回退链。
+
+    无任何声明时落进程启动目录，不可写回退用户主目录；首次回退记录
+    一次日志提示默认数据位置。
+
+    Returns:
+        已 resolve 的工作根目录；无任何配置时为回退链结果。
+
+    Raises:
+        SeedreamConfigError: 已配置根无法解析，或无配置且工作目录与用户主目录均不可用。
+    """
+    resolved_root = _resolve_configured_root()
+    if resolved_root is not None:
+        return resolved_root
+    return _resolve_fallback_root()
+
+
+def _resolve_declaration(label: str, configured: str, resolve: Callable[[str], Path]) -> Path:
+    """执行目录声明的解析，解析失败归一为只回显配置原值的配置错误。
+
+    日志路径、图片目录与工作区根目录三条求值共用，保证错误通道分级与消息净化一致。
+
+    Raises:
+        SeedreamConfigError: 声明值解析失败（路径非法或超长）。
+    """
+    try:
+        return resolve(configured)
+    except (OSError, RuntimeError, ValueError) as exc:
+        # 异常原文嵌 expanduser 展开后的服务器绝对路径，仅进日志；用户消息只
+        # 回显其自行配置的原始值。
+        logger.error("{}配置无法解析 '{}': {}", label, configured, exc)
+        raise SeedreamConfigError(
+            error_text(
+                "{label}配置无法解析: {configured}",
+                label=as_plain(label),
+                configured=as_text(configured),
+            )
+        ) from exc
+
+
+def resolve_log_file_path() -> Path:
+    """求值日志文件路径，启动期单点实现。
+
+    顺位为 SEEDREAM_DATA_ROOT > SEEDREAM_WORKSPACE_ROOT > 回退链，不读取
+    会话级 MCP Roots。无任何声明时的回退提示进启动缓冲队列，由
+    drain_pending_start_messages 在日志系统就绪后输出。
+
+    Returns:
+        日志文件完整路径。
+
+    Raises:
+        SeedreamConfigError: 声明值非法或无法解析，或回退链整体不可解析。
+    """
+    configured_data_root = _configured_env_value(_DATA_ROOT_ENV)
+    if configured_data_root:
+        reject_unc_declaration(configured_data_root, label="数据根目录")
+        base = _resolve_declaration("数据根目录", configured_data_root, resolve_cached_data_root)
+    else:
+        base = resolve_env_workspace_root()
+    return base / DATA_DIR_NAME / "logs" / "seedream_mcp.log"
+
+
+def resolve_images_root() -> Path:
+    """求值图片目录：数据根目录恒为显式声明或工作根目录，图片目录统一派生自
+    <数据根目录>/.seedream/images。
+
+    显式声明与工作根目录派生两分支的 resolve 结果分别经进程级缓存，配置写入
+    路径统一使缓存失效。
+
+    Returns:
+        resolve 后的图片目录。
+
+    Raises:
+        SeedreamConfigError: 数据根目录声明为 UNC 形态或无法解析（路径非法或
+            超长），或工作根目录声明链与默认派生图片目录无法解析，均属部署
+            配置缺陷归配置错误档案。
+    """
+    configured = _configured_env_value(_DATA_ROOT_ENV)
+    if configured:
+        reject_unc_declaration(configured, label="数据根目录")
+        # 显式声明与工作根目录同为数据根目录，图片目录统一派生自其 .seedream 子目录。
+        return _resolve_declaration("数据根目录", configured, resolve_cached_explicit_images_root)
+    workspace_root = get_workspace_root()
+    try:
+        return resolve_cached_default_images_root(workspace_root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        # 链接环等 resolve 失败与显式声明同口径归配置错误，异常原文仅进日志。
+        logger.error("工作区图片目录无法解析 '{}': {}", workspace_root, exc)
+        raise SeedreamConfigError(
+            error_text("工作区图片目录无法解析: {root}", root=as_text(workspace_root))
+        ) from exc
+
+
+def get_read_context() -> tuple[list[Path], Path, list[Path]]:
+    """一次求值 (工作区声明集合, 图片目录, 读权限)。
+
+    显式数据根目录可用时，工作区声明链不可解析仅使工作区为空、读权限退化为
+    仅图片目录并记录；未声明时同一坏根先行上抛，图片目录自身不可解析照常上抛。
+    """
+    images_root = resolve_images_root()
+    try:
+        workspace_roots = get_workspace_roots()
+    except SeedreamConfigError as exc:
+        logger.opt(exception=True).error(
+            "工作根目录声明链不可解析，读权限退化为仅图片目录: {}", exc.message
+        )
+        workspace_roots = []
+    scope = list(workspace_roots)
+    if images_root not in scope:
+        scope.append(images_root)
+    return workspace_roots, images_root, scope
+
+
+def get_read_scope() -> list[Path]:
+    """读权限集合 = 工作区声明集合 ∪ 图片目录，求值细节见 get_read_context。"""
+    return get_read_context()[2]
+
+
+def get_workspace_roots() -> list[Path]:
+    """获取当前请求生效的工作根目录声明集合。
+
+    会话声明的非空 Roots 为工作区；空声明等同未声明，回退环境配置根或用户
+    主目录。
+
+    Returns:
+        当前请求生效的工作根目录列表。
+    """
+    roots_from_context = _WORKSPACE_ROOTS_VAR.get()
+    if roots_from_context:
+        return list(roots_from_context)
+    return [resolve_env_workspace_root()]
+
+
+def get_workspace_root() -> Path:
+    """获取当前请求的工作根目录：Roots 首项或环境回退根，多 Roots 时取首项。
+
+    Raises:
+        ValueError: 防御分支，回退链恒产出非空集合，正常不触发。
+    """
+    workspace_roots = get_workspace_roots()
+    if not workspace_roots:
+        raise ValueError("当前 MCP 会话未授权任何工作区目录")
+    return workspace_roots[0]
+
+
+# ==================== 路径验证和规范化 ====================
+
+
+def fold_case(text: str) -> str:
+    """大小写折叠与 pathlib 等值比较同口径：win32 str.lower()，POSIX 恒等。"""
+    if sys.platform == "win32":
+        return text.lower()
+    return text
+
+
+def normcase_parts(path: Path) -> tuple[str, ...]:
+    """路径各分量的 normcase 形式，折叠经 fold_case 与 pathlib 等值比较同口径。"""
+    return tuple(fold_case(part) for part in path.parts)
+
+
+def is_within_nc_parts(path_parts: tuple[str, ...], base_parts: tuple[str, ...]) -> bool:
+    """normcase 分量级包含判定，is_within_any_nc_parts 委托的底层唯一实现。
+
+    基分量序列恰为候选前缀（含相等）即界内，分量边界杜绝 /a/b 误含 /a/bc；
+    空基匹配一切候选（本原语自身约定，resolve 后绝对路径链路不可达）。
+
+    Args:
+        path_parts: 已 resolve 候选路径的 normcase 分量序列。
+        base_parts: 已 resolve 基目录的 normcase 分量序列。
+
+    Returns:
+        候选等于基或位于其内返回 True，否则返回 False。
+    """
+    return len(path_parts) >= len(base_parts) and path_parts[: len(base_parts)] == base_parts
+
+
+def is_within_any_nc_parts(
+    path_parts: tuple[str, ...], bases_parts: Iterable[tuple[str, ...]]
+) -> bool:
+    """判断 normcase 分量序列是否位于任一基分量序列内。
+
+    逐基委托 is_within_nc_parts，空基分量序列与空基集合均单点判不包含，
+    is_within_resolved 与 is_within_any 的空基护栏经本函数收口。常量范围的
+    重复判定按预计算分量共用本原语，免逐条重算 normcase。
+
+    Args:
+        path_parts: 已 resolve 候选路径的 normcase 分量序列。
+        bases_parts: 已 resolve 基目录集合的 normcase 分量序列。
+
+    Returns:
+        候选等于任一基或位于其内返回 True，否则返回 False。
+    """
+    return any(
+        bool(base_parts) and is_within_nc_parts(path_parts, base_parts)
+        for base_parts in bases_parts
+    )
+
+
+def is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
+    """判断已 resolve 的路径是否位于已 resolve 的基目录内。
+
+    镜像 is_within_any 的委托形态，单基经 is_within_any_nc_parts 完成判定与
+    空基护栏，不再重复 resolve。包含语义与
+    pathlib relative_to 等价，等价性随 normcase_parts 的 pathlib 同口径折叠
+    按构造成立。
+
+    Args:
+        path_resolved: 已 resolve 的待判定路径。
+        base_resolved: 已 resolve 的基目录。
+
+    Returns:
+        路径等于基目录或位于其内返回 True，否则返回 False。
+    """
+    return is_within_any_nc_parts(normcase_parts(path_resolved), (normcase_parts(base_resolved),))
+
+
+def is_within_any(path_resolved: Path, bases_resolved: Iterable[Path]) -> bool:
+    """判断已 resolve 的路径是否位于任一已 resolve 的基目录内。
+
+    委托 is_within_any_nc_parts 完成多基循环与空基护栏，候选分量单次预计算；
+    适用于基集合只用一次的单次判定，同一常量范围的重复判定应预计算基分量后
+    直调 is_within_any_nc_parts。
+
+    Args:
+        path_resolved: 已 resolve 的待判定路径。
+        bases_resolved: 已 resolve 的基目录集合。
+
+    Returns:
+        路径等于任一基目录或位于其内返回 True，否则返回 False。
+    """
+    return is_within_any_nc_parts(
+        normcase_parts(path_resolved), [normcase_parts(base) for base in bases_resolved]
+    )
+
+
+def is_unc_path(path_str: str) -> bool:
+    """判断是否为 Windows UNC 路径，前两个分隔符字符为斜杠或反斜杠的组合。
+
+    混合形态仅在 win32 判为 UNC，POSIX 反斜杠是合法文件名字符；统一分隔符
+    形态各平台一致拒绝。UNC 的 resolve 在 Windows 触发 SMB 认证，须在
+    resolve 前拦截。
+    """
+    stripped = path_str.lstrip()
+    if len(stripped) < 2:
+        return False
+    first, second = stripped[0], stripped[1]
+    if first not in "\\/" or second not in "\\/":
+        return False
+    return first == second or sys.platform == "win32"
+
+
+def reject_unc_declaration(value: str, *, label: str, env_hint: str = "") -> None:
+    """目录声明为 UNC 形态时抛配置错误，各声明入口在 resolve 前统一拒绝。
+
+    Args:
+        value: 原始声明值。
+        label: 错误消息中的目录称呼。
+        env_hint: 追加到错误消息的环境变量提示后缀，可为空串。
+
+    Raises:
+        SeedreamConfigError: 声明值为 UNC 形态。
+    """
+    if is_unc_path(value):
+        raise SeedreamConfigError(
+            error_text(
+                "{label}不支持 UNC 路径: {value}{env_hint}",
+                label=as_plain(label),
+                value=as_text(value),
+                env_hint=as_plain(env_hint),
+            )
+        )
+
+
+def has_windows_colon_component(path: str) -> bool:
+    """判断 win32 下路径是否存在含冒号的分量，即 NTFS 备用数据流形态。
+
+    驱动器符与其带根形态为合法前缀，跳过；非 win32 平台恒返回 False，冒号在
+    POSIX 是合法文件名字符。
+
+    Args:
+        path: 输入路径字符串，可为相对或绝对。
+
+    Returns:
+        win32 下存在含冒号的路径分量返回 True；非 win32 平台或无冒号分量返回 False。
+    """
+    if sys.platform != "win32":
+        return False
+    path_obj = Path(path)
+    drive = path_obj.drive
+    for part in path_obj.parts:
+        if part == drive or part == drive + path_obj.root:
+            continue
+        if ":" in part:
+            return True
+    return False
+
+
+def is_drive_relative(path: Path) -> bool:
+    """判断路径是否为盘符相对形态（C:foo）：有 drive 无 root。
+
+    基目录与输入异盘时 pathlib 拼接丢弃基目录、resolve 落到输入盘的进程 CWD；
+    POSIX 无 drive 恒返回 False。
+
+    Args:
+        path: 待判定的路径对象。
+
+    Returns:
+        盘符相对形态返回 True；其余形态（含 POSIX 全部输入）返回 False。
+    """
+    return bool(path.drive) and not path.root
+
+
+def is_windows_rooted_without_drive(path: Path) -> bool:
+    """判断 win32 下路径是否有根无盘符（/foo），POSIX 该形态为合法绝对路径恒 False。
+
+    pathlib 拼接对该形态锚定重置为基目录所在盘的盘根，落点逃出基目录。
+
+    Args:
+        path: 待判定的路径对象。
+
+    Returns:
+        win32 下有 root 无 drive 返回 True；非 win32 平台或其余形态返回 False。
+    """
+    return sys.platform == "win32" and bool(path.root) and not path.drive
+
+
+def normalize_path(path: str, base_dir: str | None = None) -> Path:
+    """标准化文件路径为绝对 Path 对象。
+
+    win32 平台剥离最终分量尾部的点与空格，使返回的路径名与实际打开的文件名一致。
+
+    Args:
+        path: 输入路径，可为相对或绝对。
+        base_dir: 基目录，用于解析相对路径。
+
+    Raises:
+        ValueError: 路径含空字节、路径为 UNC 形式、Windows 驱动器相对形式、
+            Windows 有根无盘符形式、Windows 路径分量含冒号、
+            最终分量为 Windows 保留设备名、路径为空串、
+            resolve 后落点为文件系统根，或路径无效时抛出。
+    """
+    try:
+        # Python 3.13 起 resolve 对空字节不再抛 ValueError，改入口显式拒绝保证
+        # 跨版本行为一致。
+        if has_null_byte(path):
+            raise ValueError(raw_error_text("路径含空字节: {path}", path=as_text(path)))
+
+        # 空串在原始字符串判定：Path 把空串变 . 解析为当前目录，事后不可辨识；
+        # 纯分隔符形态由 UNC、有根无盘符或落点门拒绝。
+        if not path:
+            raise ValueError(
+                raw_error_text("拒绝空串路径以避免解析为当前目录: {path}", path=as_text(path))
+            )
+        path_obj = Path(path)
+
+        # UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须在 resolve 前拒绝。
+        if is_unc_path(str(path_obj)):
+            raise ValueError(
+                raw_error_text("拒绝 UNC 路径以避免触发 SMB 连接: {path}", path=as_text(path))
+            )
+
+        # 驱动器相对路径有 drive 无 root，base_dir 与其异盘时 pathlib 拼接丢弃
+        # base_dir、resolve 落到该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝。
+        if is_drive_relative(path_obj):
+            raise ValueError(
+                raw_error_text("拒绝驱动器相对路径以避免绕过基目录解析: {path}", path=as_text(path))
+            )
+
+        # 有根无盘符形态有 root 无 drive，is_absolute 判为 False 会被当相对路径拼
+        # 基目录，但 pathlib 拼接对该形态锚定重置为基目录所在盘的盘根、落点逃出
+        # 基目录，与驱动器相对同口径在 resolve 前拒绝。POSIX 该形态即合法绝对
+        # 路径恒不触发。
+        if is_windows_rooted_without_drive(path_obj):
+            raise ValueError(
+                raw_error_text("拒绝有根无盘符路径以避免绕过基目录解析: {path}", path=as_text(path))
+            )
+
+        # Win32 命名空间打开文件时剥离最终分量尾部的点与空格，先做同口径名称归一，
+        # 已验证路径字符串才与实际打开的文件名一致；仅名称级归一，不改变越界判定。
+        if sys.platform == "win32":
+            # 分量含冒号是 NTFS 备用数据流形态，流名不参与越界判定，逐分量拒绝；
+            # 驱动器符与其带根形态为合法前缀。
+            if has_windows_colon_component(path):
+                raise ValueError(
+                    raw_error_text(
+                        "拒绝路径分量含冒号以避免访问 NTFS 备用数据流: {path}",
+                        path=as_text(path),
+                    )
+                )
+            final_name = path_obj.name
+            polished_name = final_name.rstrip(". ") if final_name else final_name
+            if polished_name and polished_name != final_name:
+                path_obj = path_obj.with_name(polished_name)
+            # Windows 保留设备名作最终分量会被解释为设备而非文件。
+            if is_windows_reserved_name(polished_name):
+                raise ValueError(
+                    raw_error_text(
+                        "拒绝 Windows 保留设备名以避免被解释为设备而非文件: {path}",
+                        path=as_text(path),
+                    )
+                )
+
+        if path_obj.is_absolute():
+            resolved = path_obj.resolve()
+        elif base_dir:
+            resolved = (Path(base_dir) / path_obj).resolve()
+        else:
+            resolved = path_obj.resolve()
+
+        # 点分量形态（x/.. 等）过前置形态门后 resolve 仍可落文件系统根，按落点事后拒绝；
+        # 根不是任何合法调用的目标位置，空串因事后不可辨识仅由前置形态门拦截。
+        _reject_root_landing(resolved, path)
+        return resolved
+
+    except ValueError:
+        # UNC 拒绝等 ValueError 原样抛出，保留具体原因。
+        raise
+    except OSError as e:
+        # ENAMETOOLONG 等文件系统错误单独分支，errno 原因进入错误文案，供调用方
+        # 区分拼写问题与系统级长度限制；环境性失败服务端带堆栈留痕，便于排障。
+        logger.opt(exception=True).error("路径标准化环境性失败: {}", path)
+        raise ValueError(
+            raw_error_text("无效的路径格式: {path} ({exc})", path=as_text(path), exc=as_detail(e))
+        ) from e
+    except Exception as e:
+        # 意外异常为程序缺陷信号，带堆栈留痕。
+        logger.opt(exception=True).error("路径标准化意外失败: {}", path)
+        raise ValueError(raw_error_text("无效的路径格式: {path}", path=as_text(path))) from e
+
+
+class BoundedResolution(NamedTuple):
+    """以基准目录为界的路径解析结果。
+
+    Attributes:
+        resolved: 已 resolve 的路径。
+        within_base: 是否落在基准目录内（含等于基准目录）。
+    """
+
+    resolved: Path
+    within_base: bool
+
+
+def resolve_against_base(path: str, base: Path) -> BoundedResolution:
+    """以 base 为基准解析路径并判定界内性。
+
+    形态拒绝语义随 normalize_path 单源演化，调用方各自保留错误通道；界内性为
+    is_within_resolved 的纯词法比较，不做文件系统 IO。
+
+    Args:
+        path: 输入路径，可为相对或绝对。
+        base: 已 resolve 的基准目录，相对路径以其为前缀解析。
+
+    Returns:
+        已解析路径与其界内性。
+
+    Raises:
+        ValueError: 路径形态非法，拒绝原因见 normalize_path。
+    """
+    resolved = normalize_path(path, str(base))
+    return BoundedResolution(resolved, is_within_resolved(resolved, base))
+
+
+def resolved_form_violation(path: str) -> str | None:
+    """检查路径背离「已 resolve 的绝对路径」词法契约，返回违约原因短语或 None。
+
+    非绝对、.. 分量与段级 NUL 全平台恒查；冒号与 Windows 保留名是 win32 文件
+    系统语义（口径镜像 normalize_path：冒号查全段、保留名仅查末段），POSIX 为
+    合法文件名字符——部署配置产出的目录段合法性由运行平台判定，保存链产出
+    文件名的形态由 sanitize_filename 保证。
+
+    Args:
+        path: 待检查的路径字符串。
+
+    Returns:
+        违约原因短语；合规的已 resolve 绝对形态返回 None。
+    """
+    path_obj = Path(path)
+    if not path_obj.is_absolute():
+        return "非绝对路径"
+    if ".." in path_obj.parts:
+        return "含 .. 分量"
+    # 绝对路径 parts 首项恒为盘符与根组成的前缀锚，其后各段为真实路径段。
+    if any(has_null_byte(part) for part in path_obj.parts[1:]):
+        return "段含 NUL 字符"
+    if sys.platform == "win32":
+        if has_windows_colon_component(path):
+            return "段含冒号"
+        if is_windows_reserved_name(path_obj.name):
+            return "段为 Windows 保留名"
+    return None
+
+
+def images_root_relative(path: str | Path, images_root: Path) -> str | None:
+    """返回路径相对图片目录的正斜杠形态。
+
+    Args:
+        path: 待相对化的路径。
+        images_root: 已 resolve 的图片目录。
+
+    Returns:
+        正斜杠相对路径字符串；路径落在图片目录外时为 None。
+    """
+    try:
+        return Path(path).relative_to(images_root).as_posix()
+    except ValueError:
+        return None

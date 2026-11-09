@@ -1,0 +1,123 @@
+"""seedream://server/info 与 seedream://models/info 资源内容测试。
+
+server/info 经 monkeypatch 注入活动配置后直接调用资源函数，断言字段集与取值；
+models/info 断言模型清单、能力字段集与关键能力值，取值对照 model_capabilities
+能力表。
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+
+import pytest
+
+from seedream_mcp.config import _builder as config_module
+from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.server.runtime import SERVER_NAME, SERVER_VERSION
+from seedream_mcp.server import models_info_resource, server_info_resource
+from seedream_mcp.utils.model import capabilities as model_capabilities
+
+
+def _test_config() -> SeedreamConfig:
+    """构造带可辨识取值的配置，模型别名与尺寸经构造校验规范化。"""
+    return SeedreamConfig(
+        api_key="test-key",
+        model_id="doubao-seedream-4.5",
+        default_size="4K",
+        auto_save_enabled=False,
+    )
+
+
+# ==================== seedream://server/info ====================
+
+
+async def test_server_info_resource_reports_config_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """server/info 输出固定字段集，取值来自活动配置。
+
+    SDK 2.0 静态资源不支持 Context 注入，资源读活动配置是唯一可行口径；
+    app_lifespan 进入时取的就是活动配置对象，注入活动配置等效于 lifespan 路径。
+    """
+    config = _test_config()
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    data = json.loads(await server_info_resource())
+
+    assert set(data) == {"name", "version", "model_id", "default_size", "auto_save_enabled"}
+    assert data["name"] == SERVER_NAME
+    assert data["version"] == SERVER_VERSION
+    # 构造校验把别名 doubao-seedream-4.5 展开为完整 Model ID 后写回
+    assert data["model_id"] == "doubao-seedream-4-5-251128"
+    assert data["default_size"] == "4K"
+    assert data["auto_save_enabled"] is False
+
+
+# ==================== seedream://models/info ====================
+
+
+async def test_models_info_resource_lists_all_aliases_with_model_ids() -> None:
+    """models/info 按能力表别名顺序列出全部模型及对应 Model ID。"""
+    data = json.loads(await models_info_resource())
+
+    entries = data["models"]
+    assert [entry["alias"] for entry in entries] == list(model_capabilities.MODEL_ALIASES)
+    for entry in entries:
+        assert entry["model_id"] == model_capabilities.MODEL_ALIASES[entry["alias"]]
+
+
+async def test_models_info_resource_matches_capability_table() -> None:
+    """每条目完整携带能力声明字段，且取值与 get_model_capabilities 全等。"""
+    data = json.loads(await models_info_resource())
+
+    expected_fields = set(model_capabilities.ModelCapabilities.__dataclass_fields__)
+    sort_key = model_capabilities.preset_numeric_sort_key
+    for entry in data["models"]:
+        assert set(entry) == {"alias", "model_id"} | expected_fields, entry["alias"]
+        capabilities = asdict(model_capabilities.get_model_capabilities(entry["model_id"]))
+        capabilities["allowed_presets"] = sorted(capabilities["allowed_presets"], key=sort_key)
+        assert {key: entry[key] for key in capabilities} == capabilities, entry["alias"]
+        assert entry["allowed_presets"] == sorted(entry["allowed_presets"], key=sort_key), entry[
+            "alias"
+        ]
+
+
+async def test_models_info_resource_reports_key_capability_values() -> None:
+    """关键能力值对照能力表锁定，防止资源侧字段映射漂移。"""
+    data = json.loads(await models_info_resource())
+    by_alias = {entry["alias"]: entry for entry in data["models"]}
+
+    pro = by_alias["doubao-seedream-5.0-pro"]
+    assert (
+        pro["max_reference_images"] == model_capabilities.SEEDREAM_50PRO_FLASH_MAX_REFERENCE_IMAGES
+    )
+    assert pro["allowed_presets"] == ["1K", "1.5K", "2K"]
+    assert pro["supports_stream"] is False
+    assert pro["supports_tools"] is False
+    assert pro["supports_sequential_generation"] is False
+    assert pro["supports_layer_decomposition"] is True
+    assert pro["supports_background"] is True
+    assert pro["min_size_pixels"] == model_capabilities.SEEDREAM_50PRO_FLASH_MIN_SIZE_PIXELS
+    assert pro["max_size_pixels"] == model_capabilities.SEEDREAM_50PRO_FLASH_MAX_SIZE_PIXELS
+
+    for alias in ("doubao-seedream-5.0", "doubao-seedream-5.0-lite"):
+        entry = by_alias[alias]
+        assert entry["model_id"] == "doubao-seedream-5-0-260128", alias
+        assert entry["allowed_presets"] == ["2K", "3K", "4K"], alias
+        assert (
+            entry["max_reference_images"]
+            == model_capabilities.SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+        ), alias
+        assert entry["supports_tools"] is True, alias
+        assert entry["supports_stream"] is True, alias
+
+    lite_45 = by_alias["doubao-seedream-4.5"]
+    assert lite_45["allowed_presets"] == ["2K", "4K"]
+    assert lite_45["supports_output_format"] is False
+
+    model_40 = by_alias["doubao-seedream-4.0"]
+    assert model_40["allowed_presets"] == ["1K", "2K", "4K"]
+    assert model_40["max_reference_images"] == (
+        model_capabilities.SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+    )

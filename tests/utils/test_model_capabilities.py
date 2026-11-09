@@ -1,0 +1,180 @@
+"""模型家族解析与能力表测试，锁定数据驱动重构的中心化逻辑。
+
+重点守护 5.0 Pro / Flash 须先于 5.0 Lite 解析的顺序，避免含 "5-0" 子串的 ID 被误判。
+"""
+
+from dataclasses import asdict
+from typing import cast, get_type_hints
+
+import pytest
+
+from seedream_mcp.utils.model.capabilities import (
+    CAPABILITY_LABELS,
+    MODEL_ALIASES,
+    MODEL_CAPABILITIES,
+    MODEL_FAMILY_40,
+    MODEL_FAMILY_45,
+    MODEL_FAMILY_50_FLASH,
+    MODEL_FAMILY_50_LITE,
+    MODEL_FAMILY_50_PRO,
+    MODEL_FAMILY_UNKNOWN,
+    ModelCapabilities,
+    _resolve_model_family,
+    get_model_capabilities,
+    model_payloads,
+    preset_numeric_sort_key,
+    supported_family_display_names,
+)
+
+
+def test_all_model_aliases_resolve_to_known_family() -> None:
+    """所有 MODEL_ALIASES 解析出的家族必须非 unknown。
+
+    遗漏在 _MODEL_FAMILY_TOKENS 补 token 会静默 unknown 并放行全部能力，校验被跳过。
+    """
+    for alias, model_id in MODEL_ALIASES.items():
+        assert _resolve_model_family(model_id) != MODEL_FAMILY_UNKNOWN, (
+            f"别名 {alias} -> {model_id} 未命中任何家族 token，"
+            "请在 _MODEL_FAMILY_TOKENS 补充匹配规则"
+        )
+
+
+def test_resolve_model_family_known_and_unknown_ids() -> None:
+    """Pro / Flash 的 Model ID 含 5-0 子串仍须解析为各自家族而非 Lite。"""
+    assert _resolve_model_family("doubao-seedream-5-0-pro-260628") == MODEL_FAMILY_50_PRO
+    assert _resolve_model_family("doubao-seedream-5.0-pro") == MODEL_FAMILY_50_PRO
+    assert _resolve_model_family("doubao-seedream-5-0-flash-260915") == MODEL_FAMILY_50_FLASH
+    assert _resolve_model_family("doubao-seedream-5.0-flash") == MODEL_FAMILY_50_FLASH
+    assert _resolve_model_family("doubao-seedream-5-0-260128") == MODEL_FAMILY_50_LITE
+    assert _resolve_model_family("doubao-seedream-5.0") == MODEL_FAMILY_50_LITE
+    assert _resolve_model_family("doubao-seedream-4-5-251128") == MODEL_FAMILY_45
+    assert _resolve_model_family("doubao-seedream-4.0") == MODEL_FAMILY_40
+    assert _resolve_model_family("ep-2024xxxxxxxx-xxxxx") == MODEL_FAMILY_UNKNOWN
+    assert _resolve_model_family("") == MODEL_FAMILY_UNKNOWN
+
+
+def test_get_model_capabilities_pro_profile() -> None:
+    """Pro 能力声明关闭 tools 与 stream，参考图上限 10。"""
+    caps = get_model_capabilities("doubao-seedream-5-0-pro-260628")
+    assert caps.supports_output_format is True
+    assert caps.supports_tools is False
+    assert caps.supports_stream is False
+    assert caps.max_reference_images == 10
+
+
+def test_get_model_capabilities_lite_profile() -> None:
+    """Lite 能力声明开启 tools 与 stream，参考图上限 14。"""
+    caps = get_model_capabilities("doubao-seedream-5-0-260128")
+    assert caps.supports_output_format is True
+    assert caps.supports_tools is True
+    assert caps.supports_stream is True
+    assert caps.max_reference_images == 14
+
+
+def test_get_model_capabilities_flash_profile() -> None:
+    """Flash 与 Pro 同档（图层拆分/透明背景/参考图 10/1K-2K 档），但不支持 fast 提示词优化。"""
+    caps = get_model_capabilities("doubao-seedream-5-0-flash-260915")
+    assert caps.supports_output_format is True
+    assert caps.supports_tools is False
+    assert caps.supports_stream is False
+    assert caps.supports_sequential_generation is False
+    assert caps.supports_fast_optimize_prompt is False
+    assert caps.supports_layer_decomposition is True
+    assert caps.supports_background is True
+    assert caps.max_reference_images == 10
+    assert caps.allowed_presets == frozenset({"1K", "1.5K", "2K"})
+    assert caps.min_size_pixels == 1280 * 720
+    assert caps.max_size_pixels == 4624220
+
+
+def test_get_model_capabilities_legacy_and_unknown_default_to_permissive() -> None:
+    """4.5/4.0 不支持 output_format 与 tools，未知模型放行全部能力。"""
+    assert get_model_capabilities("doubao-seedream-4-5-251128").supports_output_format is False
+    assert get_model_capabilities("doubao-seedream-4-0-250828").supports_output_format is False
+
+    unknown = get_model_capabilities("ep-unknown-endpoint")
+    assert unknown.supports_output_format is True
+    assert unknown.supports_tools is True
+    assert unknown.supports_stream is True
+    assert unknown.supports_layer_decomposition is True
+    assert unknown.supports_background is True
+    assert unknown.max_reference_images == 14
+
+
+def test_model_capabilities_table_is_read_only() -> None:
+    """能力表为只读映射视图，调用方原地改写被拒绝，公共数据表不被污染。"""
+    with pytest.raises(TypeError):
+        MODEL_CAPABILITIES["new-family"] = MODEL_CAPABILITIES[MODEL_FAMILY_50_PRO]  # type: ignore[index]
+
+
+def test_model_payloads_entries_match_alias_table() -> None:
+    """model_payloads 条目数与顺序对齐别名表，字段集为 asdict 展开加别名两键。"""
+    payloads = model_payloads()
+
+    assert len(payloads) == len(MODEL_ALIASES)
+    assert [entry["alias"] for entry in payloads] == list(MODEL_ALIASES)
+    expected_fields = set(ModelCapabilities.__dataclass_fields__)
+    for entry in payloads:
+        assert set(entry) == {"alias", "model_id"} | expected_fields, entry["alias"]
+        assert entry["model_id"] == MODEL_ALIASES[cast(str, entry["alias"])]
+
+
+def test_model_payloads_allowed_presets_are_sorted_lists() -> None:
+    """allowed_presets 归一为数值序列表，能力表的 frozenset 形态不进入载荷。"""
+    payloads = model_payloads()
+
+    for entry in payloads:
+        presets = entry["allowed_presets"]
+        assert isinstance(presets, list), entry["alias"]
+        assert presets == sorted(presets, key=preset_numeric_sort_key), entry["alias"]
+    by_alias = {entry["alias"]: entry for entry in payloads}
+    assert by_alias["doubao-seedream-5.0-pro"]["allowed_presets"] == ["1K", "1.5K", "2K"]
+    assert by_alias["doubao-seedream-4.5"]["allowed_presets"] == ["2K", "4K"]
+
+
+def test_model_payloads_capability_values_match_asdict() -> None:
+    """条目能力取值与 asdict 全等，仅 allowed_presets 归一为数值序列表。"""
+    for entry in model_payloads():
+        expected = asdict(get_model_capabilities(cast(str, entry["model_id"])))
+        expected["allowed_presets"] = sorted(
+            expected["allowed_presets"], key=preset_numeric_sort_key
+        )
+        assert {key: entry[key] for key in expected} == expected, entry["alias"]
+
+
+def test_supported_family_display_names_returns_joined_string() -> None:
+    """支持家族展示名以顿号拼接返回，文案消费方无需再 join。"""
+    assert supported_family_display_names("supports_output_format") == (
+        "doubao-seedream-5.0-pro、doubao-seedream-5.0、doubao-seedream-5.0-flash"
+    )
+    assert supported_family_display_names("supports_tools") == "doubao-seedream-5.0"
+
+
+def test_capability_labels_locked_verbatim() -> None:
+    """能力开关中文标签与载荷键逐字锁定，改动须同步审视快照文本与门控报错的对外文案。"""
+    assert [entry.label for entry in CAPABILITY_LABELS] == [
+        "图层拆分（layer_decomposition）",
+        "透明背景（background）",
+        "输出格式（output_format）",
+        "流式输出（stream）",
+        "联网搜索（tools）",
+        "组图生成（sequential_generation）",
+    ]
+    assert [entry.payload_key for entry in CAPABILITY_LABELS] == [
+        "layer_decomposition",
+        "transparent_background",
+        "output_format",
+        "stream",
+        "web_search",
+        "sequential_generation",
+    ]
+
+
+def test_capability_labels_map_unique_bool_capability_fields() -> None:
+    """标签表的 capability 字段与载荷键互异，capability 均为能力表布尔字段。"""
+    bool_fields = {name for name, tp in get_type_hints(ModelCapabilities).items() if tp is bool}
+    capabilities = [entry.capability for entry in CAPABILITY_LABELS]
+    assert len(set(capabilities)) == len(capabilities)
+    assert set(capabilities) <= bool_fields
+    payload_keys = [entry.payload_key for entry in CAPABILITY_LABELS]
+    assert len(set(payload_keys)) == len(payload_keys)

@@ -1,0 +1,919 @@
+"""生成执行上下文构建、并行结果聚合、响应格式化与 save_path 预检测试。"""
+
+import copy
+from dataclasses import fields
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+from pydantic import ValidationError
+
+from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.tools.pipeline._paths import prevalidate_save_path
+from seedream_mcp.tools.pipeline import (
+    GenerationExecutionContext,
+    aggregate_parallel_generation_results,
+    build_generation_context,
+    format_generation_response,
+    update_result_with_auto_save,
+)
+from seedream_mcp.tools.schemas import (
+    BackgroundMode,
+    GenerationTool,
+    ImageToImageInput,
+    OptimizePromptOptions,
+    OutputFormat,
+    SequentialGenerationInput,
+    TextToImageInput,
+)
+from seedream_mcp.utils.io.save import AutoSaveResult
+from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
+
+from _lib.path_helpers import abs_path_stub
+
+
+def _build_config() -> SeedreamConfig:
+    return SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-4-0-250828",
+        default_size="2K",
+    )
+
+
+def test_build_generation_context_uses_default_size_when_omitted() -> None:
+    """未显式传 size 时回落 config.default_size，单请求默认并行度 1。"""
+    config = _build_config()
+    context = build_generation_context(TextToImageInput(prompt="test"), config)
+
+    assert context.size == "2K"
+    assert context.request_count == 1
+    assert context.parallelism == 1
+
+
+def test_schema_validator_resolves_default_parallelism() -> None:
+    """缺省 parallelism 由 schema 校验器掐尖为生效值，context 直接消费。"""
+    config = _build_config()
+    params = TextToImageInput(prompt="test", request_count=3)
+
+    assert params.parallelism == 3
+    context = build_generation_context(params, config)
+    assert context.parallelism == 3
+
+
+def test_build_generation_context_rejects_sequential_for_pro_model() -> None:
+    """5.0 Pro 组图先报能力根因，不落入图片数量上限的误导性错误。"""
+    config = _build_pro_config()
+
+    with pytest.raises(SeedreamValidationError, match="不支持组图生成"):
+        build_generation_context(
+            SequentialGenerationInput(prompt="test", image=["a.png"], max_images=4), config
+        )
+
+
+def _build_pro_config() -> SeedreamConfig:
+    return SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-5-0-pro-260628",
+        default_size="2K",
+    )
+
+
+def test_build_generation_context_layer_decomposition_defaults_size_auto() -> None:
+    """图层拆分开启且未显式提供 size 时按官方默认取 auto，不取 config.default_size。"""
+    config = _build_pro_config()
+    context = build_generation_context(
+        ImageToImageInput(
+            prompt="拆分图层", image="https://example.com/a.png", layer_decomposition=True
+        ),
+        config,
+    )
+
+    assert context.layer_decomposition is True
+    assert context.size == "auto"
+
+
+def test_build_generation_context_layer_decomposition_keeps_explicit_size() -> None:
+    """图层拆分场景显式 size 原样保留，不被 auto 覆盖。"""
+    config = _build_pro_config()
+    context = build_generation_context(
+        ImageToImageInput(
+            prompt="拆分图层",
+            image="https://example.com/a.png",
+            layer_decomposition=True,
+            size="1K",
+        ),
+        config,
+    )
+
+    assert context.size == "1K"
+
+
+def test_build_generation_context_layer_decomposition_rejected_for_lite() -> None:
+    """lite 模型开启 layer_decomposition 即校验拒绝。"""
+    config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0-260128")
+
+    with pytest.raises(SeedreamValidationError, match="不支持图层拆分（layer_decomposition）"):
+        build_generation_context(
+            ImageToImageInput(
+                prompt="拆分图层", image="https://example.com/a.png", layer_decomposition=True
+            ),
+            config,
+        )
+
+
+def test_build_generation_context_background_carried_to_context() -> None:
+    """background 参数透传到 context，图层拆分缺省 False。"""
+    config = _build_pro_config()
+    context = build_generation_context(
+        ImageToImageInput(
+            prompt="透明背景",
+            image="https://example.com/a.png",
+            background=cast(BackgroundMode, "transparent"),
+        ),
+        config,
+    )
+
+    assert context.background == "transparent"
+    assert context.layer_decomposition is False
+
+
+def test_build_generation_context_layer_scenario_allows_missing_prompt() -> None:
+    """图层拆分场景 prompt 可缺省，context 携带 None 且 size 默认 auto。"""
+    config = _build_pro_config()
+    context = build_generation_context(
+        ImageToImageInput(image="https://example.com/a.png", layer_decomposition=True),
+        config,
+    )
+
+    assert context.prompt is None
+    assert context.size == "auto"
+
+
+def test_image_to_image_input_rejects_missing_prompt_without_layer() -> None:
+    """非图层拆分场景 prompt 缺省在输入模型层即拒绝。"""
+    with pytest.raises(ValidationError, match="prompt 不能为空"):
+        ImageToImageInput(image="https://example.com/a.png")
+
+
+def test_build_generation_context_rejects_transparent_with_jpeg() -> None:
+    """transparent 背景与 jpeg 输出格式互斥，context 构建时拒绝。"""
+    config = _build_pro_config()
+
+    with pytest.raises(SeedreamValidationError, match="互斥"):
+        build_generation_context(
+            ImageToImageInput(
+                prompt="透明背景",
+                image="https://example.com/a.png",
+                background=cast(BackgroundMode, "transparent"),
+                output_format=cast(OutputFormat, "jpeg"),
+            ),
+            config,
+        )
+
+
+def test_generation_execution_context_field_order_matches_mcp_order() -> None:
+    """GenerationExecutionContext 字段顺序与 MCP 工具签名平铺顺序一致。"""
+    assert [field.name for field in fields(GenerationExecutionContext)] == [
+        "prompt",
+        "optimize_prompt_options",
+        "size",
+        "watermark",
+        "response_format",
+        "output_format",
+        "stream",
+        "tools",
+        "layer_decomposition",
+        "background",
+        "max_images",
+        "request_count",
+        "parallelism",
+        "enable_auto_save",
+        "save_path",
+        "custom_name",
+    ]
+
+
+def test_build_generation_context_rejects_explicit_empty_size() -> None:
+    """显式空字符串 size 在 context 构建时拒绝。"""
+    config = _build_config()
+
+    with pytest.raises(SeedreamValidationError, match="图像尺寸不能为空"):
+        build_generation_context(TextToImageInput(prompt="test", size=""), config)
+
+
+def test_build_generation_context_rejects_reference_images_over_pro_limit() -> None:
+    """5.0 Pro 的参考图上限 10 在 context 层即时拒绝，与尺寸等能力校验同层。
+
+    schema 上限只能表达全家族默认 14；留给 client 层则进度已上报「参数校验完成」
+    后才报错。
+    """
+    from seedream_mcp.tools.schemas import MultiImageFusionInput
+
+    config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0-pro")
+    params = MultiImageFusionInput(
+        prompt="融合测试",
+        image=[f"https://example.com/ref-{i}.png" for i in range(11)],
+    )
+
+    with pytest.raises(SeedreamValidationError, match="数量不能超过 10"):
+        build_generation_context(params, config)
+
+
+def test_build_generation_context_allows_default_model_reference_limit() -> None:
+    """非 Pro 家族的默认上限 14 在 context 层放行，不误伤合法输入。"""
+    from seedream_mcp.tools.schemas import MultiImageFusionInput
+
+    config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0")
+    params = MultiImageFusionInput(
+        prompt="融合测试",
+        image=[f"https://example.com/ref-{i}.png" for i in range(14)],
+    )
+
+    context = build_generation_context(params, config)
+
+    assert context.request_count == 1
+
+
+def test_build_generation_context_sets_default_parallelism_by_request_count() -> None:
+    """未显式传并行度时默认取请求总数。"""
+    config = _build_config()
+    context = build_generation_context(TextToImageInput(prompt="test", request_count=3), config)
+
+    assert context.request_count == 3
+    assert context.parallelism == 3
+
+
+def test_build_generation_context_uses_explicit_parallelism() -> None:
+    """显式 parallelism 原样生效，不被请求总数覆盖。"""
+    config = _build_config()
+    context = build_generation_context(
+        TextToImageInput(prompt="test", request_count=4, parallelism=2),
+        config,
+    )
+    assert context.request_count == 4
+    assert context.parallelism == 2
+
+
+def test_input_schema_rejects_zero_parallelism() -> None:
+    """parallelism 越界属 schema Field 约束，构造输入模型时即被拒绝。"""
+    with pytest.raises(ValidationError, match="parallelism"):
+        TextToImageInput(prompt="test", request_count=2, parallelism=0)
+
+
+def test_build_generation_context_accepts_seedream_50_output_format_and_tools() -> None:
+    """5.0 系列的 output_format 与 tools 透传到 context。"""
+    config = SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-5-0-260128",
+        default_size="2K",
+    )
+
+    context = build_generation_context(
+        TextToImageInput(
+            prompt="test",
+            output_format=cast(OutputFormat, "png"),
+            tools=[cast(GenerationTool, {"type": "web_search"})],
+        ),
+        config,
+    )
+
+    assert context.output_format == "png"
+    assert context.tools == [{"type": "web_search"}]
+
+
+def test_build_generation_context_rejects_output_format_for_seedream_45() -> None:
+    """4.5 模型传 output_format 在 context 构建时拒绝。"""
+    config = SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-4-5-251128",
+        default_size="2K",
+    )
+
+    with pytest.raises(SeedreamValidationError, match="不支持输出格式（output_format）"):
+        build_generation_context(
+            TextToImageInput(prompt="test", output_format=cast(OutputFormat, "png")), config
+        )
+
+
+def test_build_generation_context_rejects_stream_for_seedream_50_pro() -> None:
+    """5.0 Pro 开启 stream 在 context 构建时拒绝。"""
+    config = SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-5-0-pro-260628",
+        default_size="2K",
+    )
+
+    with pytest.raises(SeedreamValidationError, match="不支持流式输出（stream）"):
+        build_generation_context(TextToImageInput(prompt="test", stream=True), config)
+
+
+def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -> None:
+    """5.0 标准模型的 fast 优化模式在 context 构建时拒绝。"""
+    config = SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-5-0-260128",
+        default_size="2K",
+    )
+
+    with pytest.raises(SeedreamValidationError, match="optimize_prompt_options.mode=fast"):
+        build_generation_context(
+            TextToImageInput(
+                prompt="test",
+                optimize_prompt_options=cast(OptimizePromptOptions, {"mode": "fast"}),
+            ),
+            config,
+        )
+
+
+def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None:
+    """自动保存回填只作用于可保存图片项，失败占位项不携带本地路径。"""
+    result = {
+        "success": True,
+        "data": [
+            {
+                "type": "image_generation.partial_failed",
+                "image_index": 1,
+                "error": {"code": "blocked", "message": "content blocked"},
+            },
+            {
+                "type": "image_generation.partial_succeeded",
+                "image_index": 2,
+                "url": "https://example.com/ok.png",
+            },
+        ],
+    }
+    auto_save_results = [
+        AutoSaveResult(
+            success=True,
+            original_url="https://example.com/ok.png",
+            local_path=abs_path_stub("images/ok.png"),
+            markdown_ref="![ok](images/ok.png)",
+        )
+    ]
+
+    updated = update_result_with_auto_save(result, auto_save_results, [1])
+
+    failed_item = updated["data"][0]
+    success_item = updated["data"][1]
+
+    assert "local_path" not in failed_item
+    assert "markdown_ref" not in failed_item
+    assert success_item["local_path"] == abs_path_stub("images/ok.png")
+    assert success_item["markdown_ref"] == "![ok](images/ok.png)"
+
+
+def _two_url_result() -> dict[str, Any]:
+    """构造两张可保存图片的归一化结果。"""
+    return {
+        "success": True,
+        "data": [
+            {"url": "https://example.com/1.png"},
+            {"url": "https://example.com/2.png"},
+        ],
+    }
+
+
+def _saved(path: str) -> AutoSaveResult:
+    """构造指向指定路径的成功保存结果。"""
+    return AutoSaveResult(
+        success=True,
+        original_url="https://example.com/x.png",
+        local_path=path,
+        markdown_ref=f"![x]({path})",
+    )
+
+
+def test_update_result_with_auto_save_breaks_on_misaligned_indices() -> None:
+    """保存结果与索引列表的三种不对齐形态均在越界守卫处截断回填，原 result 不被修改。"""
+    # 索引列表短于保存结果：i=1 越过 len(saveable_indices) 截断，i=0 正常回填。
+    result = _two_url_result()
+    snapshot = copy.deepcopy(result)
+    updated = update_result_with_auto_save(
+        result, [_saved(abs_path_stub("images/1.png")), _saved(abs_path_stub("images/2.png"))], [0]
+    )
+
+    assert updated["data"][0]["local_path"] == abs_path_stub("images/1.png")
+    assert "local_path" not in updated["data"][1]
+    assert result == snapshot
+
+    # 索引超出图片数：idx=2 越界截断，前一项已回填。
+    result = _two_url_result()
+    snapshot = copy.deepcopy(result)
+    updated = update_result_with_auto_save(
+        result,
+        [_saved(abs_path_stub("images/1.png")), _saved(abs_path_stub("images/2.png"))],
+        [0, 2],
+    )
+
+    assert updated["data"][0]["local_path"] == abs_path_stub("images/1.png")
+    assert "local_path" not in updated["data"][1]
+    assert result == snapshot
+
+    # 首个索引即越界：无任何回填发生。
+    result = _two_url_result()
+    snapshot = copy.deepcopy(result)
+    updated = update_result_with_auto_save(result, [_saved(abs_path_stub("images/1.png"))], [5])
+
+    assert updated["data"] == [
+        {"url": "https://example.com/1.png"},
+        {"url": "https://example.com/2.png"},
+    ]
+    assert result == snapshot
+
+
+def test_aggregate_parallel_generation_results_merges_data_usage_and_failures() -> None:
+    """并行结果聚合合并 data、usage 与批次统计，异常请求落为占位项。"""
+    request_results = [
+        {
+            "success": True,
+            "data": [{"url": "https://example.com/1.png"}],
+            "usage": {"generated_images": 1, "total_tokens": 10},
+            "status": "completed",
+        },
+        None,
+        {
+            "success": True,
+            "data": [{"url": "https://example.com/3.png"}],
+            "usage": {"generated_images": 1, "total_tokens": 8},
+            "status": "completed",
+        },
+    ]
+    request_errors: dict[int, Exception] = {2: RuntimeError("请求超时")}
+
+    result = aggregate_parallel_generation_results(
+        request_results=request_results,
+        request_errors=request_errors,
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "partial"
+    assert result["batch"]["request_count"] == 3
+    assert result["batch"]["success_requests"] == 2
+    assert result["batch"]["failed_requests"] == 1
+    assert result["usage"]["generated_images"] == 2
+    assert result["usage"]["total_tokens"] == 18
+    assert result["data"][0]["request_index"] == 1
+    assert result["data"][1]["request_index"] == 2
+    assert "请求超时" in result["data"][1]["error"]["message"]
+    # 占位项 error 携带 type 归约码，与 build_error_dict 的 {type,message} 契约一致；
+    # 未识别异常经 resolve_error_profile 归入 generation_failed 兜底档。
+    assert result["data"][1]["error"]["type"] == "generation_failed"
+    assert result["data"][2]["request_index"] == 3
+
+
+def test_aggregate_failed_placeholder_error_type_classifies_exception() -> None:
+    """占位项 error.type 取请求异常的归约错误码，与顶层代表异常同档。"""
+    result = aggregate_parallel_generation_results(
+        request_results=[
+            None,
+            {"success": True, "data": [{"url": "u"}], "usage": {}, "status": "completed"},
+        ],
+        request_errors={1: SeedreamAPIError("认证失败", status_code=401)},
+    )
+
+    assert result["data"][0]["type"] == "image_generation.request_failed"
+    assert result["data"][0]["error"]["type"] == "auth_error"
+
+
+@pytest.mark.parametrize(
+    ("request_results", "request_errors", "expected_type"),
+    [
+        ([None], {1: SeedreamAPIError("认证失败", status_code=401)}, "auth_error"),
+        (
+            [{"success": False, "status": "failed", "data": [], "error": {"message": "软失败"}}],
+            {},
+            "generation_failed",
+        ),
+    ],
+    ids=["exception-classified", "soft-failure-fallback"],
+)
+def test_aggregate_placeholder_error_built_by_build_error_dict(
+    request_results: list[dict[str, Any] | None],
+    request_errors: dict[int, Exception],
+    expected_type: str,
+) -> None:
+    """占位项 error 经 build_error_dict 构建：字段集与其余错误对象同构，构建器
+    增字段时占位项不再静默漂移。"""
+    from seedream_mcp.tools.outputs import build_error_dict
+
+    result = aggregate_parallel_generation_results(
+        request_results=request_results, request_errors=request_errors
+    )
+
+    placeholder = result["data"][0]["error"]
+    assert placeholder == build_error_dict(expected_type, placeholder["message"])
+    assert set(placeholder) == {"type", "message"}
+
+
+def test_aggregate_placeholder_error_routes_through_build_error_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """占位项 error 的构造路由经 results 模块引用的 build_error_dict 单一构造点。
+
+    直构内联 dict 时构建器增字段（如顶层 error 的 code 键）不会自动跟进占位项，
+    净化幂等使构造差异无法经产物相等检出，故以构造路由锁定。
+    """
+    from seedream_mcp.tools.pipeline import results as results_module
+    from seedream_mcp.tools.outputs import build_error_dict
+
+    built: list[dict[str, Any]] = []
+
+    def _spy(error_type: str, message: str) -> dict[str, Any]:
+        payload = build_error_dict(error_type, message)
+        built.append(payload)
+        return payload
+
+    monkeypatch.setattr(results_module, "build_error_dict", _spy)
+    result = aggregate_parallel_generation_results(
+        request_results=[None], request_errors={1: RuntimeError("请求超时")}
+    )
+
+    placeholder = result["data"][0]["error"]
+    assert placeholder in built
+    # 占位项与全失败批次的顶层 error 均经同一入口。
+    assert result["error"] in built
+
+
+def test_aggregate_parallel_generation_results_all_failed_keeps_error_details() -> None:
+    """全部失败时聚合保留每个请求的错误明细与批次 errors 列表。"""
+    result = aggregate_parallel_generation_results(
+        request_results=[None, None],
+        request_errors={1: RuntimeError("认证失败"), 2: RuntimeError("请求频率超限")},
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert "认证失败" in result["error"]["message"]
+    assert result["batch"]["errors"][0]["request_index"] == 1
+    assert "认证失败" in result["batch"]["errors"][0]["message"]
+    assert result["batch"]["errors"][1]["request_index"] == 2
+    assert "请求频率超限" in result["batch"]["errors"][1]["message"]
+
+
+def test_aggregate_all_failed_result_dicts_carry_upstream_error_code() -> None:
+    """全为失败 dict 且无异常时 error 载荷携带上游 code，与单发路径契约一致。
+
+    200 加顶层 error 的请求级失败经聚合后不丢失上游错误码，未提取到时维持
+    generation_failed 兜底。
+    """
+    result = aggregate_parallel_generation_results(
+        request_results=[
+            {
+                "success": False,
+                "status": "failed",
+                "data": [],
+                "error": {"code": "ContentFilterBlocked", "message": "内容不符合规范"},
+            },
+            {
+                "success": False,
+                "status": "failed",
+                "data": [],
+                "error": {"code": "ContentFilterBlocked", "message": "内容不符合规范"},
+            },
+        ],
+        request_errors={},
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "ContentFilterBlocked"
+    assert "内容不符合规范" in result["error"]["message"]
+
+
+def test_aggregate_all_failed_result_dicts_without_code_keep_fallback() -> None:
+    """失败 dict 无可用 code 时 error 载荷不含 code 键，type 维持兜底档。"""
+    result = aggregate_parallel_generation_results(
+        request_results=[
+            {"success": False, "status": "failed", "data": [], "error": {"message": "boom"}},
+        ],
+        request_errors={},
+    )
+
+    assert result["error"]["type"] == "generation_failed"
+    assert "code" not in result["error"]
+
+
+def test_aggregate_all_failed_over_three_truncates_error_preview() -> None:
+    """全失败请求超过三个时错误预览仅保留前三条，其余以计数收尾。"""
+    request_results: list[dict[str, Any] | None] = [
+        {"success": False, "status": "failed", "data": [], "error": {"message": f"失败{i}"}}
+        for i in range(1, 6)
+    ]
+
+    result = aggregate_parallel_generation_results(
+        request_results=request_results, request_errors={}
+    )
+
+    assert result["batch"]["failed_requests"] == 5
+    assert result["error"]["message"] == (
+        "并行请求全部失败。请求1: 失败1；请求2: 失败2；请求3: 失败3；其余 2 个请求也失败"
+    )
+
+
+def test_aggregate_all_failed_exception_outranks_soft_failure_code() -> None:
+    """代表异常与携带 code 的软失败结果并存时，错误码取异常归约档而非上游 code。"""
+    result = aggregate_parallel_generation_results(
+        request_results=[
+            {
+                "success": False,
+                "status": "failed",
+                "data": [],
+                "error": {"code": "UpstreamCode", "message": "软失败"},
+            },
+            None,
+        ],
+        request_errors={2: SeedreamAPIError("认证失败", status_code=401)},
+    )
+
+    assert result["error"]["type"] == "auth_error"
+    assert "code" not in result["error"]
+    assert "请求1: 软失败" in result["error"]["message"]
+    assert "认证失败" in result["error"]["message"]
+
+
+def test_structured_outlet_carries_upstream_code_for_parallel_all_failed() -> None:
+    """并发全失败的内容策略拒绝经结构化出口透传上游 code，且净化语义保持。
+
+    聚合 error 的 code 为上游自由文本，携带 CRLF 与凭据片段时不借该通道注入。
+    """
+    from seedream_mcp.tools.pipeline.results import _build_generation_structured_result
+
+    aggregated = aggregate_parallel_generation_results(
+        request_results=[
+            {
+                "success": False,
+                "status": "failed",
+                "data": [],
+                "error": {
+                    "code": "E-1\r\nFAKE api_key=leaked",
+                    "message": "并行请求全部失败。请求1: 内容不符合规范",
+                },
+            },
+        ],
+        request_errors={},
+    )
+
+    config = SeedreamConfig(api_key="k", default_size="2K", auto_save_enabled=False)
+    context = build_generation_context(TextToImageInput(prompt="t"), config)
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=aggregated,
+        context=context,
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert structured["error"]["code"] == "E-1  FAKE api_key=***"
+    assert "leaked" not in str(structured["error"])
+
+
+def test_aggregate_parallel_generation_results_uses_result_error_when_success_false() -> None:
+    """success=False 的软失败结果按其 error 载荷聚合，无异常时维持兜底档。"""
+    result = aggregate_parallel_generation_results(
+        request_results=[
+            {
+                "success": False,
+                "error": "鉴权失败",
+                "usage": {"generated_images": 1, "total_tokens": 5},
+            },
+            {"success": False, "error": {"message": "请求频率超限"}, "usage": {"total_tokens": 3}},
+        ],
+        request_errors={},
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert "鉴权失败" in result["error"]["message"]
+    assert "请求频率超限" in result["error"]["message"]
+    assert result["data"][0]["error"]["message"] == "鉴权失败"
+    assert result["data"][1]["error"]["message"] == "请求频率超限"
+    # 软失败结果无异常可归约，占位项 type 维持 generation_failed 兜底档。
+    assert result["data"][0]["error"]["type"] == "generation_failed"
+    assert result["data"][1]["error"]["type"] == "generation_failed"
+    assert result["batch"]["errors"][0]["message"] == "鉴权失败"
+    assert "请求频率超限" in result["batch"]["errors"][1]["message"]
+    # 失败请求上游也可能计量，软失败项的 usage 照常并入合并。
+    assert result["usage"]["generated_images"] == 1
+    assert result["usage"]["total_tokens"] == 8
+
+
+def test_format_generation_response_reports_parallel_failure_details() -> None:
+    """全失败文本输出并行失败详情，逐请求列出错误信息。"""
+    text = format_generation_response(
+        title="文生图任务完成",
+        result={
+            "success": False,
+            "error": "并行请求全部失败。请求1: 认证失败",
+            "batch": {
+                "request_count": 2,
+                "success_requests": 0,
+                "failed_requests": 2,
+                "errors": [
+                    {"request_index": 1, "message": "认证失败"},
+                    {"request_index": 2, "message": "请求频率超限"},
+                ],
+            },
+        },
+        size="2K",
+    )
+
+    assert "图片生成失败:" in text
+    assert "并行失败详情:" in text
+    assert "请求 1: 认证失败" in text
+    assert "请求 2: 请求频率超限" in text
+
+
+def test_format_failure_section_extracts_message_from_dict_error() -> None:
+    """result['error'] 为 dict 形态时，用户可见文本应取其 message，不应输出字典 repr。"""
+    text = format_generation_response(
+        title="文生图任务完成",
+        result={
+            "success": False,
+            "status": "failed",
+            "error": {"type": "auth_error", "message": "并行请求全部失败。请求1: 认证失败"},
+            "batch": {
+                "request_count": 1,
+                "success_requests": 0,
+                "failed_requests": 1,
+                "errors": [{"request_index": 1, "message": "认证失败"}],
+            },
+        },
+        size="2K",
+    )
+    failure_line = text.splitlines()[0]
+    assert "并行请求全部失败。请求1: 认证失败" in failure_line
+    # 失败首行不应出现字典 repr 的花括号。
+    assert "{" not in failure_line
+    assert "}" not in failure_line
+
+
+def test_format_failure_section_renders_missing_index_and_non_str_message() -> None:
+    """batch.errors 缺 request_index 的条目无序号前缀，非 str message 归一化渲染。"""
+    text = format_generation_response(
+        title="文生图任务完成",
+        result={
+            "success": False,
+            "status": "failed",
+            "error": "并行请求全部失败",
+            "batch": {
+                "errors": [
+                    {"message": {"code": "E-1"}},
+                    {"request_index": 2, "message": 42},
+                    "not-a-dict",
+                ],
+            },
+        },
+        size="2K",
+    )
+    lines = text.splitlines()
+    assert '  {"code": "E-1"}' in lines
+    assert "  请求 2: 42" in lines
+
+
+def test_format_generation_response_shows_input_images_for_pro_usage() -> None:
+    """usage.input_images 在文本统计中展示，生成图片数收敛不再重复输出。"""
+    text = format_generation_response(
+        title="图文生图任务完成",
+        result={
+            "success": True,
+            "data": [{"url": "https://example.com/1.png", "size": "1024x1024"}],
+            "usage": {"input_images": 1, "generated_images": 1, "output_tokens": 100},
+        },
+        size="1024x1024",
+    )
+
+    # 5.0 Pro 返回 usage.input_images 表示输入图数，应在文本统计中展示。
+    # 生成图片数与自动保存摘要重复，文本通道收敛后由图片列表与结构化通道表达。
+    assert "输入图片数: 1" in text
+    assert "输出 tokens: 100" in text
+    assert "生成图片数" not in text
+
+
+def test_build_generation_context_auto_save_none_equals_omitted() -> None:
+    """auto_save=None 与不传该参行为一致，均回落到 config.auto_save_enabled。"""
+    config = SeedreamConfig(api_key="test_key", auto_save_enabled=True)
+
+    ctx_explicit_none = build_generation_context(
+        TextToImageInput(prompt="t", auto_save=None), config
+    )
+    ctx_omitted = build_generation_context(TextToImageInput(prompt="t"), config)
+
+    assert ctx_explicit_none.enable_auto_save is True
+    assert ctx_omitted.enable_auto_save is True
+
+
+def test_build_generation_context_auto_save_none_passes_through_disabled_config() -> None:
+    """config.auto_save_enabled=False 时，auto_save=None 穿透结果为 False。"""
+    config = SeedreamConfig(api_key="test_key", auto_save_enabled=False)
+
+    ctx = build_generation_context(TextToImageInput(prompt="t", auto_save=None), config)
+
+    assert ctx.enable_auto_save is False
+
+
+def test_build_generation_context_explicit_auto_save_overrides_config() -> None:
+    """显式 auto_save 非 None 时覆盖 config.auto_save_enabled。
+
+    确保穿透仅在 None 时发生。
+    """
+    config = SeedreamConfig(api_key="test_key", auto_save_enabled=True)
+
+    ctx = build_generation_context(TextToImageInput(prompt="t", auto_save=False), config)
+
+    assert ctx.enable_auto_save is False
+
+
+def test_input_schema_rejects_non_bool_auto_save() -> None:
+    """auto_save 类型约束属 schema 字段声明，不可解析的值在构造输入模型时即被拒绝。"""
+    with pytest.raises(ValidationError):
+        TextToImageInput(prompt="t", auto_save=cast(Any, "maybe"))
+
+
+# ==================== save_path 生成前预检 ====================
+
+
+def test_prevalidate_save_path_accepts_path_outside_images_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """save_path 为调用级保存声明，指向图片目录之外的位置预检放行。"""
+    base = tmp_path / "images_root"
+    base.mkdir()
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(base))
+    config = _build_config()
+
+    prevalidate_save_path("../../outside")
+    context = build_generation_context(
+        TextToImageInput(prompt="test", save_path="../../outside"), config
+    )
+
+    assert context.save_path == "../../outside"
+
+
+def test_prevalidate_save_path_rejects_invalid_format() -> None:
+    """无法规范化的 save_path 同属校验档，在预检阶段即拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="保存路径无效"):
+        prevalidate_save_path("a" + "\x00" + "b")
+
+
+def test_prevalidate_save_path_accepts_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """相对 save_path 以图片目录为基准预检放行，上下文照常携带原始值。"""
+    base = tmp_path / "images_root"
+    base.mkdir()
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(base))
+    config = _build_config()
+
+    prevalidate_save_path("sub/dir")
+    context = build_generation_context(TextToImageInput(prompt="test", save_path="sub/dir"), config)
+
+    assert context.save_path == "sub/dir"
+
+
+def test_prevalidate_save_path_skips_without_save_path() -> None:
+    """未提供 save_path 时不做预检。"""
+    config = _build_config()
+
+    prevalidate_save_path(None)
+    context = build_generation_context(TextToImageInput(prompt="test"), config)
+
+    assert context.save_path is None
+
+
+async def test_execute_generation_handler_maps_unresolvable_images_root_to_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """数据根目录声明不可解析属部署配置缺陷，MCP 通道归约 config_error 而非参数错误。"""
+    from unittest.mock import MagicMock
+
+    from seedream_mcp.tools.pipeline import ToolMetadata, execute_generation_handler
+    from seedream_mcp.utils.io import path as io_path
+
+    def _runtime_error(configured_dir: str) -> Path:
+        raise RuntimeError("Could not resolve home directory")
+
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", "~/pics")
+    monkeypatch.setattr(io_path, "resolve_cached_data_root", _runtime_error)
+
+    async def fake_executor(client: object, context: object) -> dict[str, Any]:
+        raise AssertionError("预检失败后不应分发计费请求")
+
+    result = await execute_generation_handler(
+        params=TextToImageInput(prompt="test", auto_save=False, save_path="sub"),
+        config=_build_config(),
+        module_logger=MagicMock(),
+        metadata=ToolMetadata(
+            tool_name="text_to_image",
+            completion_title="文生图完成",
+            failure_prefix="文生图",
+            start_log_message="",
+            start_log_values_builder=lambda c: (),
+        ),
+        request_executor=fake_executor,
+    )
+
+    assert result.is_error
+    structured = result.structured_content
+    assert isinstance(structured, dict)
+    error = structured["error"]
+    assert isinstance(error, dict) and error["type"] == "config_error"

@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "seedream_mcp/**"
+      - "src/seedream_mcp/**"
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -15,7 +15,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "seedream_mcp/**"
+      - "src/seedream_mcp/**"
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"

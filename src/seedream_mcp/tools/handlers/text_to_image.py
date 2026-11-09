@@ -1,0 +1,62 @@
+"""文生图工具处理器。
+
+薄适配器：将 prompt 与优化选项封装为 ``_execute`` 回调，委托
+``execute_generation_handler`` 统一编排；字段规则与校验由 ``TextToImageInput``
+单一定义。
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from mcp.types import CallToolResult
+
+from ...config import SeedreamConfig
+from ...utils.core.logs import get_logger
+from ..pipeline import execute_generation_handler
+from ..schemas import TextToImageInput
+from ._metadata import TEXT_TO_IMAGE
+
+if TYPE_CHECKING:
+    from mcp.server.mcpserver import Context
+
+    from ...client import SeedreamClient
+    from ..pipeline import GenerationExecutionContext
+
+logger = get_logger()
+
+
+async def handle_text_to_image(
+    params: TextToImageInput,
+    config: SeedreamConfig,
+    ctx: Context[Any, Any] | None = None,
+) -> CallToolResult:
+    """处理文生图请求，依据文本提示词生成图片。
+
+    Returns:
+        含文本摘要与 structuredContent 的工具结果；失败不抛异常，以 ``is_error=True``
+        返回。
+    """
+
+    async def _execute(
+        client: "SeedreamClient", context: GenerationExecutionContext
+    ) -> dict[str, Any]:
+        return await client.text_to_image(
+            prompt=context.prompt,
+            optimize_prompt_options=context.optimize_prompt_options,
+            size=context.size,
+            watermark=context.watermark,
+            response_format=context.response_format,
+            output_format=context.output_format,
+            stream=context.stream,
+            tools=context.tools,
+        )
+
+    return await execute_generation_handler(
+        params=params,
+        config=config,
+        metadata=TEXT_TO_IMAGE,
+        module_logger=logger,
+        request_executor=_execute,
+        ctx=ctx,
+    )

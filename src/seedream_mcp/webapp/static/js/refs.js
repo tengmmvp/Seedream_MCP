@@ -1,0 +1,334 @@
+/**
+ * @fileoverview 参考图域：各工具的数量规则、增删、暂存恢复与渲染。
+ * 参考图三来源——上传转 data URI、手输 URL、图库灯箱回填转 data URI；
+ * 提示词以「图N」指代列表序号。
+ */
+
+"use strict";
+
+import {
+  $,
+  clearInlineError,
+  currentModel,
+  showInlineError,
+  state,
+  TOOL_IMAGE_TO_IMAGE,
+  TOOL_MULTI_IMAGE_FUSION,
+  TOOL_SEQUENTIAL_GENERATION,
+} from "./api.js";
+
+const SINGLE_REF_LIMIT = 1;
+const FUSION_REF_MIN = 2;
+// config-info 未加载或字段非法时的回退参考图上限，与 unknown 家族一致。
+const DEFAULT_UNKNOWN_REF_LIMIT = 14;
+// 预算回退值：按最小可配置请求体上限扣信封余量推导得 0，宁拒勿超——回退放行量不得超出任何合法部署的真实上限。
+const DEFAULT_UPLOAD_BUDGET_CHARS = 0;
+
+const BUDGET_SOURCE_SERVER = "server";
+const BUDGET_SOURCE_UNLOADED = "unloaded";
+const BUDGET_SOURCE_INVALID = "invalid";
+
+// 预算为 0 时按来源分流的拒绝文案：合法零是部署上限事实，出路改用 URL；
+// 未加载是暂态、字段非法是载荷异常，补救均为刷新重取。
+const ZERO_BUDGET_REASONS = new Map([
+  [
+    BUDGET_SOURCE_SERVER,
+    "当前部署请求体上限过低，无法上传参考图，请改用图片 URL",
+  ],
+  [
+    BUDGET_SOURCE_INVALID,
+    "服务配置数据异常，暂无法校验上传体积，请刷新页面",
+  ],
+  [
+    BUDGET_SOURCE_UNLOADED,
+    "服务配置未加载，暂无法校验上传体积，请刷新页面或改用图片 URL",
+  ],
+]);
+
+// data URI 累计字符预算与来源三态；0 为有效预算，表示上限容纳不下任何 data URI。
+function uploadBudget() {
+  if (!state.configInfo) {
+    return {
+      budget: DEFAULT_UPLOAD_BUDGET_CHARS,
+      source: BUDGET_SOURCE_UNLOADED,
+    };
+  }
+  const fromServer = state.configInfo.upload_budget_chars;
+  if (!(Number.isFinite(fromServer) && fromServer >= 0)) {
+    return {
+      budget: DEFAULT_UPLOAD_BUDGET_CHARS,
+      source: BUDGET_SOURCE_INVALID,
+    };
+  }
+  return { budget: fromServer, source: BUDGET_SOURCE_SERVER };
+}
+
+// 未登记来源按配置异常口径收场，不误报成部署上限事实或未加载暂态。
+function zeroBudgetReason(source) {
+  return (
+    ZERO_BUDGET_REASONS.get(source) ??
+    ZERO_BUDGET_REASONS.get(BUDGET_SOURCE_INVALID)
+  );
+}
+
+// 未知模型（Endpoint ID 部署）的参考图上限，来自服务端 unknown 家族能力声明。
+function unknownRefLimit() {
+  const fromServer =
+    state.configInfo && state.configInfo.unknown_max_reference_images;
+  return typeof fromServer === "number" && fromServer > 0
+    ? fromServer
+    : DEFAULT_UNKNOWN_REF_LIMIT;
+}
+
+/**
+ * 声明各工具的参考图数量区间与提示词必填性；上限随当前模型能力收缩。
+ *
+ * @param {string} tool - 工具标识。
+ * @returns {Object} 形如 {refs, min, max, promptOptional} 的配置。
+ */
+export function toolConfig(tool) {
+  const current = currentModel();
+  const refLimit = current ? current.max_reference_images : unknownRefLimit();
+  if (tool === TOOL_IMAGE_TO_IMAGE)
+    return {
+      refs: true,
+      min: SINGLE_REF_LIMIT,
+      max: SINGLE_REF_LIMIT,
+      promptOptional: true,
+    };
+  if (tool === TOOL_MULTI_IMAGE_FUSION)
+    return {
+      refs: true,
+      min: FUSION_REF_MIN,
+      max: refLimit,
+      promptOptional: false,
+    };
+  if (tool === TOOL_SEQUENTIAL_GENERATION)
+    return { refs: true, min: 0, max: refLimit, promptOptional: false };
+  return { refs: false, min: 0, max: 0, promptOptional: false };
+}
+
+/**
+ * 按当前工具配置重渲染参考图列表与计数。
+ *
+ * @param {number} [enterIndex=-1] - 播放入场动画的条目序号，默认不播。
+ */
+function renderReferences(enterIndex = -1) {
+  const config = toolConfig(state.tool);
+  const list = $("reference-list");
+  list.innerHTML = "";
+  state.refs.forEach((ref, index) => {
+    const item = document.createElement("div");
+    item.className = "reference-item";
+    if (index === enterIndex) item.classList.add("enter");
+    const badge = document.createElement("span");
+    badge.className = "ref-badge";
+    badge.textContent = String(index + 1);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "ref-remove";
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      state.refs.splice(index, 1);
+      renderReferences();
+    });
+    item.appendChild(remove);
+    item.appendChild(badge);
+    if (ref.preview) {
+      const img = document.createElement("img");
+      img.src = ref.preview;
+      img.alt = `参考图 ${index + 1}`;
+      item.appendChild(img);
+    } else {
+      const label = document.createElement("span");
+      label.className = "mono";
+      label.textContent =
+        ref.value.length > 18 ? ref.value.slice(0, 18) + "…" : ref.value;
+      item.appendChild(label);
+    }
+    list.appendChild(item);
+  });
+  $("ref-count-note").textContent = `${state.refs.length} / ${config.max}`;
+}
+
+// 现有 data_uri 参考图的累计字符数。
+function dataUriTotalChars() {
+  return state.refs.reduce(
+    (sum, ref) => (ref.kind === "data_uri" ? sum + ref.value.length : sum),
+    0,
+  );
+}
+
+/** 追加 nextChars 字符后是否仍在 data URI 累计上限内。 */
+function withinUploadBudget(nextChars) {
+  return dataUriTotalChars() + nextChars <= uploadBudget().budget;
+}
+
+// 参考图区行内错误提示：拒绝原因落在表单内，替代阻塞式弹窗。
+function showRefError(message) {
+  showInlineError($("ref-error"), message);
+}
+
+function clearRefError() {
+  clearInlineError($("ref-error"));
+}
+
+/**
+ * 把超出保留上限的参考图自末位让位、回暂存不丢。
+ *
+ * @param {number} limit - 保留上限。
+ * @returns {Array<Object>} 本次让位的引用对象，按让位先后序。
+ */
+function parkRefsBeyond(limit) {
+  const parked = [];
+  // length > 0 兼作 limit < 0 工具（文生图）的循环终止防御。
+  while (state.refs.length > 0 && state.refs.length > limit) {
+    const ref = state.refs.pop();
+    state.parkedRefs.push(ref);
+    parked.push(ref);
+  }
+  return parked;
+}
+
+/**
+ * 工具切换收敛：上限收缩时参考图暂存而非丢弃，
+ * 切回支持的工具按上限与 data URI 累计预算自暂存栈尾恢复原顺序，
+ * 超限项留在暂存不丢。
+ */
+export function convergeRefsToTool() {
+  const config = toolConfig(state.tool);
+  parkRefsBeyond(config.max);
+  while (state.parkedRefs.length > 0 && state.refs.length < config.max) {
+    const next = state.parkedRefs[state.parkedRefs.length - 1];
+    if (next.kind === "data_uri" && !withinUploadBudget(next.value.length)) {
+      break;
+    }
+    state.refs.push(state.parkedRefs.pop());
+  }
+  renderReferences();
+}
+
+/**
+ * 添加一张参考图并重渲染；超数量上限或 data URI 累计超限时行内提示拒绝。
+ * 上传、灯箱回填与 URL 手输均经此汇聚受校验。
+ *
+ * @param {string} kind - 来源类型，取 data_uri 或 url。
+ * @param {string} value - 参考图值，data URI 或图片 URL。
+ * @param {string|null} [preview] - 预览地址。
+ * @returns {string|null} 成功入列返回 null，被拒绝返回拒绝原因。
+ */
+export function addReference(kind, value, preview) {
+  const config = toolConfig(state.tool);
+  if (state.refs.length >= config.max) {
+    const reason = `该工具最多 ${config.max} 张参考图`;
+    showRefError(reason);
+    return reason;
+  }
+  // URL 来源前置校验 scheme，非 http(s) 开头的输入在入列前拦下。
+  if (kind === "url" && !/^https?:\/\//i.test(value)) {
+    const reason = "图片 URL 须以 http:// 或 https:// 开头";
+    showRefError(reason);
+    return reason;
+  }
+  if (kind === "data_uri" && !withinUploadBudget(value.length)) {
+    const { budget, source } = uploadBudget();
+    if (budget <= 0) {
+      const reason = zeroBudgetReason(source);
+      showRefError(reason);
+      return reason;
+    }
+    // 上限数值向上取整展示：1~1023 字符的预算向下取整会渲染出 0KB 上限。
+    const budgetText =
+      budget >= 1024 * 1024
+        ? `${Math.ceil(budget / (1024 * 1024))}MB`
+        : `${Math.ceil(budget / 1024)}KB`;
+    const reason = `参考图总量超过 ${budgetText} 上限，请改用图片 URL`;
+    showRefError(reason);
+    return reason;
+  }
+  clearRefError();
+  state.refs.push({ kind, value, preview: preview || null });
+  renderReferences(state.refs.length - 1);
+  return null;
+}
+
+/**
+ * 同步收编一张参考图：满档时既有参考图自末位让位腾出一席，
+ * 再经 addReference 校验入列。被拒时让位项自暂存栈尾弹回参考图列表，
+ * 栈序无损。全程同步无交错，供 data URI 读取等异步前置完成后的调用。
+ *
+ * @param {string} kind - 来源类型，取 data_uri 或 url。
+ * @param {string} value - 参考图值，data URI 或图片 URL。
+ * @param {string|null} [preview] - 预览地址。
+ * @returns {string|null} 成功入列返回 null，被拒绝返回拒绝原因。
+ */
+export function admitReference(kind, value, preview) {
+  const config = toolConfig(state.tool);
+  // addReference 随后入列并在 >= max 再拒，让位须留一席（max - 1）。
+  const parked = parkRefsBeyond(config.max - 1);
+  const reason = addReference(kind, value, preview);
+  if (reason === null) return null;
+  // 本次让位项恰为暂存栈尾，逐项弹回即按逆让位序精确复原。
+  for (let i = 0; i < parked.length; i++) {
+    state.refs.push(state.parkedRefs.pop());
+  }
+  if (parked.length) renderReferences();
+  return reason;
+}
+
+/**
+ * 并行读取文件为 data URI，按选择顺序加入参考图以稳定「图N」编号。
+ *
+ * 读取前按数量、类型与体积前置拦截，避免超限文件白付全量读取；精确判定由
+ * addReference 兜底，拒绝原因聚合为一条提示。
+ *
+ * @param {FileList} files - 待读取的文件列表。
+ */
+export async function handleFiles(files) {
+  const { budget, source } = uploadBudget();
+  if (budget <= 0) {
+    showRefError(zeroBudgetReason(source));
+    return;
+  }
+  const config = toolConfig(state.tool);
+  const rejected = [];
+  // 数量超限的文件不进入读取，免付整份 data URI 转换。
+  const accepted = [...files];
+  const overflow = accepted.splice(Math.max(0, config.max - state.refs.length));
+  for (const file of overflow) {
+    rejected.push(`${file.name}（该工具最多 ${config.max} 张参考图）`);
+  }
+  let batchChars = dataUriTotalChars();
+  const reads = [];
+  for (const file of accepted) {
+    if (file.type && !file.type.startsWith("image/")) {
+      rejected.push(`${file.name}（非图片）`);
+      continue;
+    }
+    // data URI 有 4/3 膨胀，加 64 字节头与填充余量。
+    const projected = Math.ceil((file.size * 4) / 3) + 64;
+    if (batchChars + projected > budget) {
+      rejected.push(`${file.name}（超出参考图总量上限）`);
+      continue;
+    }
+    batchChars += projected;
+    reads.push(
+      new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () =>
+          resolve({ name: file.name, value: reader.result });
+        reader.onerror = () => {
+          rejected.push(`文件读取失败: ${file.name}`);
+          resolve(null);
+        };
+        reader.readAsDataURL(file);
+      }),
+    );
+  }
+  for (const entry of await Promise.all(reads)) {
+    if (entry === null) continue;
+    const reason = addReference("data_uri", entry.value, entry.value);
+    if (reason) rejected.push(`${entry.name}（${reason}）`);
+  }
+  if (rejected.length) showRefError(`未添加：${rejected.join("、")}`);
+}

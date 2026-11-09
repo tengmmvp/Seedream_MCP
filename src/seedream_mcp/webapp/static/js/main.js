@@ -1,0 +1,203 @@
+/**
+ * @fileoverview 装配层：hash 路由、事件绑定与启动流程。依赖其余全部模块。
+ */
+
+"use strict";
+
+import {
+  $,
+  clearStoredToken,
+  hideTokenGate,
+  isUnauthorizedError,
+  setActiveTool,
+  state,
+  writeStoredToken,
+} from "./api.js";
+import {
+  applyToolUI,
+  loadConfigInfo,
+  prefetchConfigInfo,
+  submitGenerate,
+  syncCustomSizeField,
+  syncLayerDecompositionSize,
+} from "./generate.js";
+import {
+  advanceGalleryOffset,
+  canAdvanceGallery,
+  closeLightbox,
+  refreshGallery,
+  resetGalleryPaging,
+  retreatGalleryOffset,
+  useLightboxAsReference,
+} from "./gallery.js";
+import { addReference, handleFiles } from "./refs.js";
+
+function currentView() {
+  return location.hash === "#/gallery" ? "gallery" : "generate";
+}
+
+// 初始化序列：配置就绪后进入工作台并补刷图库。
+async function bootstrapAfterAuth() {
+  await loadConfigInfo();
+  hideTokenGate();
+  applyToolUI();
+  // 直达 #/gallery 时首刷在 config-info 就绪前空转，配置就绪后补刷。
+  if (currentView() === "gallery") refreshGallery();
+}
+
+/** 按 hash 切换生成台与图库视图，进入图库时触发刷新。 */
+function applyRoute() {
+  const view = currentView();
+  $("view-generate").classList.toggle("hidden", view !== "generate");
+  $("view-gallery").classList.toggle("hidden", view !== "gallery");
+  document.querySelectorAll(".view-switch a").forEach((link) => {
+    link.classList.toggle("active", link.dataset.view === view);
+  });
+  if (view === "gallery") refreshGallery();
+}
+
+function bindEvents() {
+  $("tool-tabs").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-tool]");
+    if (!button || button.disabled) return;
+    setActiveTool(button.dataset.tool);
+    applyToolUI();
+  });
+  // 单选组方向键导航：左右键在未禁用的工具间移动。
+  $("tool-tabs").addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const buttons = [...document.querySelectorAll("#tool-tabs button")];
+    const enabled = buttons.filter((b) => !b.disabled);
+    if (enabled.length < 2) return;
+    const index = enabled.indexOf(document.activeElement);
+    if (index === -1) return;
+    const delta = event.key === "ArrowRight" ? 1 : -1;
+    const next = enabled[(index + delta + enabled.length) % enabled.length];
+    next.focus();
+    next.click();
+  });
+
+  $("ref-upload").addEventListener("click", () => $("ref-file").click());
+  $("ref-file").addEventListener("change", (event) => {
+    handleFiles(event.target.files);
+    event.target.value = "";
+  });
+  $("ref-add-url").addEventListener("click", () => {
+    const url = $("ref-url").value.trim();
+    if (url) {
+      // addReference 拒绝时保留输入，用户刚粘贴的 URL 不被抹掉。
+      if (addReference("url", url) === null) {
+        $("ref-url").value = "";
+      }
+    }
+  });
+  // URL 输入框内回车执行「添加」，不触发表单隐式提交。
+  $("ref-url").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      $("ref-add-url").click();
+    }
+  });
+  $("size").addEventListener("change", syncCustomSizeField);
+  // 图层拆分勾选态切换尺寸选项集：拆分仅档位与 auto，取消勾选恢复进入前选择。
+  $("layer-decomposition").addEventListener(
+    "change",
+    syncLayerDecompositionSize,
+  );
+  // 兜底 catch：处理器内部兜底后仍外溢的异常（如 DOM 结构漂移）不落未处理拒绝。
+  $("generate-form").addEventListener("submit", (event) => {
+    submitGenerate(event).catch((error) => console.error("生成提交异常:", error));
+  });
+
+  $("gallery-refresh").addEventListener("click", () => {
+    resetGalleryPaging();
+    refreshGallery();
+  });
+  $("format-filter").addEventListener("change", () => {
+    resetGalleryPaging();
+    refreshGallery();
+  });
+  $("gallery-prev").addEventListener("click", () => {
+    retreatGalleryOffset();
+    refreshGallery();
+  });
+  $("gallery-next").addEventListener("click", () => {
+    // 复查兜底状态更新与渲染的间隙。
+    if (canAdvanceGallery()) {
+      advanceGalleryOffset();
+      refreshGallery();
+    }
+  });
+
+  $("lightbox-close").addEventListener("click", closeLightbox);
+  $("lightbox").addEventListener("click", (event) => {
+    if (event.target === $("lightbox")) closeLightbox();
+  });
+  $("lightbox-use").addEventListener("click", useLightboxAsReference);
+  // 灯箱可见时 Escape 关闭，Tab 循环留在灯箱内。
+  window.addEventListener("keydown", (event) => {
+    const lightbox = $("lightbox");
+    if (lightbox.classList.contains("hidden")) return;
+    if (event.key === "Escape") {
+      closeLightbox();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const first = $("lightbox-use");
+    const last = $("lightbox-close");
+    const active = document.activeElement;
+    // Tab 环绕：焦点在两端之外按方向拉回，Shift+Tab 于首端或 Tab 于末端折向对端。
+    if (
+      (active !== first && active !== last) ||
+      (event.shiftKey ? active === first : active === last)
+    ) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  });
+
+  $("token-submit").addEventListener("click", async () => {
+    const token = $("token-input").value.trim();
+    if (!token) return;
+    state.token = token;
+    writeStoredToken(token);
+    try {
+      await bootstrapAfterAuth();
+      $("token-error").classList.add("hidden");
+    } catch (error) {
+      $("token-error").classList.remove("hidden");
+      if (isUnauthorizedError(error)) {
+        $("token-error").textContent = "令牌无效，请重试。";
+        state.token = "";
+        clearStoredToken();
+      } else {
+        // 瞬时失败（网络抖动、5xx）保留令牌，输入框未清空可直接重试。
+        $("token-error").textContent = "服务器异常，请重试";
+        console.error(error);
+      }
+    }
+  });
+  $("token-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") $("token-submit").click();
+  });
+
+  window.addEventListener("hashchange", applyRoute);
+}
+
+async function main() {
+  bindEvents();
+  applyRoute();
+  try {
+    await bootstrapAfterAuth();
+  } catch (error) {
+    if (!isUnauthorizedError(error)) {
+      $("server-meta").textContent = "配置加载失败，请刷新页面重试";
+      // 瞬时失败即时后台完整重载，落定后图库视图在位则补刷。
+      prefetchConfigInfo().then(() => {
+        if (currentView() === "gallery") refreshGallery();
+      });
+    }
+  }
+}
+
+main();

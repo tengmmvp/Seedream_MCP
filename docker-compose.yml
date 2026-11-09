@@ -59,6 +59,10 @@ services:
       - SEEDREAM_HTTP_AUTH_TOKEN=${SEEDREAM_HTTP_AUTH_TOKEN}
       # streamable-http 请求体上限（字节），不低于 1MB。
       - SEEDREAM_HTTP_MAX_BODY_SIZE=${SEEDREAM_HTTP_MAX_BODY_SIZE:-67108864}
+      # 大请求体读体窗口超时（秒），超时返回 408 并归还并发许可。
+      - SEEDREAM_BODY_READ_TIMEOUT=${SEEDREAM_BODY_READ_TIMEOUT:-300}
+      # 大请求体并发准入许可数，与生成 API 并发解耦。
+      - SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY=${SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY:-3}
       # 非回环绑定的 Host 头允许列表（逗号分隔），留空整体关闭 Host 校验。
       - SEEDREAM_HTTP_ALLOWED_HOSTS=${SEEDREAM_HTTP_ALLOWED_HOSTS:-}
       # 跨源浏览器客户端的 Origin 允许列表（逗号分隔），留空不装配 CORS 层。

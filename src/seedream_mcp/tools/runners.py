@@ -1,0 +1,133 @@
+"""MCP 工具适配器层，作为 composition root 组装 pipeline 与 handlers。
+
+除 ``run_get_model_info`` 直接透传配置外，其余 ``run_*`` 函数经
+``workspace_roots_scope_from_result`` 应用 MCP Roots 工作区边界，roots 结果由
+server 层按协商版本取回注入；再将 pydantic 校验后的入参模型委托给对应
+``handle_*``。依赖方向为 pipeline <- handlers <- runners，避免 pipeline 反向依赖 handlers。
+输出通道（缩略图预览与 JSON 镜像）由调用方经 ``output_channels_scope``
+作用域开关，runner 与 handler 签名不感知通道开关。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
+
+from mcp.server.mcpserver import Context
+from mcp.types import CallToolResult, ListRootsResult
+
+from ..config import SeedreamConfig
+from ..utils.io.roots import workspace_roots_scope_from_result
+from .schemas import (
+    BrowseImagesInput,
+    EntryBound,
+    GenerationInputParams,
+    ImageToImageInput,
+    MultiImageFusionInput,
+    SequentialGenerationInput,
+    TextToImageInput,
+)
+from .handlers.browse_images import handle_browse_images
+from .handlers.image_to_image import handle_image_to_image
+from .handlers.get_model_info import handle_get_model_info
+from .handlers.multi_image_fusion import handle_multi_image_fusion
+from .handlers.sequential_generation import handle_sequential_generation
+from .handlers.text_to_image import handle_text_to_image
+
+# 泛型绑定具体输入模型，避免 Callable 逆变要求 handler 接受任意协议实现。
+_GenerationInputT = TypeVar("_GenerationInputT", bound=GenerationInputParams)
+
+_GenerationHandler = Callable[
+    [_GenerationInputT, SeedreamConfig, Context | None],
+    Awaitable[CallToolResult],
+]
+
+
+async def _run_generation_tool(
+    params: _GenerationInputT,
+    config: SeedreamConfig,
+    ctx: Context | None,
+    handler: _GenerationHandler[_GenerationInputT],
+    *,
+    workspace_roots: ListRootsResult | None = None,
+) -> CallToolResult:
+    """在工作区边界作用域内将类型化入参模型委托给生成 handler。"""
+    async with workspace_roots_scope_from_result(workspace_roots):
+        return await handler(params, config, ctx)
+
+
+async def run_text_to_image(
+    params: TextToImageInput,
+    config: SeedreamConfig,
+    ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
+) -> CallToolResult:
+    """注入工作区边界后委托 ``handle_text_to_image`` 处理文生图请求。"""
+    return await _run_generation_tool(
+        params, config, ctx, handle_text_to_image, workspace_roots=workspace_roots
+    )
+
+
+async def run_image_to_image(
+    params: ImageToImageInput,
+    config: SeedreamConfig,
+    ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
+) -> CallToolResult:
+    """注入工作区边界后委托 ``handle_image_to_image`` 处理图文生图请求。"""
+    return await _run_generation_tool(
+        params, config, ctx, handle_image_to_image, workspace_roots=workspace_roots
+    )
+
+
+async def run_multi_image_fusion(
+    params: MultiImageFusionInput,
+    config: SeedreamConfig,
+    ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
+) -> CallToolResult:
+    """注入工作区边界后委托 ``handle_multi_image_fusion`` 处理多图融合请求。"""
+    return await _run_generation_tool(
+        params, config, ctx, handle_multi_image_fusion, workspace_roots=workspace_roots
+    )
+
+
+async def run_sequential_generation(
+    params: SequentialGenerationInput,
+    config: SeedreamConfig,
+    ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
+) -> CallToolResult:
+    """注入工作区边界后委托 ``handle_sequential_generation`` 处理组图输出请求。"""
+    return await _run_generation_tool(
+        params,
+        config,
+        ctx,
+        handle_sequential_generation,
+        workspace_roots=workspace_roots,
+    )
+
+
+async def run_browse_images(
+    params: BrowseImagesInput,
+    ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
+    *,
+    entry_bound: EntryBound | None = None,
+) -> CallToolResult:
+    """注入工作区边界后委托 ``handle_browse_images`` 处理图片浏览请求。
+
+    Args:
+        params: 经 pydantic 校验的工具输入模型。
+        ctx: MCP 上下文，用于进度上报，可为 None。
+        workspace_roots: 会话 Roots 声明，None 时保持当前工作区状态。
+        entry_bound: 请求目录与条目共用的替代界（EntryBound），请求目录越出界
+            以同界门拒绝，条目与读权限求交后生效，None 时按读权限过滤。
+    """
+    async with workspace_roots_scope_from_result(workspace_roots):
+        return await handle_browse_images(params, ctx=ctx, entry_bound=entry_bound)
+
+
+async def run_get_model_info(config: SeedreamConfig) -> CallToolResult:
+    """委托 ``handle_get_model_info`` 返回当前配置模型的能力快照。"""
+    return await handle_get_model_info(config)

@@ -1,0 +1,698 @@
+"""校验模块纯函数单元测试。
+
+覆盖水印、响应格式、整数范围强制转换、最大图像数量与并行生成参数组合约束，
+不触发网络或文件 I/O，直接验证各分支的返回值与抛错语义。
+"""
+
+from collections.abc import Callable
+from dataclasses import replace
+from decimal import Decimal
+from fractions import Fraction
+from typing import cast
+
+import pytest
+
+from seedream_mcp.definitions.conventions import MAX_SEQUENTIAL_TOTAL_IMAGES
+from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
+from seedream_mcp.utils.core.validators import (
+    _coerce_int_in_range,
+    parse_bool,
+    resolve_sequential_max_images,
+    validate_background,
+    validate_common_generation_params,
+    validate_generation_tools,
+    validate_layer_decomposition,
+    validate_max_images,
+    validate_optimize_prompt_options,
+    validate_output_format,
+    validate_parallel_generation_options,
+    validate_prompt,
+    validate_response_format,
+    validate_size_for_model,
+    validate_stream,
+    validate_watermark,
+)
+from seedream_mcp.utils.model.capabilities import (
+    ModelCapabilities,
+    capability_param_label,
+)
+
+# 5.0 Pro 模型标识，background 透明通道参数 5.0 Pro 与 5.0 Flash 家族均支持。
+_PRO_MODEL_ID = "doubao-seedream-5-0-pro-260628"
+
+# 5.0（lite）模型标识，tools 条目级用例须家族声明 supports_tools 才能越过能力门。
+_LITE_MODEL_ID = "doubao-seedream-5-0-260128"
+
+# ==================== parse_bool ====================
+
+
+def test_parse_bool_error_message_is_plain_text() -> None:
+    """解析失败消息为纯文本：分隔符用正斜杠，不因反斜杠转义出控制字符。"""
+    with pytest.raises(SeedreamConfigError) as exc_info:
+        parse_bool("maybe")
+
+    message = exc_info.value.message
+    assert "true/false/yes/no/on/off/1/0" in message
+    assert all(ord(ch) >= 0x20 for ch in message)
+
+
+def test_parse_bool_none_returns_false() -> None:
+    """None 视为未配置返回 False，与 docstring 声明一致，不进入解析失败分支。"""
+    assert parse_bool(None) is False
+
+
+# ==================== validate_watermark ====================
+
+
+def test_validate_watermark_bool_true() -> None:
+    """watermark 为 bool True 接受。"""
+    assert validate_watermark(True) is True
+
+
+def test_validate_watermark_bool_false() -> None:
+    """watermark 为 bool False 接受。"""
+    assert validate_watermark(False) is False
+
+
+@pytest.mark.parametrize("val", ["true", "TRUE", "True", "1", "yes", "YES", "on"])
+def test_validate_watermark_truthy_strings(val: str) -> None:
+    """真值字符串各变体归一化为 True。"""
+    assert validate_watermark(val) is True
+
+
+@pytest.mark.parametrize("val", ["false", "FALSE", "0", "no", "No", "off"])
+def test_validate_watermark_falsy_strings(val: str) -> None:
+    """假值字符串各变体归一化为 False。"""
+    assert validate_watermark(val) is False
+
+
+def test_validate_watermark_strips_whitespace() -> None:
+    """首尾空白剥离后解析。"""
+    assert validate_watermark("  true  ") is True
+    assert validate_watermark("  off\n") is False
+
+
+def test_validate_watermark_invalid_string() -> None:
+    """无法识别的字符串抛校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="水印参数"):
+        validate_watermark("maybe")
+
+
+def test_validate_watermark_invalid_type() -> None:
+    """非字符串非布尔类型抛校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="水印参数"):
+        validate_watermark(123)
+
+
+def test_validate_watermark_none_rejected() -> None:
+    """None 不接受，与 parse_bool 的缺省语义区分。"""
+    with pytest.raises(SeedreamValidationError, match="水印参数"):
+        validate_watermark(None)
+
+
+# ==================== validate_response_format ====================
+
+
+def test_validate_response_format_url() -> None:
+    """url 取值接受。"""
+    assert validate_response_format("url") == "url"
+
+
+def test_validate_response_format_b64_json() -> None:
+    """b64_json 取值接受。"""
+    assert validate_response_format("b64_json") == "b64_json"
+
+
+def test_validate_response_format_normalizes_case_and_whitespace() -> None:
+    """大小写与首尾空白归一化后匹配合法取值。"""
+    assert validate_response_format("URL") == "url"
+    assert validate_response_format(" B64_JSON ") == "b64_json"
+
+
+def test_validate_response_format_invalid_value() -> None:
+    """非法取值抛校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="response_format"):
+        validate_response_format("jpeg")
+
+
+def test_validate_response_format_empty() -> None:
+    """空字符串抛校验错误。"""
+    with pytest.raises(SeedreamValidationError):
+        validate_response_format("")
+
+
+def test_validate_response_format_non_string() -> None:
+    """非字符串输入抛校验错误。"""
+    with pytest.raises(SeedreamValidationError):
+        validate_response_format(123)  # type: ignore[arg-type]
+
+
+# ==================== validate_max_images ====================
+
+
+def test_validate_max_images_int() -> None:
+    """int 输入原值接受。"""
+    assert validate_max_images(5) == 5
+
+
+def test_validate_max_images_boundary_min() -> None:
+    """下界值 1 接受。"""
+    assert validate_max_images(1) == 1
+
+
+def test_validate_max_images_boundary_max() -> None:
+    """上界值 MAX_SEQUENTIAL_TOTAL_IMAGES 接受。"""
+    assert validate_max_images(MAX_SEQUENTIAL_TOTAL_IMAGES) == MAX_SEQUENTIAL_TOTAL_IMAGES
+
+
+def test_validate_max_images_integer_float() -> None:
+    """整数浮点如 3.0 允许转换为 int。"""
+    assert validate_max_images(3.0) == 3
+
+
+def test_validate_max_images_non_integer_float() -> None:
+    """非整数浮点拒绝，避免静默截断。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        validate_max_images(3.5)
+
+
+def test_validate_max_images_bool_rejected() -> None:
+    """bool 是 int 子类但须被显式拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        validate_max_images(True)
+
+
+def test_validate_max_images_string_int() -> None:
+    """整数字符串转换为 int。"""
+    assert validate_max_images("4") == 4
+
+
+def test_validate_max_images_below_min() -> None:
+    """低于下界抛校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="必须在"):
+        validate_max_images(0)
+
+
+def test_validate_max_images_above_max() -> None:
+    """高于上界抛校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="必须在"):
+        validate_max_images(MAX_SEQUENTIAL_TOTAL_IMAGES + 1)
+
+
+# ==================== resolve_sequential_max_images ====================
+
+
+def test_resolve_sequential_max_images_explicit_value_passthrough() -> None:
+    """显式 max_images 原值返回，不参与推导。"""
+    assert resolve_sequential_max_images(7, 3) == 7
+
+
+def test_resolve_sequential_max_images_derives_from_reference_count() -> None:
+    """缺省 max_images 按总上限减参考图张数推导。"""
+    assert resolve_sequential_max_images(None, 3) == MAX_SEQUENTIAL_TOTAL_IMAGES - 3
+
+
+def test_resolve_sequential_max_images_defaults_to_no_reference() -> None:
+    """参考图张数缺省按 0 推导为总上限。"""
+    assert resolve_sequential_max_images(None) == MAX_SEQUENTIAL_TOTAL_IMAGES
+
+
+def test_resolve_sequential_max_images_none_count_as_zero() -> None:
+    """None 张数在 callee 内归零，null 守卫不向调用方转嫁。"""
+    assert resolve_sequential_max_images(None, None) == MAX_SEQUENTIAL_TOTAL_IMAGES
+
+
+# ==================== _coerce_int_in_range ====================
+
+
+def test_coerce_int_in_range() -> None:
+    """区间内 int 原值返回。"""
+    assert _coerce_int_in_range(5, "f", 1, 10) == 5
+
+
+def test_coerce_integer_float() -> None:
+    """整数浮点转换为 int。"""
+    assert _coerce_int_in_range(5.0, "f", 1, 10) == 5
+
+
+def test_coerce_non_integer_float_rejected() -> None:
+    """非整数浮点拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_int_in_range(5.5, "f", 1, 10)
+
+
+@pytest.mark.parametrize("value", [Decimal("2.9"), Fraction(5, 2)])
+def test_coerce_non_integer_rational_rejected(value: Decimal | Fraction) -> None:
+    """Decimal 与 Fraction 的非整数值拒绝，与 float 分支同规则，不静默截断。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_int_in_range(value, "f", 1, 10)
+
+
+def test_coerce_integer_decimal_accepted() -> None:
+    """整数值的 Decimal 允许转换为 int。"""
+    assert _coerce_int_in_range(Decimal("2"), "f", 1, 10) == 2
+
+
+@pytest.mark.parametrize("value", [Decimal("Infinity"), Decimal("-Infinity")])
+def test_coerce_infinite_decimal_rejected(value: Decimal) -> None:
+    """Decimal 无穷经 int() 抛 OverflowError，转译为参数校验错误不外逃。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_int_in_range(value, "f", 1, 10)
+
+
+def test_coerce_bool_rejected() -> None:
+    """bool 是 int 子类但须被拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_int_in_range(True, "f", 1, 10)
+
+
+def test_coerce_false_bool_rejected() -> None:
+    """False 同 True 一样被拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_int_in_range(False, "f", 1, 10)
+
+
+def test_coerce_string_int() -> None:
+    """整数字符串转换为 int。"""
+    assert _coerce_int_in_range("3", "f", 1, 10) == 3
+
+
+@pytest.mark.parametrize("value", ["1_5", "+-5", "5x", "0x10", "1."])
+def test_coerce_lenient_int_syntax_strings_rejected(value: str) -> None:
+    """int() 宽松语法（下划线分隔、符号并置、非纯数字）的字符串拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_int_in_range(value, "f", 1, 10)
+
+
+@pytest.mark.parametrize("value,expected", [(" 5 ", 5), ("+5", 5), ("-3", -3)])
+def test_coerce_string_with_sign_or_padding_accepted(value: str, expected: int) -> None:
+    """可选正负号与首尾空白的纯数字字符串仍接受。"""
+    assert _coerce_int_in_range(value, "f", -10, 10) == expected
+
+
+@pytest.mark.parametrize("value", ["", "   ", "+", "-", "+-"])
+def test_coerce_empty_or_sign_only_strings_rejected(value: str) -> None:
+    """空串与仅符号串拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_int_in_range(value, "f", 1, 10)
+
+
+def test_coerce_invalid_string() -> None:
+    """无法解析的字符串抛整数校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_int_in_range("abc", "f", 1, 10)
+
+
+def test_coerce_none_rejected() -> None:
+    """None 抛整数校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_int_in_range(None, "f", 1, 10)
+
+
+def test_coerce_below_min() -> None:
+    """低于区间下界抛校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="必须在"):
+        _coerce_int_in_range(0, "f", 1, 10)
+
+
+def test_coerce_above_max() -> None:
+    """高于区间上界抛校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="必须在"):
+        _coerce_int_in_range(11, "f", 1, 10)
+
+
+def test_coerce_boundary_min() -> None:
+    """区间下界值接受。"""
+    assert _coerce_int_in_range(1, "f", 1, 10) == 1
+
+
+def test_coerce_boundary_max() -> None:
+    """区间上界值接受。"""
+    assert _coerce_int_in_range(10, "f", 1, 10) == 10
+
+
+# ==================== validate_parallel_generation_options ====================
+
+
+def test_parallel_options_single_request_default_parallelism() -> None:
+    """request_count=1、parallelism=None 时 parallelism 取 min(1, max)=1。"""
+    rc, par = validate_parallel_generation_options(request_count=1, parallelism=None, stream=False)
+    assert rc == 1
+    assert par == 1
+
+
+def test_parallel_options_defaults_parallelism_to_request_count() -> None:
+    """parallelism=None 时取 min(request_count, max_request_count)。"""
+    rc, par = validate_parallel_generation_options(request_count=3, parallelism=None, stream=False)
+    assert rc == 3
+    assert par == 3
+
+
+def test_parallel_options_explicit_parallelism() -> None:
+    """显式 parallelism 在合法范围内原值生效。"""
+    rc, par = validate_parallel_generation_options(request_count=4, parallelism=2, stream=False)
+    assert rc == 4
+    assert par == 2
+
+
+def test_parallel_options_parallelism_exceeds_request_count() -> None:
+    """parallelism 大于 request_count 抛校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="不能大于"):
+        validate_parallel_generation_options(request_count=2, parallelism=3, stream=False)
+
+
+def test_parallel_options_stream_single_request() -> None:
+    """stream=true 时 request_count 必须为 1。"""
+    rc, par = validate_parallel_generation_options(request_count=1, parallelism=None, stream=True)
+    assert rc == 1
+
+
+def test_parallel_options_stream_rejects_multi_request() -> None:
+    """stream=true 搭配多请求抛校验错误。"""
+    with pytest.raises(SeedreamValidationError, match="stream=true"):
+        validate_parallel_generation_options(request_count=2, parallelism=None, stream=True)
+
+
+def test_parallel_options_request_count_above_max() -> None:
+    """request_count 超上限抛校验错误。"""
+    with pytest.raises(SeedreamValidationError):
+        validate_parallel_generation_options(request_count=11, parallelism=None, stream=False)
+
+
+def test_parallel_options_parallelism_above_max() -> None:
+    """parallelism 超上限抛校验错误。"""
+    with pytest.raises(SeedreamValidationError):
+        validate_parallel_generation_options(request_count=10, parallelism=11, stream=False)
+
+
+def test_parallel_options_parallelism_equal_request_count_ok() -> None:
+    """parallelism == request_count 不触发「不能大于」约束。"""
+    rc, par = validate_parallel_generation_options(request_count=3, parallelism=3, stream=False)
+    assert rc == 3
+    assert par == 3
+
+
+# ==================== validate_optimize_prompt_options ====================
+
+
+def test_optimize_options_accept_mode_only() -> None:
+    """仅含 mode 的合法取值通过；缺省 mode 归一化为 standard。"""
+    model_id = "doubao-seedream-4-0-250828"
+    assert validate_optimize_prompt_options({"mode": "fast"}, model_id) == {"mode": "fast"}
+    assert validate_optimize_prompt_options({}, model_id) == {"mode": "standard"}
+    assert validate_optimize_prompt_options(None, model_id) is None
+
+
+def test_optimize_options_reject_unknown_keys() -> None:
+    """未知字段显式拒绝而非静默丢弃，与 validate_generation_tools 的口径一致。"""
+    with pytest.raises(SeedreamValidationError, match="包含不支持的字段"):
+        validate_optimize_prompt_options(
+            {"mode": "standard", "level": 3}, "doubao-seedream-4-0-250828"
+        )
+
+
+# ==================== validate_background：output_format 类型防御 ====================
+
+
+def test_validate_background_rejects_non_string_output_format() -> None:
+    """output_format 非字符串时显式报错，与 background 参数的类型防御口径一致。"""
+    with pytest.raises(SeedreamValidationError, match="output_format 必须为字符串"):
+        validate_background("transparent", _PRO_MODEL_ID, output_format=123)  # type: ignore[arg-type]
+
+
+def test_validate_background_rejects_non_string_output_format_for_opaque() -> None:
+    """background 取 opaque 时同样先做 output_format 类型校验，不因短路跳过。"""
+    with pytest.raises(SeedreamValidationError, match="output_format 必须为字符串"):
+        validate_background("opaque", _PRO_MODEL_ID, output_format=["jpeg"])  # type: ignore[arg-type]
+
+
+# ==================== 单边像素区间约束 ====================
+
+
+def _make_caps(min_pixels: int | None, max_pixels: int | None) -> ModelCapabilities:
+    """构造仅像素上下限可变、其余字段取固定值的测试能力声明。"""
+    return ModelCapabilities(
+        family="test-family",
+        display_name="测试模型",
+        supports_fast_optimize_prompt=True,
+        max_reference_images=14,
+        supports_layer_decomposition=False,
+        supports_background=False,
+        allowed_presets=frozenset({"1K"}),
+        min_size_pixels=min_pixels,
+        max_size_pixels=max_pixels,
+        supports_output_format=True,
+        supports_stream=True,
+        supports_tools=True,
+        supports_sequential_generation=True,
+    )
+
+
+def test_size_single_sided_min_bound_applies_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """仅声明 min 时下限独立生效，不因 max 未声明而整体跳过像素区间校验。"""
+    import seedream_mcp.utils.core.validators as validators_module
+
+    monkeypatch.setattr(
+        validators_module, "get_model_capabilities", lambda _mid: _make_caps(1_000, None)
+    )
+    with pytest.raises(SeedreamValidationError, match="总像素需不低于 1000"):
+        validators_module.validate_size_for_model("10x10", "any-model")
+    assert validators_module.validate_size_for_model("40x40", "any-model") == "40x40"
+
+
+def test_size_single_sided_max_bound_applies_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """仅声明 max 时上限独立生效。"""
+    import seedream_mcp.utils.core.validators as validators_module
+
+    monkeypatch.setattr(
+        validators_module, "get_model_capabilities", lambda _mid: _make_caps(None, 1_000)
+    )
+    with pytest.raises(SeedreamValidationError, match="总像素需不超过 1000"):
+        validators_module.validate_size_for_model("50x50", "any-model")
+    assert validators_module.validate_size_for_model("20x20", "any-model") == "20x20"
+
+
+def test_size_both_bounds_message_keeps_range_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    """双边声明时错误消息保持区间形式，既有调用方依赖的文案不变。"""
+    import seedream_mcp.utils.core.validators as validators_module
+
+    monkeypatch.setattr(
+        validators_module, "get_model_capabilities", lambda _mid: _make_caps(1_000, 2_000)
+    )
+    with pytest.raises(SeedreamValidationError, match=r"总像素需在 \[1000, 2000\] 范围内"):
+        validators_module.validate_size_for_model("80x80", "any-model")
+
+
+# ==================== 能力报错文案派生 ====================
+
+
+def test_output_format_error_message_enumerates_supporting_families() -> None:
+    """output_format 拒绝文案含当前模型、参数名、支持家族清单与配置指引。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_output_format("png", "doubao-seedream-4-5-251128")
+
+    message = exc_info.value.message
+    output_label = capability_param_label("supports_output_format")
+    assert f"当前模型 doubao-seedream-4-5-251128 不支持{output_label}" in message
+    assert "doubao-seedream-5.0-pro、doubao-seedream-5.0、doubao-seedream-5.0-flash" in message
+    assert "如需更换模型，请告知用户调整服务器配置" in message
+
+
+def test_tools_error_message_enumerates_supporting_families() -> None:
+    """tools 拒绝文案含当前模型、参数名、支持家族清单与配置指引。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_generation_tools([{"type": "web_search"}], "doubao-seedream-4-5-251128")
+
+    message = exc_info.value.message
+    tools_label = capability_param_label("supports_tools")
+    assert f"当前模型 doubao-seedream-4-5-251128 不支持{tools_label}" in message
+    assert "支持的模型：doubao-seedream-5.0；" in message
+    assert "如需更换模型，请告知用户调整服务器配置" in message
+
+
+def test_capability_error_messages_follow_capability_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """报错文案的家族枚举随能力表派生，翻转声明后文案同步增删家族名。"""
+    import seedream_mcp.utils.model.capabilities as model_capabilities_module
+
+    table = dict(model_capabilities_module.MODEL_CAPABILITIES)
+    table[model_capabilities_module.MODEL_FAMILY_45] = replace(
+        table[model_capabilities_module.MODEL_FAMILY_45], supports_output_format=True
+    )
+    table[model_capabilities_module.MODEL_FAMILY_40] = replace(
+        table[model_capabilities_module.MODEL_FAMILY_40], supports_tools=True
+    )
+    monkeypatch.setattr(model_capabilities_module, "MODEL_CAPABILITIES", table)
+
+    with pytest.raises(SeedreamValidationError) as output_format_info:
+        validate_output_format("png", "doubao-seedream-4-0-250828")
+    assert "doubao-seedream-4.5" in output_format_info.value.message
+
+    with pytest.raises(SeedreamValidationError) as tools_info:
+        validate_generation_tools([{"type": "web_search"}], "doubao-seedream-5-0-pro-260628")
+    assert "doubao-seedream-4.0" in tools_info.value.message
+
+
+def test_deprecated_model_tokens_is_immutable_frozenset() -> None:
+    """已下线模型 token 清单为 frozenset，公共清单不可被原地变异。"""
+    from seedream_mcp.utils.model.capabilities import DEPRECATED_MODEL_TOKENS
+
+    assert isinstance(DEPRECATED_MODEL_TOKENS, frozenset)
+    assert "doubao-seedream-3-0" in DEPRECATED_MODEL_TOKENS
+    with pytest.raises(AttributeError):
+        DEPRECATED_MODEL_TOKENS.add("doubao-seedream-x")  # type: ignore[attr-defined]
+
+
+# ==================== 类型守卫与空白拒绝分支表驱动 ====================
+
+
+def _invoke_common_generation_params(prompt: object) -> None:
+    """以其余公共参数合法取值调用 validate_common_generation_params，仅 prompt 可变。"""
+    validate_common_generation_params(
+        prompt=prompt,  # type: ignore[arg-type]
+        optimize_prompt_options=None,
+        size="2K",
+        watermark=True,
+        response_format="url",
+        output_format=None,
+        stream=False,
+        tools=None,
+        model_id=_PRO_MODEL_ID,
+    )
+
+
+# 检查顺序被重排成先 strip 后 isinstance 时，
+# AttributeError 会击穿本表而非以 SeedreamValidationError 静默漏过。
+@pytest.mark.parametrize(
+    ("invoke", "expected_field"),
+    [
+        pytest.param(lambda: validate_prompt(cast(str, 123)), "prompt", id="prompt-type"),
+        pytest.param(lambda: validate_prompt(""), "prompt", id="prompt-empty"),
+        pytest.param(lambda: validate_prompt("   "), "prompt", id="prompt-whitespace"),
+        pytest.param(lambda: validate_watermark(123), "watermark", id="watermark-type"),
+        pytest.param(lambda: validate_watermark("   "), "watermark", id="watermark-whitespace"),
+        pytest.param(
+            lambda: validate_response_format(cast(str, 123)),
+            "response_format",
+            id="response-format-type",
+        ),
+        pytest.param(
+            lambda: validate_response_format(""), "response_format", id="response-format-empty"
+        ),
+        pytest.param(
+            lambda: validate_output_format(123, _PRO_MODEL_ID),
+            "output_format",
+            id="output-format-type",
+        ),
+        pytest.param(
+            lambda: validate_output_format("   ", _PRO_MODEL_ID),
+            "output_format",
+            id="output-format-whitespace",
+        ),
+        pytest.param(
+            lambda: validate_generation_tools("web_search", _PRO_MODEL_ID), "tools", id="tools-type"
+        ),
+        pytest.param(
+            lambda: validate_generation_tools([123], _LITE_MODEL_ID),
+            "tools[1]",
+            id="tools-item-type",
+        ),
+        pytest.param(
+            lambda: validate_generation_tools([{"type": 123}], _LITE_MODEL_ID),
+            "tools[1].type",
+            id="tools-item-type-value",
+        ),
+        pytest.param(
+            lambda: validate_generation_tools([{"type": "   "}], _LITE_MODEL_ID),
+            "tools[1].type",
+            id="tools-item-type-whitespace",
+        ),
+        pytest.param(
+            lambda: validate_stream(cast(bool, "true"), _PRO_MODEL_ID), "stream", id="stream-type"
+        ),
+        pytest.param(lambda: validate_max_images([1]), "max_images", id="max-images-type"),
+        pytest.param(lambda: validate_max_images(""), "max_images", id="max-images-empty"),
+        pytest.param(
+            lambda: validate_size_for_model(cast(str, 123), _PRO_MODEL_ID), "size", id="size-type"
+        ),
+        pytest.param(lambda: validate_size_for_model("", _PRO_MODEL_ID), "size", id="size-empty"),
+        pytest.param(
+            lambda: validate_size_for_model("   ", _PRO_MODEL_ID), "size", id="size-whitespace"
+        ),
+        pytest.param(
+            lambda: validate_layer_decomposition("true", _PRO_MODEL_ID),
+            "layer_decomposition",
+            id="layer-decomposition-type",
+        ),
+        pytest.param(
+            lambda: validate_background(123, _PRO_MODEL_ID), "background", id="background-type"
+        ),
+        pytest.param(
+            lambda: validate_background("   ", _PRO_MODEL_ID),
+            "background",
+            id="background-whitespace",
+        ),
+        pytest.param(
+            lambda: validate_optimize_prompt_options("standard", _PRO_MODEL_ID),
+            "optimize_prompt_options",
+            id="optimize-options-type",
+        ),
+        pytest.param(
+            lambda: validate_optimize_prompt_options({"mode": 123}, _PRO_MODEL_ID),
+            "optimize_prompt_options.mode",
+            id="optimize-mode-type",
+        ),
+        pytest.param(
+            lambda: validate_optimize_prompt_options({"mode": "   "}, _PRO_MODEL_ID),
+            "optimize_prompt_options.mode",
+            id="optimize-mode-whitespace",
+        ),
+        pytest.param(
+            lambda: validate_parallel_generation_options(
+                request_count=object(), parallelism=None, stream=False
+            ),
+            "request_count",
+            id="parallel-request-count-type",
+        ),
+        pytest.param(
+            lambda: validate_parallel_generation_options(
+                request_count="", parallelism=None, stream=False
+            ),
+            "request_count",
+            id="parallel-request-count-empty",
+        ),
+        pytest.param(
+            lambda: _invoke_common_generation_params(123), "prompt", id="common-params-prompt-type"
+        ),
+        pytest.param(
+            lambda: _invoke_common_generation_params(None),
+            "prompt",
+            id="common-params-prompt-missing",
+        ),
+    ],
+)
+def test_public_validators_reject_unexpected_type_and_blank_with_field(
+    invoke: Callable[[], object], expected_field: str
+) -> None:
+    """公开 validate_* 的非预期类型与空白值一律抛 SeedreamValidationError 且 field 指向对应参数。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        invoke()
+
+    assert exc_info.value.field == expected_field
+
+
+# ==================== 可编码性拒绝 ====================
+
+
+def test_validate_prompt_rejects_unencodable_surrogate() -> None:
+    """含未配对代理字符的提示词经共享编码预检拒绝，文案与 field 锁定不变。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_prompt("前缀\ud800后缀")
+
+    assert exc_info.value.message == "提示词包含无法编码的字符"
+    assert exc_info.value.field == "prompt"
