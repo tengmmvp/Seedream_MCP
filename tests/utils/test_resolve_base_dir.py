@@ -75,6 +75,21 @@ def test_resolve_base_dir_rejects_invalid_save_path_form(
         _resolve_base_dir("\\\\host\\share\\img")
 
 
+@pytest.mark.parametrize("bad", ["/", "///"])
+def test_resolve_base_dir_rejects_filesystem_root_save_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """save_path 呈文件系统根与纯分隔符形态时经参数层拒绝，不再宽容解析为根。"""
+    base = tmp_path / "images_root"
+    base.mkdir()
+    _use_config(SeedreamConfig(api_key="test_key", data_root=str(base)), monkeypatch)
+
+    with pytest.raises(SeedreamValidationError, match="保存路径无效"):
+        prevalidate_save_path(bad)
+    with pytest.raises(SeedreamValidationError, match="保存路径无效"):
+        _resolve_base_dir(bad)
+
+
 def test_resolve_base_dir_rejects_save_path_link_cycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

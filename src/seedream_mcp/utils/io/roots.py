@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import sys
+import threading
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from contextvars import Token
 from pathlib import Path
@@ -17,18 +18,11 @@ from mcp.shared.message import ServerMessageMetadata
 from mcp.types import REQUEST_TIMEOUT, ListRootsRequest, ListRootsResult
 from mcp.types.version import is_version_at_least
 
+from ..core.bounded_store import store_bounded_entry
 from ..core.errors import as_plain, base_detail_error_text, safe_error_text
 from ..core.logs import get_logger
-from .path import (
-    apply_workspace_roots,
-    has_null_byte,
-    has_windows_colon_component,
-    is_drive_relative,
-    is_unc_path,
-    is_windows_reserved_name,
-    is_windows_rooted_without_drive,
-    reset_workspace_roots,
-)
+from ..core.sanitizers import strip_uri_userinfo
+from .path import apply_workspace_roots, is_unc_path, normalize_path, reset_workspace_roots
 
 logger = get_logger()
 
@@ -206,19 +200,47 @@ def roots_degraded(roots_result: Any, applied_roots: list[Path]) -> bool:
     return bool(getattr(roots_result, "roots", [])) and not applied_roots
 
 
+# 已告警的被拒 roots URI：roots 每请求重新取回并转换，
+# 同一根（键为剥除 userinfo 的 URI，轮换凭据不产生新键）驻留期内仅首条 warning、
+# 重复降 debug，抑制每次工具调用重发的重复告警冲刷轮转日志。
+# 转换经 to_thread 并发执行，加锁保线程安全。
+# 容量超限按最久未用序驱逐，防碎片化 URI 无界常驻内存。
+_WARNED_ROOT_URIS_MAX = 1024
+_WARNED_ROOT_URIS: OrderedDict[str, None] = OrderedDict()
+_WARNED_ROOT_URIS_LOCK = threading.Lock()
+
+
+def _warn_rejected_root_uri(uri: str) -> None:
+    """被拒 roots URI 仅首条 warning 留运维信号（与未声明区分），重复降 debug。
+
+    记录与去重键均取剥除 userinfo 的形态，防声明内嵌凭据落盘。
+    """
+    sanitized_uri = strip_uri_userinfo(uri)
+    with _WARNED_ROOT_URIS_LOCK:
+        first = sanitized_uri not in _WARNED_ROOT_URIS
+        store_bounded_entry(_WARNED_ROOT_URIS, sanitized_uri, None, _WARNED_ROOT_URIS_MAX)
+    if first:
+        logger.warning("MCP Roots 声明不可转换为本地路径，已丢弃: {}", sanitized_uri)
+    else:
+        logger.debug("MCP Roots 声明不可转换为本地路径，已丢弃: {}", sanitized_uri)
+
+
 def _roots_result_to_paths(roots_result: Any) -> list[Path]:
     """将 ListRootsResult 转换为去重后的本地路径列表。
 
-    各 Root 的 file:// URI 转为本地路径，UNC 形式被 _file_uri_to_path 拒绝以避免
-    触发 SMB 连接，不可解析或重复的条目跳过。
+    各 Root 的 file:// URI 转为本地路径，UNC 形式与相对 path part
+    被 _file_uri_to_path 拒绝（避免触发 SMB 连接与工作区根随进程 CWD 漂移），
+    被拒条目每 URI 仅首条 warning 后丢弃，重复条目跳过。
     """
     resolved_roots: list[Path] = []
     for root in getattr(roots_result, "roots", []):
         uri_value = getattr(root, "uri", None)
         if uri_value is None:
             continue
-        resolved_path = _file_uri_to_path(str(uri_value))
+        uri_text = str(uri_value)
+        resolved_path = _file_uri_to_path(uri_text)
         if resolved_path is None:
+            _warn_rejected_root_uri(uri_text)
             continue
         if resolved_path in resolved_roots:
             continue
@@ -265,7 +287,22 @@ async def workspace_roots_scope_from_result(
 
 
 def _file_uri_to_path(uri: str) -> Path | None:
-    """将 file:// URI 转换为本地路径，畸形形态与 normalize_path 同口径拒绝。"""
+    """将 file:// URI 转换为本地路径，畸形形态与 normalize_path 同口径拒绝。
+
+    相对 path part（file:projects/images 一类 RFC 8089 畸形）经 expanduser 后
+    按 pathlib 的 is_absolute 口径拒绝：normalize_path 无基目录时按进程 CWD 锚定，
+    工作区根随进程 CWD 漂移；~ 前缀形态先经展开锚定主目录，
+    win32 的 file:///C:/x 经 nturl2path 转出 C:\\x 绝对形态不受影响。
+    盘符根声明（win32 的 file:///C:/ 与 file:///C:）亦有意拒绝：
+    前者落点无最终分量，经 normalize_path 落点门拒绝；后者为驱动器相对形态，
+    按绝对性口径拒绝。
+
+    就分隔符集合而言，唯纯分隔符更严且有意为之：入口无条件拒绝 / 与 \\，
+    normalize_path 对纯分隔符按平台经 UNC、有根无盘符或落点门拒绝
+    （POSIX 反斜杠是合法文件名字符）；URI path 的纯反斜杠
+    本就是 RFC 8089 畸形形态，不随平台门控放宽。UNC 判定另前移至折叠前，
+    POSIX 上 ≥3 前导斜杠形态亦较折叠后判定更严（必要性见下方行内注释）。
+    """
     try:
         parsed = urlparse(uri)
     except Exception:
@@ -286,31 +323,23 @@ def _file_uri_to_path(uri: str) -> Path | None:
         # 拒绝 UNC 路径如 file://host/share，避免 Windows 下触发 SMB 连接泄露凭据。
         return None
 
-    if not path_part:
+    # pathlib 在 POSIX 会把 3 个及以上前导斜杠折叠为一个（///x 折叠出 /x），
+    # UNC 与纯分隔符（file:/// 得文件系统根）形态须在折叠前的原始字符串上拒绝；
+    # 空串亦在此拒，与 normalize_path 的空串拒绝同口径。
+    if is_unc_path(path_part) or not path_part.strip("/\\"):
         return None
 
-    # file://localhost//server/share 等 netloc 合法但 path 为 UNC 形式，resolve 会触发 SMB。
-    if is_unc_path(path_part):
-        return None
-    # 与 normalize_path 同口径显式拒绝空字节：Py3.13+ 的 resolve 不再对其抛错。
-    if has_null_byte(path_part):
+    # 展开时机与 SEEDREAM_WORKSPACE_ROOT 声明链对齐；normalize_path 多链共用
+    # 不含 expanduser，~ 前缀形态须先展开锚定主目录，未展开会被下方绝对性口径按相对拒绝。
+    try:
+        candidate = Path(path_part).expanduser()
+    except Exception:
         return None
 
-    candidate = Path(path_part)
-    # 有根无盘符形态在 win32 锚定当前盘根而非可判定的绝对位置，与 normalize_path
-    # 同口径拒绝；POSIX 无 drive 概念，绝对路径恒放行。
-    if is_windows_rooted_without_drive(candidate):
-        return None
-    # win32 的 nturl2path 已把 /c:ads 先行转为 c:\ads，盘符相对形态经转换不可达，
-    # 该分支仅为与 normalize_path 的拒绝口径对齐保留；含冒号的普通分量（NTFS ADS）
-    # 仍按完整路径判定拒绝，畸形形态不成为工作区 root。
-    if is_drive_relative(candidate) or has_windows_colon_component(str(candidate)):
-        return None
-    # 保留设备名拒绝仅 win32 生效，POSIX 上 con 等为合法目录名。
-    if sys.platform == "win32" and is_windows_reserved_name(candidate.name):
+    if not candidate.is_absolute():
         return None
 
     try:
-        return candidate.expanduser().resolve()
-    except Exception:
+        return normalize_path(str(candidate))
+    except ValueError:
         return None

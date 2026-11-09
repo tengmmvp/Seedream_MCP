@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import sys
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, cast
 
@@ -9,8 +11,9 @@ import pytest
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import NoBackChannelError
-from mcp.types import InputRequiredResult, ListRootsRequest, ListRootsResult
+from mcp.types import InputRequiredResult, ListRootsRequest, ListRootsResult, Root
 from PIL import Image
+from pydantic import FileUrl
 
 import seedream_mcp.utils.io.path as io_path_module
 import seedream_mcp.utils.io.roots as io_roots_module
@@ -143,6 +146,142 @@ async def test_workspace_roots_scope_prioritizes_mcp_roots_over_env(
         assert get_workspace_root() == mcp_root.resolve()
 
     assert get_workspace_root() == env_root.resolve()
+
+
+async def test_workspace_roots_scope_warns_and_keeps_valid_roots_on_rejected_declaration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """声明 URI 被拒时记单条 warning，其余合法 root 照常应用。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_roots_module, "logger", capture)
+    # 告警去重记忆为模块级，换新记录自复位，免受先行用例污染。
+    monkeypatch.setattr(io_roots_module, "_WARNED_ROOT_URIS", OrderedDict())
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+
+    declared = ListRootsResult(
+        roots=[
+            Root(uri=cast(Any, FileUrl("file://server/share")), name="share"),
+            Root(uri=cast(Any, FileUrl(mcp_root.as_uri())), name="mcp"),
+        ]
+    )
+
+    async with workspace_roots_scope_from_result(declared):
+        assert get_workspace_root() == mcp_root.resolve()
+
+    assert capture.warnings == ["MCP Roots 声明不可转换为本地路径，已丢弃: file://server/share"]
+
+
+async def test_workspace_roots_scope_warns_rejected_uri_once_across_conversions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一被拒 URI 跨重复转换仅首条 warning，重复降 debug 防轮转日志刷屏。"""
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_roots_module, "logger", capture)
+    monkeypatch.setattr(io_roots_module, "_WARNED_ROOT_URIS", OrderedDict())
+    declared = ListRootsResult(
+        roots=[Root(uri=cast(Any, FileUrl("file://server/share")), name="share")]
+    )
+    dropped = "MCP Roots 声明不可转换为本地路径，已丢弃: file://server/share"
+
+    async with workspace_roots_scope_from_result(declared):
+        pass
+    async with workspace_roots_scope_from_result(declared):
+        pass
+
+    assert capture.warnings == [dropped]
+    assert [m for m in capture.debug_messages if "file://server/share" in m] == [dropped]
+
+
+async def test_workspace_roots_scope_rejected_uri_dedup_is_per_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不同被拒 URI 各自记首条 warning。"""
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_roots_module, "logger", capture)
+    monkeypatch.setattr(io_roots_module, "_WARNED_ROOT_URIS", OrderedDict())
+
+    for uri in ["file://server/share", "file://nas/data"]:
+        declared = ListRootsResult(roots=[Root(uri=cast(Any, FileUrl(uri)), name="n")])
+        async with workspace_roots_scope_from_result(declared):
+            pass
+        async with workspace_roots_scope_from_result(declared):
+            pass
+
+    assert capture.warnings == [
+        "MCP Roots 声明不可转换为本地路径，已丢弃: file://server/share",
+        "MCP Roots 声明不可转换为本地路径，已丢弃: file://nas/data",
+    ]
+    assert [m for m in capture.debug_messages if "不可转换为本地路径" in m] == [
+        "MCP Roots 声明不可转换为本地路径，已丢弃: file://server/share",
+        "MCP Roots 声明不可转换为本地路径，已丢弃: file://nas/data",
+    ]
+
+
+async def test_workspace_roots_scope_warned_uri_strips_userinfo_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """被拒 URI 的 authority userinfo 不落日志，host 与 path 保留供定位声明来源。
+
+    FileUrl 解析层拒绝 userinfo 形态，此处直接以 str 喂入日志单点。
+    """
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_roots_module, "logger", capture)
+    monkeypatch.setattr(io_roots_module, "_WARNED_ROOT_URIS", OrderedDict())
+
+    io_roots_module._warn_rejected_root_uri("file://user:secret@nas/share")
+
+    assert capture.warnings == ["MCP Roots 声明不可转换为本地路径，已丢弃: file://nas/share"]
+
+
+async def test_workspace_roots_scope_warned_uri_dedup_ignores_rotating_userinfo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """轮换凭据形态的同根 URI 共用去重键，仅首条 warning，不重复刷屏与占容量。"""
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_roots_module, "logger", capture)
+    monkeypatch.setattr(io_roots_module, "_WARNED_ROOT_URIS", OrderedDict())
+
+    io_roots_module._warn_rejected_root_uri("file://user1:secret@nas/share")
+    io_roots_module._warn_rejected_root_uri("file://user2:secret@nas/share")
+
+    dropped = "MCP Roots 声明不可转换为本地路径，已丢弃: file://nas/share"
+    assert capture.warnings == [dropped]
+    assert capture.debug_messages == [dropped]
+    assert list(io_roots_module._WARNED_ROOT_URIS) == ["file://nas/share"]
+
+
+async def test_workspace_roots_scope_warned_uri_dedup_evicts_least_recent_at_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """去重记录满容量后驱逐最久未用条目：新 URI 仍首条 warning，近期重复的 URI 驻留。"""
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_roots_module, "logger", capture)
+    capacity = io_roots_module._WARNED_ROOT_URIS_MAX
+    warned = OrderedDict((f"file://host-{index}/share", None) for index in range(capacity))
+    monkeypatch.setattr(io_roots_module, "_WARNED_ROOT_URIS", warned)
+
+    oldest, refreshed = "file://host-0/share", "file://host-1/share"
+    repeat = ListRootsResult(roots=[Root(uri=cast(Any, FileUrl(refreshed)), name="n")])
+    async with workspace_roots_scope_from_result(repeat):
+        pass
+    fresh = f"file://host-{capacity}/share"
+    declared = ListRootsResult(roots=[Root(uri=cast(Any, FileUrl(fresh)), name="n")])
+    async with workspace_roots_scope_from_result(declared):
+        pass
+
+    assert capture.warnings == [f"MCP Roots 声明不可转换为本地路径，已丢弃: {fresh}"]
+    assert [m for m in capture.debug_messages if refreshed in m] == [
+        f"MCP Roots 声明不可转换为本地路径，已丢弃: {refreshed}"
+    ]
+    assert len(warned) == capacity
+    assert oldest not in warned
+    assert refreshed in warned
+    assert fresh in warned
 
 
 def test_resolve_env_workspace_root_reads_global_config(
@@ -690,9 +829,6 @@ async def test_workspace_roots_resource_legacy_unconvertible_marks_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """旧修订声明非空 roots 但全部不可转换时按降级渲染，与多轮形态同标 fallback。"""
-    from mcp.types import Root
-    from pydantic import FileUrl
-
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
@@ -858,9 +994,6 @@ async def test_workspace_roots_resource_declared_but_unconvertible_marks_fallbac
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """声明的 roots 全部不可转换为本地路径时按降级渲染，附 fallback 标记。"""
-    from mcp.types import Root
-    from pydantic import FileUrl
-
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
@@ -869,6 +1002,26 @@ async def test_workspace_roots_resource_declared_but_unconvertible_marks_fallbac
         roots=[Root(uri=cast(Any, FileUrl("file://server/share")), name="share")]
     )
     ctx = _ModernProtocolContext([], responses={"roots": unconvertible})
+
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
+    assert data["fallback"] is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="盘符根拒绝仅 win32 生效")
+async def test_workspace_roots_resource_drive_root_declaration_marks_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """盘符根声明同样不可转换，按降级渲染并回退环境根。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    drive_root = ListRootsResult(roots=[Root(uri=cast(Any, FileUrl("file:///C:/")), name="c")])
+    ctx = _ModernProtocolContext([], responses={"roots": drive_root})
 
     result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
 

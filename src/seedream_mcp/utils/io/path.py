@@ -302,20 +302,31 @@ def resolve_cached_data_root(configured_dir: str) -> Path:
     )
 
 
+def _reject_root_landing(resolved: Path, path_display: str) -> None:
+    """落点为文件系统根时抛 ValueError，用户路径与配置声明两入口同口径。"""
+    if not resolved.name:
+        raise ValueError(
+            raw_error_text("拒绝落点为文件系统根的路径: {path}", path=as_text(path_display))
+        )
+
+
 def resolve_rejecting_cycle(path: Path) -> Path:
     """单次严格 realpath 解析，仅不可解析的链接失败（ELOOP 或 Windows 1921）抛 OSError 交调用方归档。
 
     该组错误码同时覆盖链接环与超过系统解析深度的合法深链（Windows 约 64 跳、
     Linux 约 40 层），超深链与环同码不可区分、被同口径拒绝；其余 OSError（尾段
-    未创建、前缀非目录、权限等环境性错误）一律回退非严格 resolve 保持旧容忍
-    语义，resolve 自身失败自然传播。
+    未创建、前缀非目录、权限等环境性错误）一律回退非严格 resolve，
+    保持旧容忍语义，resolve 自身失败自然传播。
+    落点为文件系统根抛 ValueError，与 normalize_path 落点门同口径：根不可声明、不可寻址。
     """
     try:
-        return Path(os.path.realpath(path, strict=True))
+        resolved = Path(os.path.realpath(path, strict=True))
     except OSError as e:
         if e.errno == errno.ELOOP or getattr(e, "winerror", None) == 1921:
             raise
-        return path.resolve()
+        resolved = path.resolve()
+    _reject_root_landing(resolved, str(path))
+    return resolved
 
 
 def resolve_cached_default_images_root(workspace_root: Path) -> Path:
@@ -826,14 +837,23 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         base_dir: 基目录，用于解析相对路径。
 
     Raises:
-        ValueError: 路径为 UNC 形式、Windows 驱动器相对形式、Windows 路径分量含冒号、
-            最终分量为 Windows 保留设备名或路径无效时抛出。
+        ValueError: 路径含空字节、路径为 UNC 形式、Windows 驱动器相对形式、
+            Windows 有根无盘符形式、Windows 路径分量含冒号、
+            最终分量为 Windows 保留设备名、路径为空串、
+            resolve 后落点为文件系统根，或路径无效时抛出。
     """
     try:
         # Python 3.13 起 resolve 对空字节不再抛 ValueError，改入口显式拒绝保证
         # 跨版本行为一致。
         if has_null_byte(path):
             raise ValueError(raw_error_text("路径含空字节: {path}", path=as_text(path)))
+
+        # 空串在原始字符串判定：Path 把空串变 . 解析为当前目录，事后不可辨识；
+        # 纯分隔符形态由 UNC、有根无盘符或落点门拒绝。
+        if not path:
+            raise ValueError(
+                raw_error_text("拒绝空串路径以避免解析为当前目录: {path}", path=as_text(path))
+            )
         path_obj = Path(path)
 
         # UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须在 resolve 前拒绝。
@@ -884,26 +904,30 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
                 )
 
         if path_obj.is_absolute():
-            return path_obj.resolve()
-
-        if base_dir:
-            base_path = Path(base_dir)
-            return (base_path / path_obj).resolve()
+            resolved = path_obj.resolve()
+        elif base_dir:
+            resolved = (Path(base_dir) / path_obj).resolve()
         else:
-            return path_obj.resolve()
+            resolved = path_obj.resolve()
+
+        # 点分量形态（x/.. 等）过前置形态门后 resolve 仍可落文件系统根，按落点事后拒绝；
+        # 根不是任何合法调用的目标位置，空串因事后不可辨识仅由前置形态门拦截。
+        _reject_root_landing(resolved, path)
+        return resolved
 
     except ValueError:
         # UNC 拒绝等 ValueError 原样抛出，保留具体原因。
         raise
     except OSError as e:
         # ENAMETOOLONG 等文件系统错误单独分支，errno 原因进入错误文案，供调用方
-        # 区分拼写问题与系统级长度限制。
-        logger.error("路径标准化失败 {}: {}", path, e)
+        # 区分拼写问题与系统级长度限制；环境性失败服务端带堆栈留痕，便于排障。
+        logger.opt(exception=True).error("路径标准化环境性失败: {}", path)
         raise ValueError(
             raw_error_text("无效的路径格式: {path} ({exc})", path=as_text(path), exc=as_detail(e))
         ) from e
     except Exception as e:
-        logger.error("路径标准化失败 {}: {}", path, e)
+        # 意外异常为程序缺陷信号，带堆栈留痕。
+        logger.opt(exception=True).error("路径标准化意外失败: {}", path)
         raise ValueError(raw_error_text("无效的路径格式: {path}", path=as_text(path))) from e
 
 
@@ -937,6 +961,36 @@ def resolve_against_base(path: str, base: Path) -> BoundedResolution:
     """
     resolved = normalize_path(path, str(base))
     return BoundedResolution(resolved, is_within_resolved(resolved, base))
+
+
+def resolved_form_violation(path: str) -> str | None:
+    """检查路径背离「已 resolve 的绝对路径」词法契约，返回违约原因短语或 None。
+
+    非绝对、.. 分量与段级 NUL 全平台恒查；冒号与 Windows 保留名是 win32 文件
+    系统语义（口径镜像 normalize_path：冒号查全段、保留名仅查末段），POSIX 为
+    合法文件名字符——部署配置产出的目录段合法性由运行平台判定，保存链产出
+    文件名的形态由 sanitize_filename 保证。
+
+    Args:
+        path: 待检查的路径字符串。
+
+    Returns:
+        违约原因短语；合规的已 resolve 绝对形态返回 None。
+    """
+    path_obj = Path(path)
+    if not path_obj.is_absolute():
+        return "非绝对路径"
+    if ".." in path_obj.parts:
+        return "含 .. 分量"
+    # 绝对路径 parts 首项恒为盘符与根组成的前缀锚，其后各段为真实路径段。
+    if any(has_null_byte(part) for part in path_obj.parts[1:]):
+        return "段含 NUL 字符"
+    if sys.platform == "win32":
+        if has_windows_colon_component(path):
+            return "段含冒号"
+        if is_windows_reserved_name(path_obj.name):
+            return "段为 Windows 保留名"
+    return None
 
 
 def images_root_relative(path: str | Path, images_root: Path) -> str | None:

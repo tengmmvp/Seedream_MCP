@@ -3,9 +3,9 @@
 Windows UNC 路径的 resolve 会触发 SMB 认证，须在 resolve 前拦截。覆盖
 is_unc_path、normalize_path、_file_uri_to_path 的拒绝语义，is_within_resolved、
 多基 is_within_any 与分量级 is_within_nc_parts、is_within_any_nc_parts 的包含判定，
-以及 normalize_path 对 Windows 驱动器相对路径的同口径拒绝。pathlib 与 normpath
-在 win32 把 ``/\\host\\share`` 等混合分隔符形态归一为 UNC，混合形态的判定与拦截
-仅 win32 生效，POSIX 反斜杠是合法文件名字符。
+以及 normalize_path 对 Windows 驱动器相对路径与点分量落文件系统根的同口径拒绝。
+pathlib 与 normpath 在 win32 把 ``/\\host\\share`` 等混合分隔符形态归一为 UNC，
+混合形态的判定与拦截仅 win32 生效，POSIX 反斜杠是合法文件名字符。
 """
 
 import sys
@@ -61,6 +61,7 @@ def _patch_resolve_exploding_only_on_unc(monkeypatch: pytest.MonkeyPatch) -> Non
         "\\\\host\\c$\\file.png",
         "//host/share",
         "//host/share/file.png",
+        "///x",
     ],
 )
 def test_is_unc_path_detects_unc(path: str) -> None:
@@ -325,6 +326,39 @@ def test_normalize_path_rejects_unc_forward_slash() -> None:
         normalize_path("//host/share/file.png")
 
 
+@pytest.mark.parametrize("base_dir", [None, str(Path.cwd())])
+def test_normalize_path_rejects_empty_string(base_dir: str | None) -> None:
+    """空串在原始字符串上拒绝，不解析为当前目录。
+
+    Path 把空串变 .，判定须先于 Path 构造。
+    """
+    with pytest.raises(ValueError, match="拒绝空串路径"):
+        normalize_path("", base_dir)
+
+
+@pytest.mark.parametrize("bad", ["/", "//", "///"])
+@pytest.mark.parametrize("base_dir", [None, str(Path.cwd())])
+def test_normalize_path_rejects_pure_separator(bad: str, base_dir: str | None) -> None:
+    """纯分隔符经 UNC、有根无盘符或落点门拒绝，不解析为文件系统根。"""
+    with pytest.raises(ValueError):
+        normalize_path(bad, base_dir)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="反斜杠分隔符语义仅 win32 存在")
+@pytest.mark.parametrize("bad", ["\\", "\\\\", "\\/", "/\\"])
+def test_normalize_path_win32_rejects_backslash_separator_forms(bad: str) -> None:
+    """win32 下纯反斜杠与混合分隔符形态经 UNC 或有根无盘符门拒绝。"""
+    with pytest.raises(ValueError):
+        normalize_path(bad)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 反斜杠是合法文件名字符")
+def test_normalize_path_posix_accepts_backslash_named_file(tmp_path: Path) -> None:
+    """POSIX 字面反斜杠是合法文件名，不以纯分隔符形态误拒。"""
+    assert normalize_path("\\", str(tmp_path)) == (tmp_path / "\\").resolve()
+    assert normalize_path("a\\b.png", str(tmp_path)) == (tmp_path / "a\\b.png").resolve()
+
+
 def test_normalize_path_accepts_normal_absolute(tmp_path: Path) -> None:
     """普通绝对路径正常规范化，结果与原路径 resolve 等价。"""
     f = tmp_path / "x.png"
@@ -342,7 +376,11 @@ def test_normalize_path_resolves_relative(tmp_path: Path) -> None:
 def test_normalize_path_oserror_preserves_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """OSError 归一为 ValueError 时保留 errno 原因，不丢失为笼统的路径格式错误。"""
+    """OSError 归一为 ValueError 时保留 errno 原因，服务端同步留错误日志。
+
+    环境性失败（网络挂载不可达、超长、权限）仅靠用户可见文案排障无从下手，
+    错误日志锁定不回退到零留痕。
+    """
     import errno
 
     def _raise_enametoolong(self: Path, strict: bool = False) -> Path:
@@ -351,8 +389,12 @@ def test_normalize_path_oserror_preserves_reason(
 
     monkeypatch.setattr(Path, "resolve", _raise_enametoolong)
 
-    with pytest.raises(ValueError, match="File name too long"):
-        normalize_path(str(tmp_path / "x.png"))
+    errors: list[str] = []
+    with capture_loguru_messages(errors, level="ERROR"):
+        with pytest.raises(ValueError, match="File name too long"):
+            normalize_path(str(tmp_path / "x.png"))
+
+    assert any("路径标准化环境性失败" in message for message in errors)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="驱动器相对路径仅 Windows 有 drive 语义")
@@ -378,6 +420,48 @@ def test_normalize_path_rejects_rooted_no_drive_path(bad: str, base_dir: str | N
     """
     with pytest.raises(ValueError, match="有根无盘符"):
         normalize_path(bad, base_dir)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="盘符根语义仅 Windows 有 drive 概念")
+@pytest.mark.parametrize("base_dir", [None, str(Path.cwd())])
+@pytest.mark.parametrize("bad", ["C:\\x\\..", "C:/x/..", "C:/x/../", "C:\\", "C:/"])
+def test_normalize_path_win32_rejects_drive_root_landing(bad: str, base_dir: str | None) -> None:
+    """点分量形态与显式盘符根 resolve 落盘符根，按落点事后拒绝。
+
+    前置 UNC、有根无盘符形态门只认字面形态，x/.. 一类点分量过门后仍落盘符根。
+    """
+    with pytest.raises(ValueError, match="文件系统根"):
+        normalize_path(bad, base_dir)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 根形态无 drive 概念")
+@pytest.mark.parametrize("base_dir", [None, str(Path.cwd())])
+@pytest.mark.parametrize("bad", ["/x/..", "/x/../"])
+def test_normalize_path_posix_rejects_root_landing(bad: str, base_dir: str | None) -> None:
+    """POSIX 点分量形态 resolve 落文件系统根，与显式盘符根同口径按落点拒绝。
+
+    双前导斜杠形态已被 UNC 前置门拦截，不进入落点判定。
+    """
+    with pytest.raises(ValueError, match="文件系统根"):
+        normalize_path(bad, base_dir)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="盘符根语义仅 Windows 有 drive 概念")
+def test_normalize_path_win32_rejects_relative_dot_form_over_root_base() -> None:
+    """以盘符根或其子目录为基目录的点分量相对路径 resolve 落盘符根，落点门覆盖基目录拼接分支。"""
+    with pytest.raises(ValueError, match="文件系统根"):
+        normalize_path("x/..", "C:\\")
+    with pytest.raises(ValueError, match="文件系统根"):
+        normalize_path("../..", "C:\\x")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 根形态无 drive 概念")
+def test_normalize_path_posix_rejects_relative_dot_form_over_root_base() -> None:
+    """以根或其子目录为基目录的点分量相对路径 resolve 落根，落点门覆盖基目录拼接分支。"""
+    with pytest.raises(ValueError, match="文件系统根"):
+        normalize_path("x/..", "/")
+    with pytest.raises(ValueError, match="文件系统根"):
+        normalize_path("../..", "/etc")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX 上 /out 即合法绝对路径")
@@ -496,6 +580,33 @@ def test_file_uri_to_path_rejects_unc_path_form() -> None:
     assert _file_uri_to_path("file://localhost//server/share") is None
 
 
+def test_file_uri_to_path_rejects_unc_form_before_pathlib_folds() -> None:
+    """POSIX 上路径段 3 个及以上前导斜杠按原始字符串拒绝，不等 pathlib 折叠后判定。
+
+    pathlib 会把 ///x 折叠为 POSIX /x，折叠后的 UNC 判定会放行 /x 成为工作区根。
+    2 个前导斜杠形态一并锁定。
+    """
+    assert _file_uri_to_path("file://///x") is None
+    assert _file_uri_to_path("file:////x") is None
+
+
+def test_file_uri_to_path_rejects_root_only_uri() -> None:
+    """路径段仅剩分隔符的 file:/// 不得产出文件系统根作为工作区根。"""
+    assert _file_uri_to_path("file:///") is None
+    assert _file_uri_to_path("file:/") is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="盘符根拒绝仅 win32 生效")
+def test_file_uri_to_path_rejects_drive_root_declaration() -> None:
+    """盘符根声明拒绝为工作区根，固化有意行为。
+
+    file:///C:/ 落点无最终分量，经 normalize_path 落点门拒绝。
+    file:///C: 为驱动器相对形态，按绝对性口径拒绝。
+    """
+    assert _file_uri_to_path("file:///C:/") is None
+    assert _file_uri_to_path("file:///C:") is None
+
+
 def test_file_uri_to_path_accepts_localhost(tmp_path: Path) -> None:
     """file://localhost/path 形式接受并解析为本地路径。"""
     f = tmp_path / "x.png"
@@ -534,12 +645,122 @@ def test_file_uri_to_path_rejects_windows_reserved_final_component(
     assert _file_uri_to_path((tmp_path / final_component).as_uri()) is None
 
 
-def test_file_uri_to_path_posix_accepts_reserved_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 上 /tmp/con 为合法绝对路径")
+def test_file_uri_to_path_posix_accepts_reserved_name() -> None:
     """POSIX 上 con 为合法目录名，不按 Windows 保留名拒绝。"""
-    monkeypatch.setattr(sys, "platform", "linux")
     assert _file_uri_to_path("file:///tmp/con") is not None
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="冒号分量拒绝仅 win32 生效，POSIX 冒号是合法文件名字符"
+)
+def test_file_uri_to_path_rejects_colon_segment_declaration() -> None:
+    """含冒号段的声明根在 win32 被拒：nturl2path 转出有根无盘符形态，按绝对性口径拒绝。"""
+    assert _file_uri_to_path("file:///we:ird") is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 冒号是合法文件名字符，不经拒绝分支")
+def test_file_uri_to_path_posix_accepts_colon_segment_declaration() -> None:
+    """POSIX 上冒号是合法分量字符，含冒号段的声明根按普通绝对路径接受。"""
+    assert _file_uri_to_path("file:///we:ird") is not None
+
+
+def test_file_uri_to_path_rejects_relative_path_part(tmp_path: Path) -> None:
+    """相对 URI path part（RFC 8089 畸形）拒绝为工作区根，合法绝对形态不受影响。"""
+    assert _file_uri_to_path("file:projects/images") is None
+    image = tmp_path / "img.png"
+    image.touch()
+    result = _file_uri_to_path(image.as_uri())
+    assert result is not None
+    assert result.resolve() == image.resolve()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 上 /tmp/con 为合法绝对路径")
+def test_file_uri_to_path_posix_rejects_relative_path_part() -> None:
+    """POSIX 上相对 path part 同样拒绝，绝对形态不受影响。"""
+    assert _file_uri_to_path("file:projects/images") is None
+    assert _file_uri_to_path("file:///tmp/con") is not None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="无授权段盘符 path part 仅 win32 转出绝对形态")
+def test_file_uri_to_path_win32_accepts_drive_absolute_path_part() -> None:
+    """win32 无授权段盘符形态经 nturl2path 转出盘符绝对路径，不因相对拒绝误伤。"""
+    drive = Path.cwd().drive
+    assert _file_uri_to_path(f"file:{drive}/x") is not None
+    assert _file_uri_to_path(f"file:/{drive}/x") is not None
+
+
+# ==================== file URI 入口与 normalize_path 口径一致性 ====================
+
+
+def _assert_rejected_consistently(declared: str, uri: str) -> None:
+    """normalize_path 拒绝的路径形态经 file URI 入口同样拒绝。"""
+    with pytest.raises(ValueError):
+        normalize_path(declared)
+    assert _file_uri_to_path(uri) is None
+
+
+def test_file_uri_to_path_rejection_matches_normalize_path_unc_path_form() -> None:
+    """netloc 合法但 path 为 UNC 形态时，两入口一致拒绝，跨平台。"""
+    _assert_rejected_consistently("//server/share", "file://localhost//server/share")
+
+
+def test_file_uri_to_path_rejection_matches_normalize_path_null_byte(
+    tmp_path: Path,
+) -> None:
+    """空字节形态在两入口一致拒绝，跨平台。"""
+    declared = str(tmp_path / "x\x00y")
+    _assert_rejected_consistently(declared, Path(declared).as_uri())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="冒号分量与保留名拒绝仅 win32 生效")
+def test_file_uri_to_path_rejection_matches_normalize_path_windows_shapes() -> None:
+    """ADS 冒号分量与保留设备名（含尾点尾空格形态）在两入口一致拒绝。"""
+    base = Path.cwd().drive + "\\x"
+    for declared in [base + "\\photo.png:hidden", base + "\\con", base + "\\nul. "]:
+        _assert_rejected_consistently(declared, Path(declared).as_uri())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="有根无盘符拒绝仅 win32 生效")
+def test_file_uri_to_path_rejection_matches_normalize_path_rooted_no_drive() -> None:
+    """win32 有根无盘符形态经 file URI 入口与 normalize_path 一致拒绝。"""
+    _assert_rejected_consistently("\\foo\\bar.png", "file:///foo/bar.png")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="反斜杠同为分隔符仅 win32 成立")
+def test_file_uri_to_path_pure_separator_rejection_matches_normalize_path_win32() -> None:
+    """win32 上纯分隔符（含反斜杠）两入口一致拒绝，门控集合在此平台同为 / 与 \\。"""
+    _assert_rejected_consistently("/\\", "file:///\\")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 反斜杠是合法文件名字符")
+def test_file_uri_to_path_pure_separator_rejection_stricter_than_normalize_path_posix() -> None:
+    """POSIX 上纯分隔符 URI path（含反斜杠）被 URI 入口拒绝而 normalize_path 口径放行，更严系有意为之。
+
+    URI path 的纯反斜杠本就是 RFC 8089 畸形形态，入口分隔符集合无条件含 \\，
+    不随 normalize_path 的平台门控放宽。
+    """
+    assert _file_uri_to_path("file:///\\") is None
+    assert _file_uri_to_path("file:///%5C") is None
+    assert normalize_path("/\\") == Path("/\\").resolve()
+
+
+def test_file_uri_to_path_acceptance_matches_normalize_path(tmp_path: Path) -> None:
+    """放行形态经 file URI 入口与 normalize_path 产出一致，锁定委托不漂移。"""
+    image = tmp_path / "img.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert _file_uri_to_path(image.as_uri()) == normalize_path(str(image))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="最终分量尾点尾空格剥离仅 win32 生效")
+def test_file_uri_to_path_acceptance_polishes_trailing_dot_like_normalize_path(
+    tmp_path: Path,
+) -> None:
+    """win32 尾点尾空格剥离经 file URI 入口同样生效，返回名与实际打开的文件名一致。"""
+    declared = tmp_path / "dir."
+    resolved = _file_uri_to_path(declared.as_uri())
+    assert resolved == normalize_path(str(declared))
+    assert resolved is not None and resolved.name == "dir"
 
 
 # ==================== 图片目录声明的 UNC 拒绝 ====================

@@ -119,6 +119,20 @@ async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(
     assert exc_info.value.field == "image"
 
 
+async def test_prepare_image_input_root_landing_reports_invalid_path(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """相对点分量上跳落文件系统根的参考图经落点门拒绝，不误报为越界。"""
+    del tmp_path
+    _images_root(workspace_root)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("../" * 20)
+    assert "拒绝落点为文件系统根" in exc_info.value.message
+    assert "路径不在读取范围内" not in exc_info.value.message
+    assert exc_info.value.field == "image"
+
+
 async def test_prepare_image_input_in_bounds_diagnostics_echo_real_paths(
     workspace_root: Path, tmp_path: Path
 ) -> None:

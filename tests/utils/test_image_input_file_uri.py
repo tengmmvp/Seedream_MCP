@@ -60,3 +60,8 @@ def test_file_uri_to_path_accepts_localhost_with_drive() -> None:
 def test_file_uri_to_path_rejects_localhost_unc_path() -> None:
     """file://localhost//server/share 的 path 部分为 UNC 形态，resolve 前拒绝。"""
     assert _file_uri_to_path("file://localhost//server/share") is None
+
+
+def test_file_uri_to_path_expands_tilde_segment_to_user_home() -> None:
+    """file:~/x 的 ~ 段展开到用户主目录，不相对解析进进程 CWD。"""
+    assert _file_uri_to_path("file:~/x") == (Path.home() / "x").resolve()

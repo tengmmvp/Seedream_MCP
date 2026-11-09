@@ -615,6 +615,27 @@ def test_resolve_rejecting_cycle_rejects_link_cycle(tmp_path: Path) -> None:
         io_path_module.resolve_rejecting_cycle(cycle)
 
 
+def test_resolve_rejecting_cycle_rejects_root_landing() -> None:
+    """落点为文件系统根的路径经助手抛 ValueError，与 normalize_path 落点门同口径。"""
+    with pytest.raises(ValueError, match="文件系统根"):
+        io_path_module.resolve_rejecting_cycle(Path(Path.cwd().anchor))
+
+
+def test_resolve_env_workspace_root_rejects_root_landing_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """工作区根声明为文件系统根经声明链归一为配置错误，与落点门同口径。"""
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(
+        io_path_module, "_configured_env_value", lambda env_var: str(Path.cwd().anchor)
+    )
+
+    with pytest.raises(SeedreamConfigError, match="工作区根目录配置无法解析"):
+        io_path_module.resolve_env_workspace_root()
+
+
 def test_resolve_rejecting_cycle_tolerates_dangling_link(tmp_path: Path) -> None:
     """悬空链接解析到目标路径交 mkdir 自建，不因目标尚未创建而拒绝。"""
     link, missing = _make_dangling_link(tmp_path)
