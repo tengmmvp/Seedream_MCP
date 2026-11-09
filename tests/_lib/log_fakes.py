@@ -9,6 +9,7 @@ opt(lazy=True) 的 callable 实参在记录时求值，若不求值，lambda 对
 格式化字符串，会掩盖 _summarize_prompt 等求值路径未运行的回归。
 capture_loguru_messages 捕获进程级真实 loguru logger 的指定级别消息，供
 config_builder、find_images_directory 与 io_path_polish 等断言服务端告警。
+capture_loguru_records 同机制捕获记录对象本身，供按记录字段过滤的断言复用。
 preserved_loguru_globals 放行块内对进程级 loguru sink 与 root logging 全局的
 改写、退出时恢复，供 test_logging_setup 与 test_cli_log_init_failure 复用。
 """
@@ -17,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -83,9 +84,11 @@ class RecordingLogger:
 
 
 @contextmanager
-def capture_loguru_messages(records: list[str], level: str = "WARNING") -> Iterator[None]:
-    """把进程级真实 loguru logger 的指定级别格式化消息捕获进 records。"""
-    handler_id = get_logger().add(lambda message: records.append(str(message)), level=level)
+def _capture_loguru_into(
+    records: list[Any], level: str, payload: Callable[[Any], Any]
+) -> Iterator[None]:
+    """把进程级真实 loguru logger 的指定级别记录经 payload 转换后捕获进 records。"""
+    handler_id = get_logger().add(lambda message: records.append(payload(message)), level=level)
     try:
         yield
     finally:
@@ -94,6 +97,20 @@ def capture_loguru_messages(records: list[str], level: str = "WARNING") -> Itera
         except ValueError:
             # sink 已被块内无参 remove 整体拆除时无物可移。
             pass
+
+
+@contextmanager
+def capture_loguru_messages(records: list[str], level: str = "WARNING") -> Iterator[None]:
+    """把进程级真实 loguru logger 的指定级别格式化消息捕获进 records。"""
+    with _capture_loguru_into(records, level, str):
+        yield
+
+
+@contextmanager
+def capture_loguru_records(records: list[dict[str, Any]], level: str = "DEBUG") -> Iterator[None]:
+    """把进程级真实 loguru logger 的指定级别记录对象捕获进 records。"""
+    with _capture_loguru_into(records, level, lambda message: message.record):
+        yield
 
 
 @contextmanager
