@@ -5,18 +5,21 @@
 """
 
 import asyncio
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from seedream_mcp.utils.core.inflight import InflightTaskCancelledError
-from seedream_mcp.utils.io.save import AutoSaveManager
+from seedream_mcp.utils.io.save import AutoSaveError, AutoSaveManager, AutoSaveResult
 from seedream_mcp.utils.io.download import (
     DownloadError,
     DownloadManager,
     _is_image_compatible_content_type,
 )
+from seedream_mcp.utils.io.path import resolved_form_violation
 
 from _lib.download_fakes import (
     _PNG_BYTES,
@@ -26,6 +29,7 @@ from _lib.download_fakes import (
     _png_success_response,
 )
 from _lib.os_fakes import _install_fsync_counter
+from _lib.path_helpers import FORM_VIOLATION_CASES, form_violation_params
 from _lib.time_fakes import _assert_due_flips_at_window_edges, _install_dual_clock
 
 # 1x1 透明 PNG 的 base64 编码
@@ -793,5 +797,276 @@ async def test_save_base64_image_fsync_default_off_skips_os_fsync(
         result = await manager.save_base64_image(_PNG_B64, prompt="测试图片")
         assert result.success is True
         assert fsync_calls == []
+    finally:
+        await manager.close()
+
+
+# ==================== local_path 已 resolve 形态守护 ====================
+
+
+async def test_save_image_local_path_is_resolved_absolute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """URL 保存链 local_path 恒为已 resolve 的绝对路径，Web 消费端按纯词法相对化。"""
+    download_manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, download_manager, session)
+    manager = AutoSaveManager(base_dir=tmp_path, download_manager=download_manager)
+
+    async with manager:
+        result = await manager.save_image("https://example.com/img.png", prompt="测试图片")
+
+    assert result.success is True
+    assert result.local_path is not None
+    assert resolved_form_violation(result.local_path) is None
+
+
+async def test_save_base64_image_local_path_is_resolved_absolute(tmp_path: Path) -> None:
+    """Base64 保存链 local_path 与 URL 路径同口径，恒为已 resolve 的绝对路径。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试图片")
+
+        assert result.success is True
+        assert result.local_path is not None
+        assert resolved_form_violation(result.local_path) is None
+    finally:
+        await manager.close()
+
+
+async def test_save_image_degrades_on_unresolved_local_path_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """下载结果 file_path 非已 resolve 绝对形态时保存响亮失败降级，不外泄坏形态。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        async def fake_download(
+            url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+        ) -> dict[str, Any]:
+            del url, save_path, fsync, max_file_size
+            return {
+                "success": True,
+                "file_path": "rel/../out.png",
+                "file_size": 10,
+                "download_time": 0.0,
+                "content_type": "image/png",
+                "attempts": 1,
+            }
+
+        monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+
+        result = await manager.save_image("https://example.com/img.png", prompt="测试")
+
+        assert result.success is False
+        assert result.local_path is None
+        assert "local_path" in (result.error or "")
+        assert result.original_url == "https://example.com/img.png"
+    finally:
+        await manager.close()
+
+
+async def test_save_base64_image_degrades_on_unresolved_local_path_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """写入结果 file_path 非已 resolve 绝对形态时同样响亮失败降级，两路径同守护。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        def fake_save_bytes(
+            file_path: Path, data: bytes, overwrite: bool = False, fsync: bool = False
+        ) -> dict[str, Any]:
+            del file_path, overwrite, fsync
+            return {
+                "file_path": "rel/out.png",
+                "file_size": len(data),
+                "save_time": "2026-01-01T00:00:00",
+            }
+
+        monkeypatch.setattr(manager.file_manager, "save_bytes", fake_save_bytes)
+
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试")
+
+        assert result.success is False
+        assert result.local_path is None
+        assert "local_path" in (result.error or "")
+    finally:
+        await manager.close()
+
+
+# 保存流用例取共享违约表的 nul/ads-colon 两形态（可安全通过像素上限校验，open
+# 快速失败不触设备）；保留名形态不经保存流用例——Windows 上该名解析为控制台
+# 设备，像素上限校验的 Image.open 会打开设备而非快速失败。
+_MALFORMED_PATH_FORMS = form_violation_params(FORM_VIOLATION_CASES[2:4])
+
+
+@pytest.mark.parametrize(("path_factory", "reason"), form_violation_params())
+def test_auto_save_result_gate_rejects_form_violations(
+    tmp_path: Path, path_factory: Any, reason: str
+) -> None:
+    """构造门拒绝背离已 resolve 绝对形态的 local_path，违约原因进入错误文案。"""
+    with pytest.raises(AutoSaveError) as excinfo:
+        AutoSaveResult(
+            success=True,
+            original_url="https://example.com/a.png",
+            local_path=path_factory(tmp_path),
+        )
+
+    assert reason in str(excinfo.value)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 冒号与保留名是合法文件名字符")
+@pytest.mark.parametrize(
+    "local_path", ["/srv/con/a.png", "/data/a:b/img.png"], ids=["reserved-seg", "colon-seg"]
+)
+def test_auto_save_result_gate_accepts_posix_colon_and_reserved_segments(
+    local_path: str,
+) -> None:
+    """POSIX 数据根含 CON 段或冒号段时构造门放行，目录段合法性由运行平台判定。"""
+    result = AutoSaveResult(
+        success=True,
+        original_url="https://example.com/a.png",
+        local_path=local_path,
+    )
+
+    assert result.local_path == local_path
+
+
+@pytest.mark.parametrize(("path_factory", "reason"), _MALFORMED_PATH_FORMS)
+async def test_save_image_degrades_on_malformed_absolute_local_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, path_factory: Any, reason: str
+) -> None:
+    """下载结果 file_path 为 malformed-but-absolute 形态时构造门拒绝并降级，回退 URL。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        async def fake_download(
+            url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+        ) -> dict[str, Any]:
+            del url, save_path, fsync, max_file_size
+            return {
+                "success": True,
+                "file_path": path_factory(tmp_path),
+                "file_size": 10,
+                "download_time": 0.0,
+                "content_type": "image/png",
+                "attempts": 1,
+            }
+
+        monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+
+        result = await manager.save_image("https://example.com/img.png", prompt="测试")
+
+        assert result.success is False
+        assert result.local_path is None
+        assert "local_path" in (result.error or "")
+        assert reason in (result.error or "")
+        assert result.original_url == "https://example.com/img.png"
+    finally:
+        await manager.close()
+
+
+@pytest.mark.parametrize(("path_factory", "reason"), _MALFORMED_PATH_FORMS)
+async def test_save_base64_image_degrades_on_malformed_absolute_local_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, path_factory: Any, reason: str
+) -> None:
+    """写入结果 file_path 为 malformed-but-absolute 形态时同样拒绝降级，两路径同守护。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        def fake_save_bytes(
+            file_path: Path, data: bytes, overwrite: bool = False, fsync: bool = False
+        ) -> dict[str, Any]:
+            del file_path, overwrite, fsync
+            return {
+                "file_path": path_factory(tmp_path),
+                "file_size": len(data),
+                "save_time": "2026-01-01T00:00:00",
+            }
+
+        monkeypatch.setattr(manager.file_manager, "save_bytes", fake_save_bytes)
+
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试")
+
+        assert result.success is False
+        assert result.local_path is None
+        assert "local_path" in (result.error or "")
+        assert reason in (result.error or "")
+    finally:
+        await manager.close()
+
+
+def _install_unlink_recorder(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """monkeypatch os.unlink 为透传记录实现，返回被删除路径记录列表。"""
+    unlinked: list[str] = []
+    real_unlink = os.unlink
+
+    def _tracking_unlink(path: Any) -> None:
+        unlinked.append(str(path))
+        real_unlink(path)
+
+    monkeypatch.setattr(os, "unlink", _tracking_unlink)
+    return unlinked
+
+
+async def test_save_image_cleans_file_when_gate_rejects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """构造门在文件落盘后触发时先删除该文件再降级，对齐像素上限拒绝分支。"""
+    # 冒号形态仅 win32 违约，取 NUL 形态保持清理守护跨平台成立。
+    gate_path = str(tmp_path / "a\x00.png")
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        async def fake_download(
+            url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+        ) -> dict[str, Any]:
+            del url, save_path, fsync, max_file_size
+            return {
+                "success": True,
+                "file_path": gate_path,
+                "file_size": 10,
+                "download_time": 0.0,
+                "content_type": "image/png",
+                "attempts": 1,
+            }
+
+        monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+        unlinked = _install_unlink_recorder(monkeypatch)
+
+        result = await manager.save_image("https://example.com/img.png", prompt="测试")
+
+        assert result.success is False
+        assert result.original_url == "https://example.com/img.png"
+        assert gate_path in unlinked
+    finally:
+        await manager.close()
+
+
+async def test_save_base64_image_cleans_file_when_gate_rejects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Base64 路径构造门触发时的文件清理与 URL 路径同口径。"""
+    gate_path = str(tmp_path / "b\x00.png")
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        def fake_save_bytes(
+            file_path: Path, data: bytes, overwrite: bool = False, fsync: bool = False
+        ) -> dict[str, Any]:
+            del file_path, overwrite, fsync
+            return {
+                "file_path": gate_path,
+                "file_size": len(data),
+                "save_time": "2026-01-01T00:00:00",
+            }
+
+        monkeypatch.setattr(manager.file_manager, "save_bytes", fake_save_bytes)
+        unlinked = _install_unlink_recorder(monkeypatch)
+
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试")
+
+        assert result.success is False
+        assert gate_path in unlinked
     finally:
         await manager.close()

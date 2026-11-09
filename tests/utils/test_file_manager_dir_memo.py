@@ -2,9 +2,9 @@
 
 覆盖批量保存的 mkdir/resolve 调用不随图数线性增长、memo 登记仅授予验证为
 真实目录链的路径（恶意 custom_name 与工具子目录清洗后仍落在 base_dir 内、
-链路含链接形态的组织目录不获登记且逐次完整校验拒绝）、空目录回收使 memo
-失效后下一次保存重建目录，以及命中复查兜住外部删除、跨实例清理与符号链接
-替换三类登记漂移。
+链路含链接形态的组织目录不获登记而逐次完整校验，界外拒绝、
+界内返回 resolve 形态）、空目录回收使 memo 失效后下一次保存重建目录，
+以及命中复查兜住外部删除、跨实例清理与符号链接替换三类登记漂移。
 """
 
 from __future__ import annotations
@@ -132,6 +132,29 @@ def test_unverifiable_chain_keeps_rejecting_on_retry(tmp_path: Path) -> None:
     assert first.parent not in manager._ensured_dirs
 
 
+def test_within_base_link_save_path_returns_resolved_form(tmp_path: Path) -> None:
+    """界内目录链接下的保存路径返回 resolve 形态，不漏词法拼接。
+
+    日期段替换为界内目录链接：链路含链接不获 memo 登记而走完整校验，保存路径
+    须为 resolve 后形态，local_path 的已 resolve 不变量由此在构造点成立。
+    """
+    base = tmp_path / "base"
+    real = base / "real"
+    real.mkdir(parents=True)
+    manager = FileManager(base_dir=base)
+    first = manager.create_save_path(prompt="cat", url="https://x/1.png", tool_name="t2i")
+    date_dir = first.parent.parent
+    shutil.rmtree(date_dir)
+    _make_dir_link(real, date_dir)
+
+    path = manager.create_save_path(prompt="cat", url="https://x/2.png", tool_name="t2i")
+
+    assert path == path.resolve()
+    assert first.parent not in manager._ensured_dirs
+    manager.save_bytes(path, b"data")
+    assert path.exists()
+
+
 def test_pruned_directory_recreated_on_next_save(tmp_path: Path) -> None:
     """空目录回收使 memo 失效，下一次保存重建目录并落盘成功。"""
     manager = FileManager(base_dir=tmp_path)
@@ -188,7 +211,7 @@ def test_memo_hit_symlink_swap_falls_back_to_full_validation(
     validate_calls = {"count": 0}
     original_validate = manager.validate_path
 
-    def counting_validate(path: Path) -> bool:
+    def counting_validate(path: Path) -> Path | None:
         validate_calls["count"] += 1
         return original_validate(path)
 

@@ -34,16 +34,17 @@ def _deep_tree_depth(base: Path) -> int:
 
 
 def test_validate_path_accepts_inside_base(tmp_path: Path) -> None:
-    """base 内嵌套路径通过校验。"""
+    """base 内嵌套路径通过校验并返回 resolve 形态。"""
     manager = FileManager(base_dir=tmp_path)
-    assert manager.validate_path(tmp_path / "nested" / "image.png") is True
+    nested = tmp_path / "nested" / "image.png"
+    assert manager.validate_path(nested) == nested.resolve()
 
 
 def test_validate_path_rejects_outside_base(tmp_path: Path) -> None:
     """base 之外的兄弟路径被拒绝。"""
     manager = FileManager(base_dir=tmp_path)
     outside = tmp_path.parent / "sibling.png"
-    assert manager.validate_path(outside) is False
+    assert manager.validate_path(outside) is None
 
 
 def test_collect_all_files_skips_junction_outside_base(tmp_path: Path) -> None:

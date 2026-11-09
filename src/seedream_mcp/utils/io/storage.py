@@ -63,6 +63,15 @@ _MAX_FILENAME_LENGTH = 200
 # 按纯词干截断，防止超长扩展名使文件名长度截断失效。
 _MAX_EXTENSION_LENGTH = 16
 
+# 文件名净化模式：文件系统不安全标点替换为下划线，C0/DEL/C1 控制字符剥离。
+_FILENAME_UNSAFE_CHARS_PATTERN = re.compile(r'[<>:"/\\|?*]')
+_FILENAME_CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+# 提示词派生文件名词干的净化模式：词字符/空白/连字符之外的字符剥离，空白串
+# 折叠为单下划线。
+_PROMPT_INVALID_CHARS_PATTERN = re.compile(r"[^\w\s-]")
+_PROMPT_WHITESPACE_RUN_PATTERN = re.compile(r"\s+")
+
 # 唯一文件名词干基础的长度预算（UTF-8 字节）：Windows 默认 MAX_PATH 260 按字符、
 # ext4/APFS 的目录项 255 字节限额按字节计量，字节口径对二者均从严；
 # custom_name 合法输入上限 255 个多字节字符，按预算截断后拼接完整文件名
@@ -163,8 +172,8 @@ class FileManager:
                 error_text("创建目录失败: {path} -> {exc}", path=as_text(path), exc=as_detail(e))
             ) from e
 
-    def validate_path(self, path: Path) -> bool:
-        """验证路径是否在保存目录范围内。
+    def validate_path(self, path: Path) -> Path | None:
+        """验证路径在保存目录范围内并返回其 resolve 形态。
 
         复用 path.is_within_resolved 做 resolve 后的包含判定，可拦截包含 ``..``
         或经由符号链接指向保存目录之外的路径。
@@ -173,17 +182,17 @@ class FileManager:
             path: 要验证的路径。
 
         Returns:
-            路径在保存目录范围内返回 True，否则返回 False。
+            已 resolve 的绝对路径；越界或解析失败返回 None。
         """
         try:
             abs_path = path.resolve()
             if is_within_resolved(abs_path, self.base_dir):
-                return True
+                return abs_path
             logger.warning("路径不在保存目录内: {}", abs_path)
-            return False
+            return None
         except Exception as e:
             logger.warning("路径验证失败: {} -> {}", path, e)
-            return False
+            return None
 
     def _memo_dirs_still_real(self, memo_dir: Path) -> bool:
         """no-follow 复查 memo 目录链自 base_dir 起每段仍为真实目录。
@@ -228,8 +237,8 @@ class FileManager:
             清理后仅含安全字符的文件名。
         """
         filename = strip_unpaired_surrogates(filename)
-        filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
-        filename = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", filename)
+        filename = _FILENAME_UNSAFE_CHARS_PATTERN.sub("_", filename)
+        filename = _FILENAME_CONTROL_CHARS_PATTERN.sub("", filename)
         filename = self._fit_filename_budget(filename)
 
         # Windows 保留设备名处理：CON.txt、NUL 等会被解释为设备而非文件，
@@ -280,8 +289,8 @@ class FileManager:
         if not prompt:
             return "image"
 
-        clean_prompt = re.sub(r"[^\w\s-]", "", prompt)
-        clean_prompt = re.sub(r"\s+", "_", clean_prompt)
+        clean_prompt = _PROMPT_INVALID_CHARS_PATTERN.sub("", prompt)
+        clean_prompt = _PROMPT_WHITESPACE_RUN_PATTERN.sub("_", clean_prompt)
 
         if len(clean_prompt) > max_length:
             clean_prompt = clean_prompt[:max_length]
@@ -393,7 +402,7 @@ class FileManager:
             date_folder: 是否按日期创建一级子目录。
 
         Returns:
-            保存路径。
+            已 resolve 的保存路径。
 
         Raises:
             FileManagerError: 生成的保存路径越出保存目录。
@@ -433,7 +442,7 @@ class FileManager:
             date_folder: 是否按日期创建一级子目录。
 
         Returns:
-            保存路径。
+            已 resolve 的保存路径。
 
         Raises:
             FileManagerError: 生成的保存路径越出保存目录。
@@ -445,11 +454,13 @@ class FileManager:
         return self._finalize_save_path(filename, tool_name, date_folder)
 
     def _finalize_save_path(self, filename: str, tool_name: str, date_folder: bool) -> Path:
-        """按日期与工具子目录组织保存路径并校验越界，返回最终保存路径。
+        """按日期与工具子目录组织保存路径并校验越界，返回已 resolve 的最终保存路径。
 
-        ensure_directory 已在本调用内对整条目录链完成一次真实性校验，登记于
-        memo 的组织目录直接放行，未登记路径走完整 resolve 校验。含分隔符或
-        ``..`` 的文件名拼接后父目录偏离登记键，自动落回完整校验。
+        ensure_directory 已在本调用内对整条目录链完成一次真实性校验：
+        登记于 memo 的组织目录链无链接且 base_dir 已 resolve，词法形态即 resolve 形态，
+        直接放行；未登记路径走完整 resolve 校验并返回 resolve 结果，保存链下游
+        （下载/写入结果与 local_path）恒得已 resolve 路径。
+        ``.``、``..`` 与分隔符形态由上游 sanitize_filename 归一为 ``_``，不经本入口。
 
         Args:
             filename: 已含扩展名的唯一文件名。
@@ -461,8 +472,10 @@ class FileManager:
         """
         save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)
         if save_path.parent not in self._ensured_dirs:
-            if not self.validate_path(save_path):
+            resolved = self.validate_path(save_path)
+            if resolved is None:
                 raise FileManagerError(error_text("路径不安全: {path}", path=as_text(save_path)))
+            return resolved
         return save_path
 
     def save_bytes(

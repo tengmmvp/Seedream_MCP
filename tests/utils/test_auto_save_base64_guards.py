@@ -25,6 +25,7 @@ from seedream_mcp.utils.io.save import (
 )
 
 from _lib.cpu_offload_spy import CpuOffloadSpy
+from _lib.path_helpers import abs_path_stub
 from _lib.png_fixtures import forged_png_bytes, minimal_png_bytes
 
 
@@ -498,8 +499,10 @@ async def test_run_batch_save_converts_exception_to_failed_result(
     async def failing_task() -> AutoSaveResult:
         raise RuntimeError("download boom")
 
+    ok_path = abs_path_stub("/tmp/ok")
+
     async def ok_task() -> AutoSaveResult:
-        return AutoSaveResult(success=True, original_url="http://x/ok.png", local_path="/tmp/ok")
+        return AutoSaveResult(success=True, original_url="http://x/ok.png", local_path=ok_path)
 
     image_data = [{"url": "http://x/fail.png"}, {"url": "http://x/ok.png"}]
     results = await manager._run_batch_save(
@@ -573,8 +576,10 @@ async def test_run_batch_save_passes_through_success_results(
 ) -> None:
     """正常 AutoSaveResult 原样通过。"""
 
+    saved_path = abs_path_stub("/tmp/1")
+
     async def ok_task() -> AutoSaveResult:
-        return AutoSaveResult(success=True, original_url="http://x/1.png", local_path="/tmp/1")
+        return AutoSaveResult(success=True, original_url="http://x/1.png", local_path=saved_path)
 
     results = await manager._run_batch_save(
         [ok_task],
@@ -584,7 +589,7 @@ async def test_run_batch_save_passes_through_success_results(
     )
     assert len(results) == 1
     assert results[0].success is True
-    assert results[0].local_path == "/tmp/1"
+    assert results[0].local_path == saved_path
 
 
 # ==================== save_multiple_base64_images 端到端 ====================
@@ -633,7 +638,9 @@ async def test_save_multiple_base64_images_non_str_payload_degrades(
 # ==================== to_dict 净化与 markdown alt 兜底 ====================
 
 
-def test_auto_save_result_to_dict_sanitizes_local_path_and_markdown_ref() -> None:
+def test_auto_save_result_to_dict_sanitizes_local_path_and_markdown_ref(
+    tmp_path: Path,
+) -> None:
     """to_dict 对 local_path/markdown_ref 施加 sanitize_data_text。
 
     与 results.py 的 data 通道同字段防护对称：同名字段在 data 项通道已净化，
@@ -642,15 +649,17 @@ def test_auto_save_result_to_dict_sanitizes_local_path_and_markdown_ref() -> Non
     result = AutoSaveResult(
         success=True,
         original_url="https://user:pass@example.com/img.png?token=abc",
-        local_path="C:\\save\\img.png\r\nFAKE: injected",
+        local_path=abs_path_stub(str(tmp_path / "img.png")),
         markdown_ref="![alt](./img.png)\r\nFAKE-REF: injected",
         error=None,
     )
+    # 坏形态绕过构造门直接落在字段上，守护的是 to_dict 的独立净化防线。
+    result.local_path = f"{tmp_path / 'img.png'}\r\nFAKE: injected"
 
     dumped = result.to_dict()
 
     # 控制字符压平，换行注入不可行；内容主体保留，数据字段不做常规截断以保持可用性
-    assert dumped["local_path"] == "C:\\save\\img.png  FAKE: injected"
+    assert dumped["local_path"] == f"{tmp_path / 'img.png'}  FAKE: injected"
     assert dumped["markdown_ref"] == "![alt](./img.png)  FAKE-REF: injected"
     # 纯 URL 数据字段仅剥 userinfo 凭据，签名查询参数保持完整
     assert dumped["original_url"] == "https://example.com/img.png?token=abc"

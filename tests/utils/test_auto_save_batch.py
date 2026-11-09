@@ -199,6 +199,49 @@ async def test_save_image_rejects_pixels_between_limit_and_double(
     await manager.close()
 
 
+async def test_save_image_pixel_rejection_reports_residual_on_unlink_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """像素拒绝后清理失败时错误如实陈述残留与删除失败，不虚假断言已删除。"""
+    bomb = forged_png_bytes(6_100, 6_100)
+    target = tmp_path / "residual.png"
+    target.write_bytes(bomb)
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
+
+    async def fake_download(
+        url: str, save_path: Path, fsync: bool = False, max_file_size: int | None = None
+    ) -> dict[str, Any]:
+        del url, save_path, fsync, max_file_size
+        return {
+            "success": True,
+            "file_path": str(target),
+            "file_size": len(bomb),
+            "download_time": 0.0,
+            "content_type": "image/png",
+            "attempts": 1,
+        }
+
+    monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+    monkeypatch.setattr(manager.download_manager, "validate_url", lambda url: True)
+
+    def fail_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    result = await manager.save_image("http://x/residual.png", prompt="p")
+
+    error = result.error or ""
+    assert result.success is False
+    assert target.exists()
+    assert "6100x6100" in error
+    assert "落盘文件删除失败" in error
+    assert "已删除落盘文件" not in error
+    await drain_background_cleanup_tasks()
+    await manager.close()
+
+
 def test_pixel_limit_rejection_treats_value_error_header_as_unidentified(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

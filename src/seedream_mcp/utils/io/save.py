@@ -9,12 +9,14 @@ from __future__ import annotations
 import asyncio
 import base64
 from pathlib import Path
-from typing import Any, Awaitable, Callable, NamedTuple, Sequence
+from typing import Any, Awaitable, Callable, NamedTuple, NoReturn, Sequence
 
 from ..core.errors import (
     ErrorText,
     SeedreamMCPError,
+    assemble_error_segments,
     as_plain,
+    as_text,
     as_url,
     base_detail_error_text,
     error_text,
@@ -53,6 +55,7 @@ from ..core.sanitizers import (
 )
 from ..core.throttles import BoundedExpiryRegistry
 from .download import INVALID_URL_TEMPLATE, DownloadError, DownloadManager
+from .path import resolved_form_violation
 from .storage import FileManager, FileManagerError, current_save_time, get_file_manager
 
 logger = get_logger()
@@ -196,7 +199,8 @@ def _pixel_limit_rejection(path: Path) -> ErrorText | None:
 
     只读头部不解码像素，供工作线程调用；显式校验防止数 KB 的伪造尺寸头图片落盘后
     在预览解码时放大为数百 MB 内存占用。头损坏等无法解析的形态返回 None 交由既有
-    保存链路处置，本校验不引入新的失败面。
+    保存链路处置，本校验不引入新的失败面。拒绝文案只述超限事实，清理尾句由
+    _reject_with_cleanup 按删除成败追加。
     """
     # PIL 惰性导入，落点在工作线程；UnidentifiedImageError 为 OSError 子类，
     # DecompressionBombError 为 Exception 直接子类，须单独显式捕获。
@@ -208,9 +212,9 @@ def _pixel_limit_rejection(path: Path) -> ErrorText | None:
             width, height = image.size
     except Image.DecompressionBombError:
         # 头声明像素超过 2 倍上限时 PIL 在打开阶段即抛错，具体尺寸不可得，仍按
-        # 像素超限口径拒绝，交由外层删除已落盘文件并降级。
+        # 像素超限口径拒绝，交由外层清理已落盘文件并降级。
         return error_text(
-            "图像像素超过保存上限 {limit}，已删除落盘文件并放弃保存",
+            "图像像素超过保存上限 {limit}",
             limit=as_plain(MAX_IMAGE_PIXELS),
         )
     # 畸形头在部分 PIL 插件抛 ValueError，捕获集与 validation 的解码包装同口径。
@@ -218,7 +222,7 @@ def _pixel_limit_rejection(path: Path) -> ErrorText | None:
         return None
     if width * height > MAX_IMAGE_PIXELS:
         return error_text(
-            "图像像素 {width}x{height} 超过保存上限 {limit}，已删除落盘文件并放弃保存",
+            "图像像素 {width}x{height} 超过保存上限 {limit}",
             width=as_plain(width),
             height=as_plain(height),
             limit=as_plain(MAX_IMAGE_PIXELS),
@@ -253,13 +257,26 @@ def _build_save_metadata(
     return metadata
 
 
+def _assert_resolved_absolute(local_path: str) -> None:
+    """断言 local_path 为已 resolve 的绝对路径，词法违约形态与判定单源于 path 模块。"""
+    violation = resolved_form_violation(local_path)
+    if violation is not None:
+        raise AutoSaveError(
+            error_text(
+                "local_path 须为已 resolve 的绝对路径（{reason}）: {path}",
+                reason=as_plain(violation),
+                path=as_text(local_path),
+            )
+        )
+
+
 class AutoSaveResult:
     """自动保存结果，封装保存状态、本地路径、Markdown 引用与元数据。
 
     Attributes:
         success: 是否保存成功。
         original_url: 原始图片 URL，Base64 保存路径为 base64 标识串。
-        local_path: 保存成功时的本地文件路径。
+        local_path: 保存成功时的本地文件路径，恒为已 resolve 的绝对路径。
         markdown_ref: Markdown 图片引用。
         error: 失败时的错误描述。
         metadata: 保存结果元数据，缺省为空字典。
@@ -274,7 +291,15 @@ class AutoSaveResult:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
     ):
-        """初始化自动保存结果。"""
+        """初始化自动保存结果。
+
+        local_path 非 None 时须为已 resolve 的绝对路径（词法违约形态单源于
+        resolved_form_violation：NUL 等全平台恒拒，冒号与 Windows 保留名仅
+        win32 拒绝），违约抛 AutoSaveError。Web 消费端按纯词法相对化消费该值，
+        坏形态会被删键丢失路径字段。校验收口于构造门，新增构造点无法静默绕过。
+        """
+        if local_path is not None:
+            _assert_resolved_absolute(local_path)
         self.success = success
         self.original_url = original_url
         self.local_path = local_path
@@ -304,6 +329,48 @@ class AutoSaveResult:
             result["metadata"] = self.metadata
 
         return result
+
+
+async def _unlink_best_effort(path: Path) -> bool:
+    """工作线程 best-effort 删除落盘文件，返回是否已删除；失败记 warning 不上抛。
+
+    NUL 形态 unlink 恒抛 ValueError，与 OSError 一并吞掉；记 warning 暴露残留，
+    口径对齐 _usable_cwd_root 的探测文件清理。
+    """
+    try:
+        await asyncio.to_thread(path.unlink, True)
+    except (OSError, ValueError) as exc:
+        logger.warning("清理落盘文件失败: {} -> {}", path, exc)
+        return False
+    return True
+
+
+async def _reject_with_cleanup(rejection: ErrorText, final_path: Path) -> NoReturn:
+    """清理被拒图片的落盘文件后抛拒绝异常，尾句按删除成败如实陈述。"""
+    file_deleted = await _unlink_best_effort(final_path)
+    cleanup_note = "已删除落盘文件并放弃保存" if file_deleted else "已放弃保存，落盘文件删除失败"
+    raise AutoSaveError(assemble_error_segments(rejection, error_text(cleanup_note)))
+
+
+async def _save_success_result(
+    final_path: Path, original_url: str, markdown_ref: str, metadata: dict[str, Any]
+) -> AutoSaveResult:
+    """构造成功保存结果；构造门拒绝时删除已落盘文件后上抛，交由降级路径回退 URL。
+
+    清理对齐像素上限拒绝分支的先删后降级；门拒绝的畸形路径大多无法真实落盘，
+    清理失败不掩盖门的拒绝原因。
+    """
+    try:
+        return AutoSaveResult(
+            success=True,
+            original_url=original_url,
+            local_path=str(final_path),
+            markdown_ref=markdown_ref,
+            metadata=metadata,
+        )
+    except AutoSaveError:
+        await _unlink_best_effort(final_path)
+        raise
 
 
 async def _run_save_with_degradation(
@@ -553,11 +620,10 @@ class AutoSaveManager:
             final_path = Path(download_result["file_path"])
 
             # 下载内容像素上限校验：输入参考图路径已有显式 36M 拒绝，此处补齐下载
-            # 侧同一口径。超限即删除已落盘文件并按保存失败降级，保留原始 URL。
+            # 侧同一口径。超限即清理已落盘文件并按保存失败降级，保留原始 URL。
             pixel_rejection = await asyncio.to_thread(_pixel_limit_rejection, final_path)
             if pixel_rejection is not None:
-                await asyncio.to_thread(final_path.unlink, True)
-                raise AutoSaveError(pixel_rejection)
+                await _reject_with_cleanup(pixel_rejection, final_path)
 
             markdown_alt = _build_markdown_alt(alt_text)
             markdown_ref = self.file_manager.generate_markdown_reference(final_path, markdown_alt)
@@ -572,10 +638,9 @@ class AutoSaveManager:
                 download_time=download_result.get("download_time"),
             )
 
-            result = AutoSaveResult(
-                success=True,
+            result = await _save_success_result(
+                final_path=final_path,
                 original_url=url,
-                local_path=str(final_path),
                 markdown_ref=markdown_ref,
                 metadata=metadata,
             )
@@ -717,11 +782,10 @@ class AutoSaveManager:
             final_path = Path(write_result["file_path"])
 
             # 落盘内容像素上限校验：b64_json 返回的内容不经下载侧校验，此处补齐同一
-            # 口径。超限即删除已落盘文件并按保存失败降级。
+            # 口径。超限即清理已落盘文件并按保存失败降级。
             pixel_rejection = await asyncio.to_thread(_pixel_limit_rejection, final_path)
             if pixel_rejection is not None:
-                await asyncio.to_thread(final_path.unlink, True)
-                raise AutoSaveError(pixel_rejection)
+                await _reject_with_cleanup(pixel_rejection, final_path)
 
             markdown_alt = _build_markdown_alt(alt_text)
             markdown_ref = self.file_manager.generate_markdown_reference(final_path, markdown_alt)
@@ -735,10 +799,9 @@ class AutoSaveManager:
             )
 
             logger.info("Base64 图片保存成功: {}", write_result["file_path"])
-            return AutoSaveResult(
-                success=True,
+            return await _save_success_result(
+                final_path=final_path,
                 original_url="base64",
-                local_path=write_result["file_path"],
                 markdown_ref=markdown_ref,
                 metadata=metadata,
             )
