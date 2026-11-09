@@ -102,6 +102,18 @@ jobs:
           version: v2.14.2
           args: --latest --strip header
 
+      # cliff 段落自带的版本标题与 Release 标题重复且层级倒挂，注入前剥除首行。
+      - name: ✂️ Strip version heading
+        id: release_notes
+        env:
+          RAW: ${{ steps.changelog.outputs.content }}
+        run: |
+          {
+            echo 'section<<EOF'
+            printf '%s\n' "$RAW" | sed '1{/^## \[/d}'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: 🏷️ Create Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
