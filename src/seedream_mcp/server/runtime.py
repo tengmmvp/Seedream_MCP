@@ -432,13 +432,21 @@ class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
         uri: "AnyUrl | str",
         context: "Context[dict[str, Any], Any] | None" = None,
     ) -> "Iterable[ReadResourceContents] | InputRequiredResult":
-        # mcp 2.0.0 的 read_resource 把 ResourceNotFoundError 重包装为带 cause 的
-        # 普通 ResourceError，子类判定丢失致 -32602 沉为 -32603；按因果链归位。
+        # mcp 2.0.0 把 handler 异常经资源函数层 ValueError 中转（无 from、仅
+        # __context__）后重包装为普通 ResourceError，子类判定丢失致 -32602 沉为
+        # -32603；沿因果链归位 ResourceNotFoundError。
         try:
             return await super().read_resource(uri, context)
         except ResourceError as exc:
-            if isinstance(exc.__cause__, ResourceNotFoundError):
-                raise exc.__cause__
+            chained: BaseException | None = exc
+            seen: set[int] = set()
+            while chained is not None and id(chained) not in seen:
+                if isinstance(chained, ResourceNotFoundError):
+                    raise chained
+                seen.add(id(chained))
+                chained = chained.__cause__ or (
+                    chained.__context__ if not chained.__suppress_context__ else None
+                )
             raise
 
 
