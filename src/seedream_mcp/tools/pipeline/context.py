@@ -14,6 +14,7 @@ from ...config import SeedreamConfig
 from ...utils.core.validators import (
     ensure_utf8_encodable,
     resolve_default_parallelism,
+    resolve_effective_auto_save,
     resolve_effective_generation_defaults,
     validate_background,
     validate_generation_tools,
@@ -149,9 +150,7 @@ def build_generation_context(
             if params.parallelism is not None
             else resolve_default_parallelism(params.request_count)
         ),
-        enable_auto_save=(
-            config.auto_save_enabled if params.auto_save is None else params.auto_save
-        ),
+        enable_auto_save=resolve_effective_auto_save(params.auto_save, config.auto_save_enabled),
         save_path=params.save_path,
         custom_name=params.custom_name,
     )

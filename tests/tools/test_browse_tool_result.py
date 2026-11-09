@@ -11,6 +11,7 @@ import asyncio
 import datetime
 import os
 import shutil
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Sequence
@@ -40,7 +41,8 @@ from seedream_mcp.tools.handlers.browse_images import (
     _build_browse_error,
     handle_browse_images,
 )
-from seedream_mcp.utils.core.errors import SeedreamConfigError
+from seedream_mcp.tools.schemas import EntryBound
+from seedream_mcp.utils.core.errors import SeedreamConfigError, error_text
 from seedream_mcp.utils.io import scan as io_scan
 from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR, is_within_any_nc_parts
 from seedream_mcp.utils.io.scan import ScanIncompleteCause, ScanResult
@@ -135,6 +137,46 @@ async def test_browse_images_returns_empty_when_no_files(workspace_root: Path) -
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["status"] == "empty"
     assert result.structured_content["count"] == 0
+
+
+async def test_browse_images_blank_directory_browses_images_root(
+    workspace_root: Path,
+) -> None:
+    """空串与纯空白 directory 归一为 "."，浏览图片目录根而非报目录路径无效。"""
+    images_root = _seed_images_root(workspace_root)
+    (images_root / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    for directory in ("", "   "):
+        result = await handle_browse_images(BrowseImagesInput(directory=directory, recursive=False))
+
+        assert result.is_error is False
+        assert isinstance(result.structured_content, dict)
+        assert result.structured_content["count"] == 1
+        assert result.structured_content["directory"] == "."
+
+
+async def test_browse_blank_directory_accepted_by_flat_tool_schema(
+    workspace_root: Path,
+) -> None:
+    """空串与纯空白 directory 经平铺 inputSchema 与输入模型双层放行浏览图片目录根。
+
+    平铺签名曾以非空 pattern 镜像拒绝，空串归一缺省后该镜像移除，本用例锁定
+    协议层不再拦截空串 directory。
+    """
+    images_root = _seed_images_root(workspace_root)
+    (images_root / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    for directory in ("", "   "):
+        result = await mcp.call_tool(
+            "browse_images",
+            {"directory": directory, "recursive": False},
+            context=cast("Context[Any, Any]", _NoRootsContext()),
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.is_error is False
+        assert isinstance(result.structured_content, dict)
+        assert result.structured_content["count"] == 1
 
 
 async def test_browse_images_rejects_out_of_workspace_directory(
@@ -467,8 +509,9 @@ async def test_browse_images_hit_replay_skips_scope_predicate(
     """命中回放按缓存条目随存的包含下标切片，读权限复核零考查。
 
     包含谓词在扫描层内从 read_scope 派生、原语经 scan 模块绑定解析，计数
-    须装在该绑定才可证伪扫描层回放重估；browse 侧绑定另防本地逐条复核回潮。
-    逐条重估会使每页请求对整个缓存窗口跑越界判定；分页结果仍按窗口事实判定。
+    须装在该绑定才可证伪扫描层回放重估。browse 模块不持包含判定原语绑定，
+    本地逐条复核无可落点。逐条重估会使每页请求对整个缓存窗口跑越界判定。
+    分页结果仍按窗口事实判定。
     """
     images_root = _seed_images_root(workspace_root)
     for i in range(12):
@@ -491,7 +534,6 @@ async def test_browse_images_hit_replay_skips_scope_predicate(
         return real_within_parts(path_parts, bases_parts)
 
     monkeypatch.setattr(io_scan, "is_within_any_nc_parts", _counting_within_parts)
-    monkeypatch.setattr(browse_core_module, "is_within_any_nc_parts", _counting_within_parts)
 
     result = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
@@ -512,9 +554,9 @@ async def test_browse_images_hit_replay_containment_skips_normcase_recompute(
 ) -> None:
     """缓存命中回放的包含判定不重算 normcase：条目分量随缓存条目直接比较。
 
-    包含判定若回落 is_within_any 纯路径形态或在 browse 模块本地重算，每条考查
-    条目都重算 normcase 分量；browse 与 path 各持 normcase_parts 的直接导入
-    绑定，计数同时装在两处模块绑定上，统计回放请求期间收到的图片路径并断言为零。
+    包含判定若回落 is_within_any 纯路径形态重算，每条考查条目都重算 normcase 分量。
+    browse 模块已不持 normcase_parts 绑定：替代界求交改走 is_within_any，
+    分量由 path 模块现算。计数装在 path 模块绑定上，统计回放请求期间收到的图片路径并断言为零。
     """
     images_root = _seed_images_root(workspace_root)
     for i in range(4):
@@ -528,9 +570,6 @@ async def test_browse_images_hit_replay_containment_skips_normcase_recompute(
 
     from seedream_mcp.utils.io import path as path_module
 
-    local_parts_calls = _install_counting_normcase_parts(
-        monkeypatch, browse_core_module, suffix=".png"
-    )
     path_module_parts_calls = _install_counting_normcase_parts(
         monkeypatch, path_module, suffix=".png"
     )
@@ -540,7 +579,6 @@ async def test_browse_images_hit_replay_containment_skips_normcase_recompute(
     )
 
     assert replay.structured_content["count"] == 2
-    assert local_parts_calls == [], "回放谓词不得在 browse 模块绑定处对图片条目重算 normcase"
     assert path_module_parts_calls == [], "回放谓词不得回落纯路径形态对图片条目重算 normcase"
 
 
@@ -2387,6 +2425,35 @@ async def test_browse_images_invalid_relative_directory_reports_invalid_path(
     assert "目录超出允许范围" not in text
 
 
+async def test_browse_images_root_landing_directory_reports_invalid_path(
+    workspace_root: Path,
+) -> None:
+    """相对点分量上跳落文件系统根的目录报路径无效，落点门先于范围文案。"""
+    _seed_images_root(workspace_root)
+    result = await handle_browse_images(BrowseImagesInput(directory="../" * 20))
+
+    assert result.is_error is True
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "目录路径无效" in text
+    assert "拒绝落点为文件系统根" in text
+    assert "相对路径仅限" not in text
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="盘符根绝对形态仅 Windows 存在")
+async def test_browse_images_drive_root_directory_reports_invalid_path(
+    workspace_root: Path,
+) -> None:
+    """绝对盘符根目录按路径无效口径归 validation_error，不落读范围文案。"""
+    _seed_images_root(workspace_root)
+    result = await handle_browse_images(BrowseImagesInput(directory="C:/"))
+
+    assert result.is_error is True
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "目录路径无效" in text
+    assert "拒绝落点为文件系统根" in text
+    assert "不在读取范围内" not in text
+
+
 async def test_browse_images_rejects_relative_escape_outside_images_root(
     workspace_root: Path,
 ) -> None:
@@ -2439,14 +2506,14 @@ async def test_browse_session_roots_echoes_images_root_outside_roots(
     assert result.structured_content["images"][0]["path"] == entry_path
 
 
-# ==================== bounds_scope 与读权限求交 ====================
+# ==================== entry_bound 与读权限求交 ====================
 
 
-async def test_browse_images_bounds_scope_wider_than_read_scope_dropped_entirely(
+async def test_browse_images_entry_bound_wider_than_read_scope_dropped_entirely(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """超宽 bounds_scope 未落入读权限即整界剔除：界内图片也不返回，结果为空。
+    """超宽替代界未落入读权限即整界剔除：界内图片也不返回，结果为空。
 
     整界剔除为确定性停滞且无缓存谱系可计数，首答即按永久态计：不导引续扫重试。
     """
@@ -2459,7 +2526,8 @@ async def test_browse_images_bounds_scope_wider_than_read_scope_dropped_entirely
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
 
     result = await handle_browse_images(
-        BrowseImagesInput(directory=".", recursive=False), bounds_scope=[tmp_path]
+        BrowseImagesInput(directory=".", recursive=False),
+        entry_bound=EntryBound(tmp_path, error_text("请求目录越出替代界")),
     )
 
     assert result.is_error is False
@@ -2477,10 +2545,10 @@ async def test_browse_images_bounds_scope_wider_than_read_scope_dropped_entirely
     assert "部分图片不在读取范围内，结果可能不完整" in text
 
 
-async def test_browse_images_bounds_scope_narrower_filters_at_source(
+async def test_browse_images_entry_bound_narrower_narrows_scan_scope(
     workspace_root: Path,
 ) -> None:
-    """窄于读权限的 bounds_scope 在源头剔除界内但替代界外的条目。"""
+    """窄于读权限的替代界收窄扫描界：请求目录落在界内即正常扫描，界即扫描范围。"""
     images_root = _seed_images_root(workspace_root)
     for name in ("keep.png", "drop.png"):
         (images_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -2489,7 +2557,8 @@ async def test_browse_images_bounds_scope_narrower_filters_at_source(
     (subdir / "keep.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await handle_browse_images(
-        BrowseImagesInput(directory=".", recursive=True), bounds_scope=[subdir]
+        BrowseImagesInput(directory="sub", recursive=True),
+        entry_bound=EntryBound(subdir, error_text("请求目录越出替代界")),
     )
 
     sc = result.structured_content
@@ -2498,17 +2567,46 @@ async def test_browse_images_bounds_scope_narrower_filters_at_source(
     assert sc["images"][0]["path"] == (subdir / "keep.png").resolve().as_posix()
 
 
-async def test_browse_images_rejects_empty_bounds_scope(workspace_root: Path) -> None:
-    """空 bounds_scope 为编程错误：以工具错误结果拒绝，不静默清空结果。"""
+async def test_browse_images_entry_bound_rejects_directory_outside_bound(
+    workspace_root: Path,
+) -> None:
+    """请求目录越出替代界以同界门拒绝，文案取随界声明值原样生效，不进入扫描。
+
+    替代界由调用方声明、未必是图片目录，文案口径由声明方自带、核心不覆写。
+    同界门在核心目录解析内单点判定，不落泛化读范围拒绝。
+    """
     images_root = _seed_images_root(workspace_root)
-    (images_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (images_root / "top.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    bound = images_root / "sub"
+    bound.mkdir()
 
     result = await handle_browse_images(
-        BrowseImagesInput(directory=".", recursive=False), bounds_scope=[]
+        BrowseImagesInput(directory=".", recursive=False),
+        entry_bound=EntryBound(bound, error_text("目录不在声明界内，请改用界内目录")),
     )
 
     assert result.is_error is True
-    assert isinstance(result.structured_content, dict)
-    assert result.structured_content["status"] == "failed"
-    text = "".join(getattr(content, "text", "") for content in result.content)
-    assert "bounds_scope 不能为空列表" in text
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["error"]["type"] == "validation_error"
+    assert sc["error"]["message"] == "目录不在声明界内，请改用界内目录"
+    assert sc["resolved_directories"] == []
+
+
+def test_entry_bound_rejects_unresolved_lexical_forms(tmp_path: Path) -> None:
+    """坏词法形态界路径在构造期即抛 ValueError，不放行到求交静默失配。
+
+    违约形态与 AutoSaveResult 构造门同源于 resolved_form_violation：冒号与
+    Windows 保留名仅 win32 拒绝，POSIX 为合法文件名字符。
+    """
+    denial = error_text("请求目录越出替代界")
+    bad_paths = [
+        Path("relative/dir"),
+        tmp_path / ".." / "sibling",
+        tmp_path / "bad\x00name",
+    ]
+    if sys.platform == "win32":
+        bad_paths += [tmp_path / "a.png:hidden", tmp_path / "CON"]
+    for bad_path in bad_paths:
+        with pytest.raises(ValueError, match="须为已 resolve 的绝对路径"):
+            EntryBound(bad_path, denial)

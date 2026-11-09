@@ -11,7 +11,6 @@ server 层按协商版本取回注入；再将 pydantic 校验后的入参模型
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import TypeVar
 
 from mcp.server.mcpserver import Context
@@ -21,6 +20,7 @@ from ..config import SeedreamConfig
 from ..utils.io.roots import workspace_roots_scope_from_result
 from .schemas import (
     BrowseImagesInput,
+    EntryBound,
     GenerationInputParams,
     ImageToImageInput,
     MultiImageFusionInput,
@@ -113,8 +113,7 @@ async def run_browse_images(
     ctx: Context | None = None,
     workspace_roots: ListRootsResult | None = None,
     *,
-    bounds_scope: list[Path] | None = None,
-    resolved_directory: Path | None = None,
+    entry_bound: EntryBound | None = None,
 ) -> CallToolResult:
     """注入工作区边界后委托 ``handle_browse_images`` 处理图片浏览请求。
 
@@ -122,14 +121,11 @@ async def run_browse_images(
         params: 经 pydantic 校验的工具输入模型。
         ctx: MCP 上下文，用于进度上报，可为 None。
         workspace_roots: 会话 Roots 声明，None 时保持当前工作区状态。
-        bounds_scope: 条目过滤的替代界，与读权限求交后生效，None 时按读权限过滤。
-        resolved_directory: 调用方经 resolve_against_base 同口径预解析的请求目录，
-            提供时浏览核心免重复解析；None 时按 directory 现解析。
+        entry_bound: 请求目录与条目共用的替代界（EntryBound），请求目录越出界
+            以同界门拒绝，条目与读权限求交后生效，None 时按读权限过滤。
     """
     async with workspace_roots_scope_from_result(workspace_roots):
-        return await handle_browse_images(
-            params, ctx=ctx, bounds_scope=bounds_scope, resolved_directory=resolved_directory
-        )
+        return await handle_browse_images(params, ctx=ctx, entry_bound=entry_bound)
 
 
 async def run_get_model_info(config: SeedreamConfig) -> CallToolResult:

@@ -61,12 +61,15 @@ from seedream_mcp.utils.core.sanitizers import (
 from seedream_mcp.utils.io.save import AutoSaveResult
 
 from _lib.generation_fixtures import make_generation_context
+from _lib.path_helpers import abs_path_stub
 
 # 带 userinfo 凭据与 CRLF 的上游 URL：净化后凭据被剥离、换行被压平。
 _DIRTY_URL = "https://AKID:SECRET@mirror.example.com/a.png\r\nFAKE-LINE api_key=leaked"
 
 # 火山 TOS 签名 URL 约 670 字符：数据字段净化不得截断，否则 URL 不可用。
 _SIGNED_URL = "https://tos.example.com/obj/a.png?X-Tos-Signature=" + "s" * 620
+
+_SAVED_PATH = abs_path_stub("images/ok.png")
 
 
 def _mixed_result() -> dict[str, Any]:
@@ -94,7 +97,7 @@ def _save_result(success: bool) -> AutoSaveResult:
     return AutoSaveResult(
         success=success,
         original_url="https://example.com/ok.png",
-        local_path="images/ok.png" if success else None,
+        local_path=_SAVED_PATH if success else None,
         markdown_ref="![ok](images/ok.png)" if success else None,
         error=None if success else "下载失败",
     )
@@ -133,10 +136,10 @@ def test_auto_save_success_collapses_to_summary_line() -> None:
     assert "图片 1:" in text
     assert "状态: 失败" in text
     assert "自动保存: 1/1 成功" in text
-    assert "  本地路径: images/ok.png" in text
+    assert f"  本地路径: {_SAVED_PATH}" in text
     # 成功项不再有「已保存到」明细行，路径全文仅出现一次。
     assert "已保存到" not in text
-    assert text.count("images/ok.png") == 1
+    assert text.count(_SAVED_PATH) == 1
 
 
 def test_auto_save_section_failed_save_uses_original_image_index() -> None:
@@ -473,13 +476,14 @@ def test_url_line_kept_when_save_degraded_to_url() -> None:
 
 def test_single_image_text_form_is_compact() -> None:
     """单图成功保存的文本形态：标题/尺寸/图片条目/摘要，计数只保留摘要一处。"""
+    saved_path = abs_path_stub("images/1.png")
     result = {
         "success": True,
         "status": "completed",
         "data": [
             {
                 "url": "https://example.com/1.png",
-                "local_path": "images/1.png",
+                "local_path": saved_path,
                 "markdown_ref": "![1](images/1.png)",
             }
         ],
@@ -489,7 +493,7 @@ def test_single_image_text_form_is_compact() -> None:
         AutoSaveResult(
             success=True,
             original_url="https://example.com/1.png",
-            local_path="images/1.png",
+            local_path=saved_path,
             markdown_ref="![1](images/1.png)",
         )
     ]
@@ -509,15 +513,16 @@ def test_single_image_text_form_is_compact() -> None:
     assert "成功保存" not in text
     assert "生成图片数" not in text
     assert "已保存到" not in text
-    assert text.count("images/1.png") == 1
+    assert text.count(saved_path) == 1
 
 
 def test_fifteen_image_batch_text_form_has_no_duplicate_path_lines() -> None:
     """15 张组图：每张路径在文本中仅出现一次，无重复路径行与重复计数。"""
+    saved_paths = {i: abs_path_stub(f"images/{i}.png") for i in range(1, 16)}
     images = [
         {
             "url": f"https://example.com/{i}.png",
-            "local_path": f"images/{i}.png",
+            "local_path": saved_paths[i],
             "markdown_ref": f"![image {i}](images/{i}.png)",
         }
         for i in range(1, 16)
@@ -526,7 +531,7 @@ def test_fifteen_image_batch_text_form_has_no_duplicate_path_lines() -> None:
         AutoSaveResult(
             success=True,
             original_url=f"https://example.com/{i}.png",
-            local_path=f"images/{i}.png",
+            local_path=saved_paths[i],
             markdown_ref=f"![image {i}](images/{i}.png)",
         )
         for i in range(1, 16)
@@ -545,7 +550,7 @@ def test_fifteen_image_batch_text_form_has_no_duplicate_path_lines() -> None:
     assert "生成图片数" not in text
     for i in range(1, 16):
         # URL 行与本地路径行各自输出，markdown_ref 行不输出，路径文本仅出现一次。
-        assert text.count(f"images/{i}.png") == 1
+        assert text.count(saved_paths[i]) == 1
 
 
 # ==================== truncated_events 双通道消费 ====================

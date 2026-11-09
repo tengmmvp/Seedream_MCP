@@ -22,21 +22,27 @@ from pydantic.fields import FieldInfo
 from _lib.generation_payloads import GENERATION_BASE_PAYLOADS
 from _lib.no_param_tools import NO_PARAM_TOOLS
 
+from seedream_mcp.server._registration import (
+    _MULTI_IMAGE_FLAT_TYPE,
+    _SEQUENTIAL_IMAGE_FLAT_TYPE,
+)
 from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools.schemas import (
+    BaseGenerationInput,
     BrowseImagesInput,
     FORMAT_FILTER_ITEM_MAX_LENGTH,
     ImageToImageInput,
-    multi_image_field_type,
+    _MULTI_IMAGE_MODEL_TYPE,
     MULTI_IMAGE_MIN_ITEMS,
     MultiImageFusionInput,
     OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
     OUTPUT_FORMAT_DESCRIPTION,
+    _SEQUENTIAL_IMAGE_MODEL_TYPE,
+    SEQUENTIAL_IMAGE_MIN_ITEMS,
+    SequentialGenerationInput,
     SIZE_DESCRIPTION,
     SIZE_WITH_LAYER_DESCRIPTION,
     STREAM_DESCRIPTION,
-    SequentialGenerationInput,
-    sequential_image_field_type,
     TextToImageInput,
     TOOLS_DESCRIPTION,
 )
@@ -54,6 +60,13 @@ _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "sequential_generation": SequentialGenerationInput,
     "browse_images": BrowseImagesInput,
 }
+
+
+def test_generation_payload_table_matches_registered_models() -> None:
+    """共享载荷表与注册表中的生成工具模型一一对应，新增生成模型未入表即红。"""
+    assert set(GENERATION_BASE_PAYLOADS) == {
+        model for model in _TOOL_INPUT_MODELS.values() if issubclass(model, BaseGenerationInput)
+    }
 
 
 def test_text_to_image_parameter_order() -> None:
@@ -196,7 +209,8 @@ async def test_flat_input_schema_required_matches_model_fields() -> None:
 # 平铺签名非空语义镜像的字段清单：模型层经 str_strip_whitespace 加 min_length 或
 # 非空校验器拒绝纯空白输入，平铺参数模型不含 strip 配置，等价约束以 pattern 表达。
 # 清单与 server._NON_BLANK_PATTERN 的应用范围一一对应，新增非空语义字段未同步
-# 镜像时，下方等价断言因缺 pattern 转红。
+# 镜像时，下方等价断言因缺 pattern 转红。browse directory 缺省与空串同义
+# （归一点在 effective_directory），不参与镜像。
 _NON_BLANK_MIRROR_FIELDS = {
     ("text_to_image", "prompt"),
     ("text_to_image", "save_path"),
@@ -213,7 +227,6 @@ _NON_BLANK_MIRROR_FIELDS = {
     ("sequential_generation", "image"),
     ("sequential_generation", "save_path"),
     ("sequential_generation", "custom_name"),
-    ("browse_images", "directory"),
 }
 
 # 非空语义镜像的 pattern 取值，与 server._NON_BLANK_PATTERN 保持一致。
@@ -462,7 +475,6 @@ async def test_flat_tool_rejects_unknown_parameter_names(
         ),
         ("sequential_generation", {"prompt": "a cat", "image": "   "}),
         ("sequential_generation", {"prompt": "a cat", "image": ["   "]}),
-        ("browse_images", {"directory": "   "}),
     ],
 )
 async def test_flat_tool_rejects_blank_string_inputs(
@@ -480,31 +492,37 @@ async def test_flat_tool_rejects_blank_string_inputs(
 # ==================== 参考图列表数量上限的 schema 层声明与前置拒绝 ====================
 
 
-@pytest.mark.parametrize("minimum", [1, 2, 3])
-def test_image_count_field_factories_couple_validator_message_with_schema_bounds(
-    minimum: int,
+@pytest.mark.parametrize(
+    ("field_type", "minimum"),
+    [
+        (_MULTI_IMAGE_MODEL_TYPE, MULTI_IMAGE_MIN_ITEMS),
+        (_MULTI_IMAGE_FLAT_TYPE, MULTI_IMAGE_MIN_ITEMS),
+        (_SEQUENTIAL_IMAGE_MODEL_TYPE, SEQUENTIAL_IMAGE_MIN_ITEMS),
+        (_SEQUENTIAL_IMAGE_FLAT_TYPE, SEQUENTIAL_IMAGE_MIN_ITEMS),
+    ],
+)
+def test_image_count_field_aliases_couple_validator_message_with_schema_bounds(
+    field_type: Any, minimum: int
 ) -> None:
-    """计数字段工厂按同一 minimum 派生中文计数文案与 schema 数量界，同界是去重单源的成立前提。
+    """计数字段别名按同界挂载中文计数文案与 schema 数量界，同界是共享常量单源的成立前提。
 
-    以任意 minimum 参数化，工厂任一侧硬编码界使闭包文案或 minItems/maxItems 偏离参数即失败。
+    以四侧别名为参数，任一侧另起闭包或改写数量界使文案与 minItems/maxItems 偏离共享常量即失败。
     """
     maximum = SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
-    for factory in (multi_image_field_type, sequential_image_field_type):
-        field_type = factory(str, minimum)
-        # BeforeValidator.func 在类型上允许带 ValidationInfo 的双参形态，闭包实际为单参。
-        validator = cast(
-            "Callable[[object], object]",
-            next(arg.func for arg in get_args(field_type) if isinstance(arg, BeforeValidator)),
-        )
-        schema = TypeAdapter(field_type).json_schema()
-        array_branch = next(
-            branch for branch in schema.get("anyOf", [schema]) if branch.get("type") == "array"
-        )
-        assert array_branch["minItems"] == minimum
-        assert array_branch["maxItems"] == maximum
-        for count in (minimum - 1, maximum + 1):
-            with pytest.raises(ValueError, match=f"参考图片数量需在 {minimum}-{maximum} 之间"):
-                validator([f"img{i}" for i in range(count)])
+    # BeforeValidator.func 在类型上允许带 ValidationInfo 的双参形态，闭包实际为单参。
+    validator = cast(
+        "Callable[[object], object]",
+        next(arg.func for arg in get_args(field_type) if isinstance(arg, BeforeValidator)),
+    )
+    schema = TypeAdapter(field_type).json_schema()
+    array_branch = next(
+        branch for branch in schema.get("anyOf", [schema]) if branch.get("type") == "array"
+    )
+    assert array_branch["minItems"] == minimum
+    assert array_branch["maxItems"] == maximum
+    for count in (minimum - 1, maximum + 1):
+        with pytest.raises(ValueError, match=f"参考图片数量需在 {minimum}-{maximum} 之间"):
+            validator([f"img{i}" for i in range(count)])
 
 
 async def test_sequential_image_list_branch_declares_item_bounds() -> None:
@@ -563,7 +581,7 @@ async def test_fusion_tool_rejects_out_of_bounds_image_list(count: int) -> None:
     ("tool_name", "model_cls", "minimum"),
     [
         ("multi_image_fusion", MultiImageFusionInput, MULTI_IMAGE_MIN_ITEMS),
-        ("sequential_generation", SequentialGenerationInput, 1),
+        ("sequential_generation", SequentialGenerationInput, SEQUENTIAL_IMAGE_MIN_ITEMS),
     ],
 )
 async def test_image_count_validator_shared_by_flat_signature_and_model(
@@ -571,10 +589,10 @@ async def test_image_count_validator_shared_by_flat_signature_and_model(
 ) -> None:
     """计数前置校验器同界同文案挂载于平铺签名与输入模型两侧的 image 字段。
 
-    BeforeValidator 不进入 JSON schema，等价性镜像断言对其不可见；校验器经字段类型工厂
-    按界闭包构建，两侧为不同函数对象，身份断言不可用，改经两侧字段元数据各取唯一挂载的
-    校验器并以界外输入的中文文案锁定，单边漏挂、异界或另起文案即失败。新增计数受限字段时
-    须接入 schemas 的字段类型工厂并同步扩充本参数表。
+    BeforeValidator 不进入 JSON schema，等价性镜像断言对其不可见。
+    两侧别名同源组合共享计数常量，经两侧字段元数据各取唯一挂载的校验器
+    并以界外输入的中文文案锁定，单边漏挂、异界或另起文案即失败。
+    新增计数受限字段时须接入 schemas 的共享计数常量并同步扩充本参数表。
     """
     maximum = SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
     tool = mcp._tool_manager.get_tool(tool_name)

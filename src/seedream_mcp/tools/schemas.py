@@ -1,14 +1,18 @@
 """Seedream MCP 工具输入模型。
 
-本模块是工具参数校验的单一来源；inputSchema 由 server/_registration.py 的平铺签名生成，平铺签名
-镜像本模块的字段定义，等价性由 test_tool_parameter_order 锁定。
+本模块是工具参数校验的单一来源。
+inputSchema 由 server/_registration.py 的平铺签名生成，平铺签名镜像本模块的字段定义，
+等价性由 test_tool_parameter_order 锁定。
 通用字段抽到 ``_*Input`` 基类，按需多重继承组合为各工具的最终输入模型。
+runner 公共调用面的入参契约类型（如 ``EntryBound``）同置于此，消费方免知内部模块。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Any, Callable, ClassVar, Literal, Protocol, cast
+from pathlib import Path
+from typing import Annotated, Callable, ClassVar, Literal, Protocol, TypeVar, cast
 
 from pydantic import (
     BaseModel,
@@ -19,8 +23,19 @@ from pydantic import (
     model_validator,
 )
 
-from ..definitions.conventions import MAX_PARALLEL_REQUEST_COUNT, MAX_SEQUENTIAL_TOTAL_IMAGES
-from ..utils.core.errors import SeedreamValidationError, as_plain, as_plain_list, raw_error_text
+from ..definitions.conventions import (
+    MAX_LAYER_DECOMPOSITION_IMAGES,
+    MAX_PARALLEL_REQUEST_COUNT,
+    MAX_SEQUENTIAL_TOTAL_IMAGES,
+)
+from ..utils.core.errors import (
+    ErrorText,
+    SeedreamValidationError,
+    as_plain,
+    as_plain_list,
+    as_text,
+    raw_error_text,
+)
 from ..utils.images.validation import MAX_IMAGE_FILE_SIZE
 from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
@@ -36,6 +51,7 @@ from ..utils.core.validators import (
     validate_parallel_generation_options,
     validate_sequential_image_limit,
 )
+from ..utils.io.path import resolved_form_violation
 
 # ==================== 平铺签名共享常量 ====================
 # 以下约束与描述常量是双源镜像的单一来源。
@@ -56,6 +72,9 @@ CUSTOM_NAME_MAX_LENGTH = 255
 
 # 多图融合参考图最少两张为上游 API 限制。
 MULTI_IMAGE_MIN_ITEMS = 2
+
+# 组图参考图最少一张：单字符串形态归一为单元素列表。
+SEQUENTIAL_IMAGE_MIN_ITEMS = 1
 
 REQUEST_COUNT_MIN = 1
 PARALLELISM_MIN = 1
@@ -328,17 +347,20 @@ def _image_count_validator(minimum: int) -> Callable[[object], object]:
     return validate_count
 
 
-def multi_image_field_type(item_type: Any, minimum: int) -> Any:
-    """融合 image 字段类型的单一来源：计数前置校验与数量界随类型携带，防止中文计数文案单边缺失。"""
-    return Annotated[
-        list[item_type],
-        BeforeValidator(_image_count_validator(minimum)),
-        Field(min_length=minimum, max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES),
-    ]
+_ItemT = TypeVar("_ItemT")
 
+# 条目类型参数化的融合族 image 类型：组合形状在此单点，模型侧与平铺侧按条目类型订阅。
+MultiImageType = Annotated[
+    list[_ItemT],
+    BeforeValidator(_image_count_validator(MULTI_IMAGE_MIN_ITEMS)),
+    Field(
+        min_length=MULTI_IMAGE_MIN_ITEMS,
+        max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+    ),
+]
 
 # 输入模型侧 image 类型：条目为纯 str，空白与超防御界由字段校验器拒绝。
-_MULTI_IMAGE_MODEL_TYPE: Any = multi_image_field_type(str, MULTI_IMAGE_MIN_ITEMS)
+_MULTI_IMAGE_MODEL_TYPE = MultiImageType[str]
 
 
 class _SingleImageInput(BaseModel):
@@ -373,21 +395,22 @@ class _MultiImageInput(BaseModel):
         return _reject_blank_or_oversized_image_items(value)
 
 
-def sequential_image_field_type(item_type: Any, minimum: int) -> Any:
-    """组图 image 字段类型的单一来源：union 骨架、列表分支数量界与计数前置校验随类型携带，防止中文计数文案单边缺失。"""
-    return Annotated[
-        item_type
-        | Annotated[
-            list[item_type],
-            Field(min_length=minimum, max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES),
-        ]
-        | None,
-        BeforeValidator(_image_count_validator(minimum)),
+# 条目类型参数化的组图族 image 类型：单串与列表分支的组合形状在此单点。
+SequentialImageType = Annotated[
+    _ItemT
+    | Annotated[
+        list[_ItemT],
+        Field(
+            min_length=SEQUENTIAL_IMAGE_MIN_ITEMS,
+            max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+        ),
     ]
-
+    | None,
+    BeforeValidator(_image_count_validator(SEQUENTIAL_IMAGE_MIN_ITEMS)),
+]
 
 # 输入模型侧 image 类型：条目为纯 str，单字符串形态经字段校验器归一为单元素列表。
-_SEQUENTIAL_IMAGE_MODEL_TYPE: Any = sequential_image_field_type(str, 1)
+_SEQUENTIAL_IMAGE_MODEL_TYPE = SequentialImageType[str]
 
 
 class _SequentialImageInput(BaseModel):
@@ -539,7 +562,8 @@ class _ResponseAndExecutionInput(BaseModel):
 class BaseGenerationInput(BaseModel):
     """图片生成工具的通用输入校验基类。
 
-    仅提供共享模型配置与校验逻辑，具体字段顺序由各工具输入模型定义。
+    提供共享模型配置、校验逻辑与单请求产图数的单点派生，
+    具体字段顺序由各工具输入模型定义。
     """
 
     model_config = ConfigDict(
@@ -558,6 +582,29 @@ class BaseGenerationInput(BaseModel):
         if not normalized:
             raise ValueError("该字段不能为空字符串")
         return normalized
+
+    @classmethod
+    def per_request_image_count(
+        cls,
+        *,
+        layer_decomposition: bool,
+        max_images: int | None,
+        image_count: int,
+    ) -> int:
+        """单请求产图数：按字段在场单点派生产图形态，子类不覆写。
+
+        入参为请求体字段的投影值，供不经模型实例化的调用方消费；三个投影键均必传，
+        漏接调用点即刻 TypeError 而非静默按缺省档低估。
+        键消费与 build_generation_context 同以字段在场驱动：
+        有 layer_decomposition 字段者图层拆分场景取满额常量，
+        有 max_images 字段者与 effective_max_images 共用同一推导函数，其余恒产一图。
+        产图数值与流水线真实形态的逐值对账由 webapp parity 守护锁定。
+        """
+        if layer_decomposition and "layer_decomposition" in cls.model_fields:
+            return MAX_LAYER_DECOMPOSITION_IMAGES
+        if "max_images" in cls.model_fields:
+            return resolve_sequential_max_images(max_images, image_count)
+        return 1
 
 
 class TextToImageInput(
@@ -703,8 +750,8 @@ class BrowseImagesInput(BaseModel):
 
     @property
     def effective_directory(self) -> str:
-        """浏览目录缺省为 "."。"""
-        return self.directory if self.directory is not None else "."
+        """浏览目录缺省与空串归一为 "."。"""
+        return self.directory if self.directory else "."
 
     model_config = ConfigDict(
         extra="forbid",
@@ -760,16 +807,30 @@ class BrowseImagesInput(BaseModel):
         description=SHOW_DETAILS_DESCRIPTION,
     )
 
-    @field_validator("directory")
-    @classmethod
-    def validate_directory(cls, value: str | None) -> str | None:
-        """去除首尾空格并拒绝空串，None 跳过校验。"""
-        if value is None:
-            return None
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("目录路径不能为空字符串")
-        return normalized
+
+@dataclass(frozen=True)
+class EntryBound:
+    """浏览请求目录与条目共用的已 resolve 替代界。
+
+    Attributes:
+        path: 界路径，词法形态违约在构造期抛 ValueError，判定单源于
+            resolved_form_violation（冒号与 Windows 保留名仅 win32 拒绝）。
+        denial_message: 请求目录越出界时的同界门拒绝文案（ErrorText），界语义口径由声明方自带。
+    """
+
+    path: Path
+    denial_message: ErrorText
+
+    def __post_init__(self) -> None:
+        """构造门与 AutoSaveResult 同类：坏形态界路径与读权限求交时静默失配产出空结果，
+        构造期即拒绝；违约形态判定随 resolved_form_violation 平台口径单源演化。"""
+        if resolved_form_violation(str(self.path)) is not None:
+            raise ValueError(
+                raw_error_text(
+                    "EntryBound.path 须为已 resolve 的绝对路径: {path}",
+                    path=as_text(self.path),
+                )
+            )
 
 
 class GenerationInputParams(Protocol):

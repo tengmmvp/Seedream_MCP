@@ -22,7 +22,7 @@ from mcp.types import CallToolResult, ContentBlock, TextContent
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from .channels import MIRROR_CHANNEL, output_channel_enabled
-from .sanitize import _unique_flat_key
+from .sanitize import _unique_flat_key, _unique_key
 from ...definitions.conventions import (
     BROWSE_IMAGES_TOOL_NAME,
     GET_MODEL_INFO_TOOL_NAME,
@@ -149,7 +149,7 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
     """图片浏览工具的结构化输出 schema。
 
     Attributes:
-        directory: 用户请求的目录字符串，未提供时归一为当前目录 "."。
+        directory: 用户请求的目录字符串，缺省与空串归一为 "."。
         resolved_directories: 实际解析并扫描的目录列表，正斜杠绝对路径。
         workspace_roots: 工作区根回显，正斜杠绝对路径。
         count: 当前页返回的图片条数。
@@ -371,9 +371,7 @@ def _strip_result_payload_surrogates(value: Any) -> Any:
                 result = {}
                 for key, item in original.items():
                     new_key, new_value = patches.get(key, (key, item))
-                    while new_key in result:
-                        new_key = f"{new_key}<dup>"
-                    result[new_key] = new_value
+                    result[_unique_key(result, new_key)] = new_value
             if parent is None:
                 root_result = result
             elif result is not original or write_key is not slot:

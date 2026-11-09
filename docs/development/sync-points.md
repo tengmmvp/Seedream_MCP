@@ -15,7 +15,7 @@
 
 ## 新增工具
 
-- `seedream_mcp/tools/schemas.py`：输入模型，参数校验的单一来源；计数受限的图片字段经 multi_image_field_type/sequential_image_field_type 字段类型工厂单源挂载（平铺签名与输入模型两侧共用），新增时同步扩充 test_image_count_validator_shared_by_flat_signature_and_model 参数表。
+- `seedream_mcp/tools/schemas.py`：输入模型，参数校验的单一来源；计数受限的图片字段以共享计数常量（前置校验与数量界）组合为两侧字面量别名单源挂载（平铺签名与输入模型共用同一常量），新增时同步扩充 test_image_count_validator_shared_by_flat_signature_and_model 参数表。
 - `seedream_mcp/tools/handlers/<tool>.py`：处理器；生成类工具的 `_execute` 闭包须接线全部公共 kwargs。
 - `seedream_mcp/tools/runners.py` 与 `seedream_mcp/tools/__init__.py`：适配器组装与包门面延迟导出映射。
 - `seedream_mcp/server/_registration.py`：平铺参数镜像签名（test_tool_parameter_order 锁定与输入模型等价）、描述与 title、`_run_tool_pipeline` 的 tool_name 传 definitions/conventions 常量（S8 禁字面量）、带参工具的 `workspace_roots: _ROOTS_DEPENDENCY` 依赖。

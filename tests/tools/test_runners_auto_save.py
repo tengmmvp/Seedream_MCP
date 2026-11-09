@@ -30,8 +30,10 @@ from seedream_mcp.tools.runners import (
 from seedream_mcp.utils.io import save as io_save
 
 from _lib.generation_fixtures import _patch_client_method_spy, _patch_client_success
+from _lib.path_helpers import abs_path_stub
 
 GENERATED_URL = "https://example.com/generated.png"
+SAVED_GENERATED_PATH = abs_path_stub("/saved/generated.png")
 
 
 def _client_result() -> dict[str, Any]:
@@ -52,7 +54,7 @@ def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:
             io_save.AutoSaveResult(
                 success=True,
                 original_url=images[0]["url"],
-                local_path="/saved/generated.png",
+                local_path=SAVED_GENERATED_PATH,
                 markdown_ref="![image](generated.png)",
             )
         ]
@@ -89,10 +91,10 @@ async def test_run_text_to_image_includes_auto_save_field(
     assert structured["auto_save"]["enabled"] is True
     save_results = structured["auto_save"]["results"]
     assert len(save_results) == 1
-    assert save_results[0]["local_path"] == "/saved/generated.png"
+    assert save_results[0]["local_path"] == SAVED_GENERATED_PATH
     data = structured["data"]
     assert data[0]["url"] == GENERATED_URL
-    assert data[0]["local_path"] == "/saved/generated.png"
+    assert data[0]["local_path"] == SAVED_GENERATED_PATH
 
 
 async def test_run_text_to_image_absolute_save_path_survives_unresolvable_images_root(
@@ -163,6 +165,7 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
         }
 
     captured: dict[str, Any] = {}
+    saved_path = abs_path_stub("/saved/decoded.png")
 
     async def fake_save_multiple_base64(
         self: Any, images: list[dict[str, Any]], tool_name: str
@@ -173,7 +176,7 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
             io_save.AutoSaveResult(
                 success=True,
                 original_url="base64",
-                local_path="/saved/decoded.png",
+                local_path=saved_path,
                 markdown_ref="![Generated Image](decoded.png)",
             )
         ]
@@ -207,11 +210,11 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
     assert captured["tool_name"] == "text_to_image"
     save_results = structured["auto_save"]["results"]
     assert len(save_results) == 1
-    assert save_results[0]["local_path"] == "/saved/decoded.png"
+    assert save_results[0]["local_path"] == saved_path
     # data 按收集阶段记录的原始索引对位写回，失败占位项不获得本地路径。
     data = structured["data"]
     assert "local_path" not in data[0]
-    assert data[1]["local_path"] == "/saved/decoded.png"
+    assert data[1]["local_path"] == saved_path
     assert data[1]["markdown_ref"] == "![Generated Image](decoded.png)"
     response_text = next(
         content.text for content in result.content if isinstance(content, TextContent)

@@ -29,6 +29,8 @@ from seedream_mcp.tools.schemas import (
 from seedream_mcp.utils.io.save import AutoSaveResult
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 
+from _lib.path_helpers import abs_path_stub
+
 
 def _build_config() -> SeedreamConfig:
     return SeedreamConfig(
@@ -344,7 +346,7 @@ def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None
         AutoSaveResult(
             success=True,
             original_url="https://example.com/ok.png",
-            local_path="images/ok.png",
+            local_path=abs_path_stub("images/ok.png"),
             markdown_ref="![ok](images/ok.png)",
         )
     ]
@@ -356,7 +358,7 @@ def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None
 
     assert "local_path" not in failed_item
     assert "markdown_ref" not in failed_item
-    assert success_item["local_path"] == "images/ok.png"
+    assert success_item["local_path"] == abs_path_stub("images/ok.png")
     assert success_item["markdown_ref"] == "![ok](images/ok.png)"
 
 
@@ -387,10 +389,10 @@ def test_update_result_with_auto_save_breaks_on_misaligned_indices() -> None:
     result = _two_url_result()
     snapshot = copy.deepcopy(result)
     updated = update_result_with_auto_save(
-        result, [_saved("images/1.png"), _saved("images/2.png")], [0]
+        result, [_saved(abs_path_stub("images/1.png")), _saved(abs_path_stub("images/2.png"))], [0]
     )
 
-    assert updated["data"][0]["local_path"] == "images/1.png"
+    assert updated["data"][0]["local_path"] == abs_path_stub("images/1.png")
     assert "local_path" not in updated["data"][1]
     assert result == snapshot
 
@@ -398,17 +400,19 @@ def test_update_result_with_auto_save_breaks_on_misaligned_indices() -> None:
     result = _two_url_result()
     snapshot = copy.deepcopy(result)
     updated = update_result_with_auto_save(
-        result, [_saved("images/1.png"), _saved("images/2.png")], [0, 2]
+        result,
+        [_saved(abs_path_stub("images/1.png")), _saved(abs_path_stub("images/2.png"))],
+        [0, 2],
     )
 
-    assert updated["data"][0]["local_path"] == "images/1.png"
+    assert updated["data"][0]["local_path"] == abs_path_stub("images/1.png")
     assert "local_path" not in updated["data"][1]
     assert result == snapshot
 
     # 首个索引即越界：无任何回填发生。
     result = _two_url_result()
     snapshot = copy.deepcopy(result)
-    updated = update_result_with_auto_save(result, [_saved("images/1.png")], [5])
+    updated = update_result_with_auto_save(result, [_saved(abs_path_stub("images/1.png"))], [5])
 
     assert updated["data"] == [
         {"url": "https://example.com/1.png"},

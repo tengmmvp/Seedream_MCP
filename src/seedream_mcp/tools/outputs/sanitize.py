@@ -37,15 +37,19 @@ def _flatten_key(key: Any) -> Any:
     return normalize_inline_text(key)
 
 
+def _unique_key(taken: dict[Any, Any], key: Any) -> Any:
+    """键已占用时附加 <dup> 后缀直到空闲，条目不覆盖不丢弃。"""
+    while key in taken:
+        key = f"{key}<dup>"
+    return key
+
+
 def _unique_flat_key(taken: dict[Any, Any], key: Any) -> Any:
     """压平键的控制字符并剥离未配对代理，碰撞时附加 <dup> 后缀直到空闲，条目不覆盖不丢弃。
 
     非字符串键无控制字符语义，原样参与判重。
     """
-    key = _flatten_key(key)
-    while key in taken:
-        key = f"{key}<dup>"
-    return key
+    return _unique_key(taken, _flatten_key(key))
 
 
 def _flatten_mapping_keys(mapping: dict[Any, Any]) -> dict[Any, Any]:

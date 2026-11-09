@@ -73,7 +73,7 @@ def _instrumented_admission_clients(
         client = SeedreamClient(SeedreamConfig(api_key="k", generate_concurrency=2))
         monkeypatch.setattr(client, "_ensure_client", noop)
         monkeypatch.setattr(client, "_get_http_client", lambda: None)
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, "_send_request", fake_send)
         clients.append(client)
     return clients, stats
 

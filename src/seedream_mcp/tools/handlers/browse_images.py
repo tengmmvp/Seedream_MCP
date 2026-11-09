@@ -1,9 +1,10 @@
 """图片浏览工具处理器。
 
-读权限求值（工作区 ∪ 图片目录）、请求目录解析、经读范围下沉扫描层的越界
-过滤与配额填充、分页与 structuredContent 装配，外加薄壳入口 ``handle_browse_images``
-的异常兜底降级；不经 ``execute_generation_handler`` 生成流水线，字段规则与校验由
-``BrowseImagesInput`` 单一定义。
+读权限求值（工作区 ∪ 图片目录）、请求目录解析（``entry_bound`` 声明时
+请求目录与条目同界）、经读范围下沉扫描层的越界过滤与配额填充、
+分页与 structuredContent 装配，外加薄壳入口 ``handle_browse_images`` 的异常兜底降级；
+不经 ``execute_generation_handler`` 生成流水线，
+字段规则与校验由 ``BrowseImagesInput`` 单一定义。
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from mcp.types import CallToolResult
 
 from ...definitions.conventions import BROWSE_FAILED_ERROR_TYPE, BROWSE_IMAGES_TOOL_NAME
 from ...utils.core.errors import (
+    ErrorText,
     as_detail,
     as_plain,
     as_text,
@@ -41,9 +43,7 @@ from ...utils.io.path import (
     get_read_context,
     get_workspace_roots,
     is_within_any,
-    is_within_any_nc_parts,
     is_within_resolved,
-    normcase_parts,
     read_scope_denial_message,
     resolve_against_base,
 )
@@ -66,7 +66,7 @@ from ..outputs import (
     build_error_tool_result,
     build_structured_tool_result,
 )
-from ..schemas import BrowseImagesInput
+from ..schemas import BrowseImagesInput, EntryBound
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
@@ -112,7 +112,7 @@ class _BrowseRequestState:
     Attributes:
         workspace_roots: 本次请求生效的工作区根列表，会话声明时为 MCP Roots，
             否则为环境回退根，保留原始形态供回显。
-        directory: 请求目录字符串，未提供时归一为 "."。
+        directory: 请求目录字符串，缺省与空串归一为 "."。
         resolved_directories: 外层创建的共享列表，解析结果逐步填充，异常兜底分支
             经同一引用读取。
         recursive: 是否递归扫描子目录。
@@ -175,9 +175,9 @@ def _format_file_info(
     """格式化单个扫描条目的展示文本与结构化详情字段。
 
     show_details 为真时附带大小与修改时间，对条目的 resolved_path 活体 stat；
-    文本格式为「路径 | 大小 | 修改时间」，结构化详情含 size_mb 与 modified
-    两键；stat 或时间戳解析失败时降级为「文件信息不可用」。show_details
-    为假时仅返回路径文本与空详情字典。
+    文本格式为「路径 | 大小 | 修改时间」，结构化详情含 size_mb 与 modified 两键。
+    stat 或时间戳解析失败时降级为「文件信息不可用」。
+    show_details 为假时仅返回路径文本与空详情字典。
 
     Args:
         display_path: 展示给用户的路径字符串。
@@ -430,17 +430,6 @@ def _normalize_format_filter(raw: list[str] | None) -> tuple[list[str] | None, b
     return raw, True
 
 
-def _narrow_scope_to_bounds(read_scope: list[Path], bounds_scope: list[Path]) -> list[Path]:
-    """仅保留落在读权限内的替代界，未落入者整界剔除。"""
-    # 读范围分量随调用预计算一次，替代界按分量原语直判，免逐替代界重建范围分量。
-    read_scope_parts = [normcase_parts(base) for base in read_scope]
-    return [
-        bound
-        for bound in bounds_scope
-        if is_within_any_nc_parts(normcase_parts(bound), read_scope_parts)
-    ]
-
-
 async def build_browse_fallback_result(
     params: BrowseImagesInput,
     resolved_directories: list[Path],
@@ -485,18 +474,18 @@ async def build_browse_fallback_result(
 
 async def _resolve_browse_directories(
     directory: str,
-    resolved_directory: Path | None = None,
+    entry_bound: EntryBound | None = None,
 ) -> tuple[list[Path], list[Path], Path | None, str | None]:
     """目录解析阶段：求值读权限并解析请求目录，供越界判定与扫描取用。
 
-    resolved_directory 为调用方经 resolve_against_base 同口径预解析的结果，提供时
-    免重复解析，相对与读权限判定照常执行。绝对目录判读权限，相对目录仅限图片
-    目录内。
+    绝对目录判读权限，相对目录仅限图片目录内，
+    entry_bound 声明时同界门先于相对约束判定，请求目录须与条目同落界内，
+    越界拒绝文案取 entry_bound.denial_message，解析口径单点归属本函数。
 
     Returns:
-        (工作区根列表, 读权限基集合, 请求目录, 错误消息) 四元组：解析成功时请求
-        目录为已 resolve 形态且错误消息为 None，路径无效与相对越界携带错误消息，
-        绝对越界两者均 None。
+        (工作区根列表, 读权限基集合, 请求目录, 错误消息) 四元组：
+        解析成功时请求目录为已 resolve 形态且错误消息为 None，
+        路径无效、相对越界与越出替代界携带错误消息，绝对越界两者均 None。
     """
 
     # 读权限求值与请求目录的 resolve/normalize 可能阻塞网络挂载目录，整体下沉
@@ -508,31 +497,27 @@ async def _resolve_browse_directories(
         三类位置经 get_read_context 单点求值共享，消除本函数内对图片目录与工作区的重复解析。
         """
         workspace_roots, images_root, read_scope = get_read_context()
-        if resolved_directory is not None:
-            resolved_dir = resolved_directory
-            within_images_root = is_within_resolved(resolved_directory, images_root)
-        else:
-            try:
-                # 相对路径以图片目录为基准；默认目录 "." 即图片目录本身。
-                resolved_dir, within_images_root = resolve_against_base(directory, images_root)
-            except ValueError as exc:
-                # 异常消息内含用户输入路径，构造即净化后才进入错误通道。
-                return (
-                    workspace_roots,
-                    read_scope,
-                    None,
-                    safe_error_text("目录路径无效: {reason}", reason=as_detail(exc)),
-                )
+
+        def _reject(
+            message: str | ErrorText | None,
+        ) -> tuple[list[Path], list[Path], Path | None, str | None]:
+            """构造拒绝返回：无请求目录，携带错误消息（绝对越界为 None）。"""
+            return workspace_roots, read_scope, None, None if message is None else str(message)
+
+        try:
+            # 相对路径以图片目录为基准；默认目录 "." 即图片目录本身。
+            resolved_dir, within_images_root = resolve_against_base(directory, images_root)
+        except ValueError as exc:
+            # 异常消息内含用户输入路径，构造即净化后才进入错误通道。
+            return _reject(safe_error_text("目录路径无效: {reason}", reason=as_detail(exc)))
+        # 同界门先于相对约束与读权限判定：界语义更特异，越界形态统一落界文案。
+        if entry_bound is not None and not is_within_resolved(resolved_dir, entry_bound.path):
+            return _reject(entry_bound.denial_message)
         if not os.path.isabs(directory) and not within_images_root:
-            return (
-                workspace_roots,
-                read_scope,
-                None,
-                RELATIVE_PATH_CONFINEMENT_MESSAGE,
-            )
+            return _reject(RELATIVE_PATH_CONFINEMENT_MESSAGE)
         # 基集合只用一次，判定走 is_within_any，内部逐基现算恰宜。
         if not is_within_any(resolved_dir, read_scope):
-            return workspace_roots, read_scope, None, None
+            return _reject(None)
         return workspace_roots, read_scope, resolved_dir, None
 
     return await asyncio.to_thread(_read_scope_and_resolve_dir)
@@ -785,42 +770,35 @@ async def execute_browse_request(
     ctx: Context[Any, Any] | None,
     *,
     resolved_directories: list[Path],
-    bounds_scope: list[Path] | None = None,
-    resolved_directory: Path | None = None,
+    entry_bound: EntryBound | None = None,
 ) -> CallToolResult:
     """执行图片浏览主逻辑：求值读权限、解析目录、扫描分页并装配工具结果。
 
-    目录解析以图片目录为基准，判定面向读权限（工作区 ∪ 图片目录）；扫描结果经扫描
-    缓存加速翻页，切片多取一张以判定 has_more。未预期异常向上抛出，由薄壳入口外层
-    ``handle_browse_images`` 兜底降级。
+    目录解析以图片目录为基准，判定面向读权限（工作区 ∪ 图片目录），
+    entry_bound 声明时请求目录与条目同界。
+    扫描结果经扫描缓存加速翻页，切片多取一张以判定 has_more。
+    未预期异常向上抛出，由薄壳入口外层 ``handle_browse_images`` 兜底降级。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。
         ctx: MCP 上下文，用于进度上报，可为 None。
         resolved_directories: 外层创建的共享列表，解析结果逐步填充，供成功与兜底
             分支读取。
-        bounds_scope: 条目过滤的替代界，与读权限求交后生效，空列表拒绝；None 时按
-            读权限（工作区 ∪ 图片目录）过滤；Web 图库传入图片目录使越界条目在
-            扫描源头剔除。
-        resolved_directory: 调用方经 resolve_against_base 同口径预解析的请求目录，
-            提供时免重复解析；None 时按 directory 现解析。
+        entry_bound: 请求目录与条目共用的替代界（EntryBound）：请求目录越出界
+            以同界门拒绝，条目过滤与读权限求交后生效，未落入读权限时整界剔除；
+            None 时请求目录仅受读权限约束，条目按读权限过滤。
 
     Returns:
         浏览工具结果，目录无效、越界与模型可自纠的参数错误为 is_error=True，目录
         不可读与无图片维持空结果语义。
-
-    Raises:
-        ValueError: bounds_scope 为空列表时。
     """
-    if bounds_scope is not None and not bounds_scope:
-        raise ValueError("bounds_scope 不能为空列表")
     effective_format_filter, format_filter_exhausted = _normalize_format_filter(
         params.format_filter
     )
     directory = params.effective_directory
 
     workspace_roots, read_scope, resolved_dir, dir_error = await _resolve_browse_directories(
-        directory, resolved_directory
+        directory, entry_bound
     )
 
     state = _BrowseRequestState.from_params(
@@ -850,11 +828,9 @@ async def execute_browse_request(
         state.limit,
     )
 
-    scan_scope = (
-        _narrow_scope_to_bounds(read_scope, bounds_scope)
-        if bounds_scope is not None
-        else read_scope
-    )
+    scan_scope = read_scope
+    if entry_bound is not None:
+        scan_scope = [entry_bound.path] if is_within_any(entry_bound.path, read_scope) else []
     image_entries, unreadable_dirs, scan_result = await _scan_browse_entries(
         ctx=ctx,
         state=state,
@@ -891,8 +867,7 @@ async def handle_browse_images(
     params: BrowseImagesInput,
     ctx: Context[Any, Any] | None = None,
     *,
-    bounds_scope: list[Path] | None = None,
-    resolved_directory: Path | None = None,
+    entry_bound: EntryBound | None = None,
 ) -> CallToolResult:
     """处理图片浏览请求，扫描读权限（工作区 ∪ 图片目录）内指定目录的图片并分页返回。
 
@@ -902,10 +877,8 @@ async def handle_browse_images(
     Args:
         params: 经 pydantic 校验的工具输入模型。
         ctx: MCP 上下文，用于进度上报，可为 None。
-        bounds_scope: 条目过滤的替代界，与读权限求交后生效，None 时按读权限过滤；
-            透传给 execute_browse_request。
-        resolved_directory: 调用方经 resolve_against_base 同口径预解析的请求目录，
-            提供时免重复解析；透传给 execute_browse_request。
+        entry_bound: 请求目录与条目共用的替代界（EntryBound），
+            同界门拒绝文案随界自带，None 时按读权限过滤。
 
     Returns:
         浏览工具结果，失败时 isError 为 True。
@@ -917,8 +890,7 @@ async def handle_browse_images(
             params,
             ctx,
             resolved_directories=resolved_directories,
-            bounds_scope=bounds_scope,
-            resolved_directory=resolved_directory,
+            entry_bound=entry_bound,
         )
     except Exception as exc:
         # 档案仅取 user_hint 判定指引叠加。

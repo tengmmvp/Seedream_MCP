@@ -163,6 +163,8 @@ async def test_generation_b64_payload_mirror_replaced_by_length_placeholder(
     镜像中保持完整。
     """
     payload = "QUJD" * 50_000
+    # as_posix 保持正斜杠，镜像 JSON 文本断言不受平台分隔符转义影响。
+    saved_path = f"{tmp_path.as_posix()}/decoded.png"
 
     async def fake_text_to_image_b64(self: Any, **kwargs: Any) -> dict[str, Any]:
         del self, kwargs
@@ -181,7 +183,7 @@ async def test_generation_b64_payload_mirror_replaced_by_length_placeholder(
             io_save.AutoSaveResult(
                 success=True,
                 original_url="base64",
-                local_path="/saved/decoded.png",
+                local_path=saved_path,
                 markdown_ref="![Generated Image](decoded.png)",
             )
         ]
@@ -206,15 +208,15 @@ async def test_generation_b64_payload_mirror_replaced_by_length_placeholder(
     assert placeholder in blocks[1].text
     # 镜像不携带 base64 原文，定位字段保持完整。
     assert payload not in blocks[1].text
-    assert "/saved/decoded.png" in blocks[1].text
+    assert saved_path in blocks[1].text
     mirror = json.loads(blocks[1].text)
     assert mirror["data"][0]["b64_json"] == placeholder
-    assert mirror["data"][0]["local_path"] == "/saved/decoded.png"
+    assert mirror["data"][0]["local_path"] == saved_path
     # structuredContent 字段本身不受占位替换影响，保留完整载荷。
     structured = result.structured_content
     assert structured is not None
     assert structured["data"][0]["b64_json"] == payload
-    assert structured["data"][0]["local_path"] == "/saved/decoded.png"
+    assert structured["data"][0]["local_path"] == saved_path
 
 
 def test_structured_json_text_replaces_b64_at_any_depth_and_size() -> None:

@@ -1,7 +1,8 @@
 """工具输入 schema 字符串与取值边界测试。
 
 pydantic 在 core schema 层强制 max_length 约束，超长值在字段校验器运行前即被拒绝。
-覆盖 prompt 100000、save_path 1024、custom_name 255、browse directory 1024、
+覆盖 prompt 100000、save_path 1024、custom_name 255、
+browse directory 1024（缺省与空串同归一为 "."）、
 browse format_filter 补点后单项 16 与条目数 32 的接受与超长拒绝边界、
 browse 数值控件区间、枚举字段归一与拒绝、可选字符串字段的空白拒绝与 None 放行、
 image 的空白拒绝、多图 image=None 的类型拒绝、多图融合计数界外中文拒绝、
@@ -101,11 +102,13 @@ def test_browse_directory_rejects_exceeding_max_length() -> None:
         BrowseImagesInput.model_validate({"directory": "a" * 1025})
 
 
-def test_blank_directory_rejected_none_allowed() -> None:
-    """纯空白 directory 在模型校验器层被拒绝，None 走早退放行。"""
-    with pytest.raises(ValidationError, match="目录路径不能为空字符串"):
-        BrowseImagesInput.model_validate({"directory": "   "})
+def test_blank_directory_normalizes_to_default() -> None:
+    """纯空白 directory 剥成空串，缺省与空串同归一为 "."。"""
+    model = BrowseImagesInput.model_validate({"directory": "   "})
+    assert model.directory == ""
+    assert model.effective_directory == "."
     assert BrowseImagesInput.model_validate({"directory": None}).directory is None
+    assert BrowseImagesInput.model_validate({}).effective_directory == "."
 
 
 def test_browse_format_filter_accepts_item_max_length_boundary() -> None:
