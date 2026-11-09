@@ -149,7 +149,3 @@
 - bump actions/setup-python from 7.0.0 to 7.1.0 (#35) ([66cf0a6](https://github.com/tengmmvp/Seedream_MCP/commit/66cf0a668fd760e2318df7ee67cdc3b909881760))
 - bump docker/login-action from 4.6.0 to 4.7.0 (#34) ([43854d4](https://github.com/tengmmvp/Seedream_MCP/commit/43854d4eb94218be64b4ed7c3ce1f5f296456fdd))
 - bump pypa/gh-action-pypi-publish from 1.14.2 to 1.14.3 (#32) ([cff61db](https://github.com/tengmmvp/Seedream_MCP/commit/cff61db3b9ff450a91a4fd745373a656a2f27aa8))
-
-# Changelog
-
-基于 Conventional Commits 由 git-cliff 自动生成，随每次发版前插版本段落。
