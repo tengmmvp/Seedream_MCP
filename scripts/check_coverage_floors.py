@@ -21,8 +21,9 @@ def main(repo_root: Path | None = None) -> None:
     """
     # Windows 控制台默认代码页编不出中文输出，输出流重配置为 UTF-8。
     for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8")
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8")
     root = Path(__file__).resolve().parent.parent if repo_root is None else repo_root
     floor = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
         "coverage_floors"

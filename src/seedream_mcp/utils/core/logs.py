@@ -274,6 +274,7 @@ def setup_logging(
             backtrace=True,
             diagnose=False,
         )
+        logger.info("日志文件: {}", log_path.resolve())
 
     # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru；root
     # logger 已有 handler 且未强制接管时 basicConfig 整体 no-op。已有 handler 均为
@@ -301,8 +302,6 @@ def setup_logging(
             logging.getLogger(name).setLevel(logging.WARNING)
 
     logger.info("日志系统初始化完成，级别: {}", level)
-    if enable_file:
-        logger.info("日志文件: {}", log_path.resolve())
 
 
 def get_logger() -> Logger:
