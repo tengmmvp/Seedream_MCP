@@ -2,6 +2,25 @@
 
 基于 Conventional Commits 由 git-cliff 自动生成，随每次发版前插版本段落。
 
+## [5.0.0-alpha.2](https://github.com/tengmmvp/Seedream_MCP/compare/v5.0.0-alpha.1...v5.0.0-alpha.2) - 2026-11-10
+### 修复
+
+- git-cliff 钉版改 v2.14.2（上游 tag 加 v 前缀，裸版本号下载 404） ([adee54c](https://github.com/tengmmvp/Seedream_MCP/commit/adee54cf88d2b9dd812ad42795f19480facc1e35))
+- 去除 CHANGELOG 尾部重复头（初始头与 cliff 模板头失配致前插追加整文件） ([c46935b](https://github.com/tengmmvp/Seedream_MCP/commit/c46935b03bc0cae73596ea5c92368d5990d402b3))
+- Release 正文注入前剥除 cliff 版本标题，消除与 Release 标题重复及 h2 嵌 h3 层级倒挂 ([5a7f3c8](https://github.com/tengmmvp/Seedream_MCP/commit/5a7f3c83e204ce2e06f2fb597e422afa88771a66))
+
+### 内部重构
+
+- Release 正文直接镜像 cliff 版本段落，版本标题带 compare 链接 ([138adf8](https://github.com/tengmmvp/Seedream_MCP/commit/138adf855e57aa1a1c94a95f75c9375e6dc19b22))
+
+### 文档
+
+- 三语 README 底部新增 Discussions 讨论区横幅入口 ([acc8a3b](https://github.com/tengmmvp/Seedream_MCP/commit/acc8a3bd6fe287c826d7d56cd5e3401bca452bda))
+
+### 测试
+
+- 链接集合契约豁免各语 Discussions 横幅引用 ([5dbf1c1](https://github.com/tengmmvp/Seedream_MCP/commit/5dbf1c1d30c711d9f4d082989ee6d0b8ee02b066))
+
 ## [5.0.0-alpha.1] - 2026-11-09
 ### 新增与改进
 
