@@ -1,5 +1,5 @@
 # git-cliff 配置：release.yml 的 build-and-release 据此生成版本段落，
-# 填入 GitHub Release 更新内容节并前插 CHANGELOG.md；提交类型分组见 [git]。
+# 直接作 GitHub Release 正文开头并前插 CHANGELOG.md；提交类型分组见 [git]。
 
 [changelog]
 header = """
@@ -10,7 +10,11 @@ header = """
 """
 body = """
 {% if version %}\
+{% if previous %}\
+## [{{ version | trim_start_matches(pat="v") }}](https://github.com/tengmmvp/Seedream_MCP/compare/{{ previous.version }}...{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
 ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% endif %}\
 {% else %}\
 ## [未发布]
 {% endif %}\
