@@ -827,3 +827,9 @@ uv run python -m seedream_mcp.server --api-key your_key
 ## 📄 许可证
 
 这个项目基于 MIT 许可证开源。更多信息请查看 [LICENSE](LICENSE) 文件。
+
+<div align="center">
+  <a href="https://github.com/tengmmvp/Seedream_MCP/discussions">
+    <img src="./assets/discussions-banner-zh-hans.svg" alt="Discussions" width="100%"/>
+  </a>
+</div>
