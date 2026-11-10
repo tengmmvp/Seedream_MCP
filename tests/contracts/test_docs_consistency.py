@@ -352,13 +352,21 @@ def test_heading_depth_sequence_matches() -> None:
 _ALL_README_NAMES = (BASE_README, *OTHER_READMES)
 _SWITCHER_LINKS = frozenset(f"./{name}" for name in _ALL_README_NAMES)
 
+# Discussions 横幅按语言分文件，各 README 恰好引用本语一枚，不参与三语共享集合比较。
+_BANNERS_BY_NAME = {
+    BASE_README: "./assets/discussions-banner-zh-hans.svg",
+    "README.zh-TW.md": "./assets/discussions-banner-zh-hant.svg",
+    "README.en.md": "./assets/discussions-banner-en.svg",
+}
+_BANNER_LINKS = frozenset(_BANNERS_BY_NAME.values())
+
 
 def test_link_url_sets_match() -> None:
     """正文链接 URL 集合三语一致，markdown 链接与 HTML href/src 都计入。
 
     代码块内的 URL 不参与比较；语言切换栏不得链接自身且须恰好链接其余两份
-    README，任一 README 重新引入自链接即失败；切换栏之外的链接三语共享同一
-    份集合，单语增删链接即失败。
+    README，任一 README 重新引入自链接即失败；各 README 恰好引用本语横幅一
+    枚；其余链接三语共享同一份集合，单语增删链接即失败。
     """
     urls_by_name = {name: _link_urls(name) for name in _ALL_README_NAMES}
     assert urls_by_name[BASE_README], "未提取到任何链接，解析失效"
@@ -369,10 +377,15 @@ def test_link_url_sets_match() -> None:
             f"{name} 的语言切换栏应恰好链接其余两份 README，实际为 "
             f"{sorted(urls & _SWITCHER_LINKS)}"
         )
+        assert urls & _BANNER_LINKS == {_BANNERS_BY_NAME[name]}, (
+            f"{name} 应恰好引用本语横幅 {_BANNERS_BY_NAME[name]}，实际为 "
+            f"{sorted(urls & _BANNER_LINKS)}"
+        )
 
-    base_shared = urls_by_name[BASE_README] - _SWITCHER_LINKS
+    _per_language_links = _SWITCHER_LINKS | _BANNER_LINKS
+    base_shared = urls_by_name[BASE_README] - _per_language_links
     for name in OTHER_READMES:
-        other_shared = urls_by_name[name] - _SWITCHER_LINKS
+        other_shared = urls_by_name[name] - _per_language_links
         assert other_shared == base_shared, (
             f"{name} 的链接 URL 集合与 {BASE_README} 漂移:\n"
             f"  仅 {BASE_README} 有: {sorted(base_shared - other_shared)}\n"
