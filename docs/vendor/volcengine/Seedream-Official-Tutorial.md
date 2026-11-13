@@ -1,43 +1,47 @@
-Doubao Seedream 系列模型原生支持文本、单图和多图输入，实现基于主体一致性的多图融合创作、图像编辑、组图生成等多样玩法，让图像创作更加自由可控。本文以 Doubao Seedream 5.0 lite（以下简称 Seedream 5.0 lite）为例介绍如何调用 [Image generation API](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-api) 进行图像创作。如需使用 Doubao Seedream 5.0 pro（以下简称 Seedream 5.0 pro）/ Doubao Seedream 4.5（以下简称 Seedream 4.5）/ Doubao Seedream 4.0（以下简称 Seedream 4.0）模型，将下文代码示例中的 model 字段替换为对应的 Model ID 即可。
+Doubao Seedream 系列模型支持文本、单图和多图输入，可用于文生图、多图融合和图像编辑。本文介绍如何调用 [Image generation API](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-api) 进行图像创作：文生图、单图编辑和多图融合使用 Seedream 5.5，组图生成、联网搜索和流式输出使用 Seedream 5.0 lite，极速提示词优化使用 Seedream 5.0 pro。如需切换模型，请根据下方模型能力表选择，并按目标模型的参数约束配置请求。
 
 > **新模型上线**
 
-> Seedream 5.0 flash（Model ID: `doubao-seedream-5-0-flash-260915`）已上线，支持通过坐标、框选、箭头等多种方式指定编辑位置来精准编辑图片；支持将单张图片拆分为 1 张底图和最多 16 个独立图层；支持原生多语种生成。
+> Seedream 5.5（Model ID：`doubao-seedream-5-5-261028`）增强了多轮编辑一致性，支持通过文生图和图生图生成原生 RGBA 图片。图层拆分最多可输出 1 张底图和 99 个图层，并可为规整文字图层提供富文本 OCR 结果。
 
-> **Seedream 5.0 flash 生图速度更快、价格更低**，适合对时延与成本敏感的业务场景。详情参见：[Doubao Seedream 5.0 pro / flash 教程](https://ark.volcengine.com/region:cn-beijing/docs/seedream-5-0-pro)。
+> 特色能力及调用示例请参见 [Doubao Seedream 5.5 教程](https://ark.volcengine.com/region:cn-beijing/docs/seedream-5-5)。
 
 # 模型效果
 
 更多效果示例见 [效果预览](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0)。
 
-| 场景                                                                                                                | 输入                                                                                                                                                                                                                                                                                                                                                                                                       | 输出                                                                                                                      |
-| ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| 图层拆分<br><br>> Seedream 5.0 pro / flash 支持将元素拆分为可独立编辑的图层，便于后续拖拽、缩放、重组等精细化编辑。 | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream_50_pro_layer_input.png)<br><br>> 将图片进行精确图层分离，需分离的文字坐标为 `<bbox>180 64 812 198</bbox>`、`<bbox>757 210 939 280</bbox>`、`<bbox>63 212 320 282</bbox>`、`<bbox>178 714 826 810</bbox>`、`<bbox>814 819 949 894</bbox>`、`<bbox>326 824 669 930</bbox>`；鹦鹉的坐标为 `<bbox>347 305 642 997</bbox>`。 | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream_50_pro_layer_output2.png)              |
-| 交互编辑<br><br>> Seedream 5.0 pro / flash 支持通过标记指定编辑区域，模型识别标记范围并生成内容，自然融入原有场景。 | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream_50_pro_input2.png)<br><br>> 根据手绘草图对图像进行编辑。在左下角标记区域添加一叠真实的杂志或艺术画册，并在右侧标记区域添加一个带杯碟的陶瓷杯咖啡。移除所有草图线条。保持构图不变。                                                                                                                                      | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream_50_pro_output2.png)                    |
-| 文生图 `联网搜索`<br><br>> Seedream 5.0 lite 模型可通过联网搜索功能，融合实时网络信息，提升生图时效性。             | 制作一张上海未来5日的天气预报图，采用现代扁平化插画风格，清晰展示每日天气、温度和穿搭建议。 整体为横向排版，标题为“上海未来5日天气预报”，包含5个等宽的垂直卡片，从左到右依次排列。 整体风格为现代、干净、友好的扁平化矢量插画风格，线条清晰，色彩柔和。 人物形象采用年轻男女的卡通插画，表情自然，姿态放松，服装细节清晰。                                                                                 | ![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/56e0e5cc24ff40559c9e934e5d744393~tplv-goo7wpa0wc-image.image) |
-| 多参考图生图<br><br>> 输入多张参考图，融合它们的风格、元素等特征来生成新图像。                                      | ![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/2198d4bef000400bbfea18025850ed82~tplv-goo7wpa0wc-image.image)<br><br>> 将图1的服装换为图2的服装                                                                                                                                                                                                                                                | ![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/db71316f709243ceb69a629cd48598ff~tplv-goo7wpa0wc-image.image) |
-| 组图生成<br><br>> 基于用户输入的文字和图片，生成一组内容关联的图像                                                  | ![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/a215e8241dd94f50901948790da121e1~tplv-goo7wpa0wc-image.image)<br><br>> 参考图1，生成四图片，图中人物分别带着墨镜，骑着摩托，带着帽子，拿着棒棒糖                                                                                                                                                                                               | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream-reference.jpeg)                        |
+| 场景                                                                                                                                                                    | 输入                                                                                                                                                                                                                                                                                                                                                                                                       | 输出                                                                                                                      |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 图层拆分<br><br>> Seedream 5.5、Seedream 5.0 pro / flash 支持将元素拆分为可独立编辑的图层，便于后续拖拽、缩放、重组等精细化编辑。下图展示 Seedream 5.0 pro 的拆分效果。 | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream_50_pro_layer_input.png)<br><br>> 将图片进行精确图层分离，需分离的文字坐标为 `<bbox>180 64 812 198</bbox>`、`<bbox>757 210 939 280</bbox>`、`<bbox>63 212 320 282</bbox>`、`<bbox>178 714 826 810</bbox>`、`<bbox>814 819 949 894</bbox>`、`<bbox>326 824 669 930</bbox>`；鹦鹉的坐标为 `<bbox>347 305 642 997</bbox>`。 | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream_50_pro_layer_output2.png)              |
+| 交互编辑<br><br>> Seedream 5.5、Seedream 5.0 pro / flash 支持通过标记指定编辑区域，模型识别标记范围并生成内容，自然融入原有场景。下图展示 Seedream 5.0 pro 的编辑效果。 | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream_50_pro_input2.png)<br><br>> 根据手绘草图对图像进行编辑。在左下角标记区域添加一叠真实的杂志或艺术画册，并在右侧标记区域添加一个带杯碟的陶瓷杯咖啡。移除所有草图线条。保持构图不变。                                                                                                                                      | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream_50_pro_output2.png)                    |
+| 文生图 `联网搜索`<br><br>> Seedream 5.0 lite 模型可通过联网搜索功能，融合实时网络信息，提升生图时效性。                                                                 | 制作一张上海未来5日的天气预报图，采用现代扁平化插画风格，清晰展示每日天气、温度和穿搭建议。 整体为横向排版，标题为“上海未来5日天气预报”，包含5个等宽的垂直卡片，从左到右依次排列。 整体风格为现代、干净、友好的扁平化矢量插画风格，线条清晰，色彩柔和。 人物形象采用年轻男女的卡通插画，表情自然，姿态放松，服装细节清晰。                                                                                 | ![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/56e0e5cc24ff40559c9e934e5d744393~tplv-goo7wpa0wc-image.image) |
+| 多参考图生图<br><br>> 输入多张参考图，融合它们的风格、元素等特征来生成新图像。                                                                                          | ![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/2198d4bef000400bbfea18025850ed82~tplv-goo7wpa0wc-image.image)<br><br>> 将图1的服装换为图2的服装                                                                                                                                                                                                                                                | ![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/db71316f709243ceb69a629cd48598ff~tplv-goo7wpa0wc-image.image) |
+| 组图生成<br><br>> Seedream 5.0 lite / 4.5 / 4.0 支持基于用户输入的文字和图片，生成一组内容关联的图像。                                                                  | ![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/a215e8241dd94f50901948790da121e1~tplv-goo7wpa0wc-image.image)<br><br>> 参考图1，生成四图片，图中人物分别带着墨镜，骑着摩托，带着帽子，拿着棒棒糖                                                                                                                                                                                               | ![图片](https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream-reference.jpeg)                        |
 
 # 模型能力
 
 以下为 Seedream 系列各版本模型的能力与参数对比，帮助您根据业务需求选择合适的模型。
 
-| 模型名称                                                                                                 |                | [Seedream 5.0 pro](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0-pro) | [Seedream 5.0 flash](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0-flash) | [Seedream 5.0 lite](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0) | [Seedream 4.5](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-4-5) | [Seedream 4.0](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-4-0) |
-| -------------------------------------------------------------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| 模型 ID (Model ID)                                                                                       |                | doubao\-seedream\-5\-0\-pro\-260628                                                                      | doubao\-seedream\-5\-0\-flash\-260915                                                                        | doubao\-seedream\-5\-0\-260128 (同时支持：doubao\-seedream\-5\-0\-lite\-260128)                       | doubao\-seedream\-4\-5\-251128                                                                   | doubao\-seedream\-4\-0\-250828                                                                   |
-| [文生图](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#9695d195)           |                | ✓                                                                                                        | ✓                                                                                                            | ✓                                                                                                     | ✓                                                                                                | ✓                                                                                                |
-| [文生组图](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#ec79cfda)         |                | 暂不支持                                                                                                 | 暂不支持                                                                                                     | ✓                                                                                                     | ✓                                                                                                | ✓                                                                                                |
-| [单 / 多图生图](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#8bc49063)    |                | ✓                                                                                                        | ✓                                                                                                            | ✓                                                                                                     | ✓                                                                                                | ✓                                                                                                |
-| [单 / 多图生组图](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#fc9f85e4)  |                | 暂不支持                                                                                                 | 暂不支持                                                                                                     | ✓                                                                                                     | ✓                                                                                                | ✓                                                                                                |
-| [交互编辑](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#interactive_edit) |                | ✓                                                                                                        | ✓                                                                                                            | ✗                                                                                                     | ✗                                                                                                | ✗                                                                                                |
-| [图层拆分](https://ark.volcengine.com/region:cn-beijing/docs/seedream-5-0-pro#layer_decomposition)       |                | ✓                                                                                                        | ✓                                                                                                            | ✗                                                                                                     | ✗                                                                                                | ✗                                                                                                |
-| [流式输出](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#e5bef0d7)         |                | 暂不支持                                                                                                 | 暂不支持                                                                                                     | ✓                                                                                                     | ✓                                                                                                | ✓                                                                                                |
-| [联网搜索](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#4e1745fa)         |                | 暂不支持                                                                                                 | 暂不支持                                                                                                     | ✓                                                                                                     | ✗                                                                                                | ✗                                                                                                |
-| 模型参数                                                                                                 | 分辨率         | 1K, 1.5K, 2K                                                                                             | 1K, 1.5K, 2K                                                                                                 | 2K, 3K, 4K                                                                                            | 2K, 4K                                                                                           | 1K, 2K, 4K                                                                                       |
-|                                                                                                          | 输出格式       | png, jpeg                                                                                                | png, jpeg                                                                                                    | png, jpeg                                                                                             | jpeg                                                                                             | jpeg                                                                                             |
-|                                                                                                          | 提示词优化模式 | 标准模式, 极速模式                                                                                       | 标准模式                                                                                                     | 标准模式                                                                                              | 标准模式                                                                                         | 标准模式, 极速模式                                                                               |
-|                                                                                                          | 生成数量       | 支持生成单图/多个图层（1 张底图 + 16 张图层）                                                            | 支持生成单图/多个图层（1 张底图 + 16 张图层）                                                                | 输入的参考图数量 + 最终生成的图片数量 ≤ 15张                                                          |                                                                                                  |                                                                                                  |
-| 限流 IPM（张 / 分钟）                                                                                    |                | 500                                                                                                      | 500                                                                                                          | 500                                                                                                   | 500                                                                                              | 500                                                                                              |
+| 模型名称                                                                                                 |                                              | [Seedream 5.5](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-5)               | [Seedream 5.0 pro](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0-pro)       | [Seedream 5.0 flash](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0-flash)   | [Seedream 5.0 lite](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0)  | [Seedream 4.5](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-4-5) | [Seedream 4.0](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-4-0)      |
+| -------------------------------------------------------------------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| 模型 ID (Model ID)                                                                                       |                                              | doubao\-seedream\-5\-5\-261028                                                                                 | doubao\-seedream\-5\-0\-pro\-260628                                                                            | doubao\-seedream\-5\-0\-flash\-260915                                                                          | doubao\-seedream\-5\-0\-260128 (同时支持：doubao\-seedream\-5\-0\-lite\-260128)                        | doubao\-seedream\-4\-5\-251128                                                                   | doubao\-seedream\-4\-0\-250828                                                                        |
+| [文生图](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#9695d195)           |                                              | ✓                                                                                                              | ✓                                                                                                              | ✓                                                                                                              | ✓                                                                                                      | ✓                                                                                                | ✓                                                                                                     |
+| [文生组图](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#ec79cfda)         |                                              | ✗                                                                                                              | ✗                                                                                                              | ✗                                                                                                              | ✓                                                                                                      | ✓                                                                                                | ✓                                                                                                     |
+| [单 / 多图生图](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#8bc49063)    |                                              | ✓，最多输入 10 张参考图                                                                                        | ✓，最多输入 10 张参考图                                                                                        | ✓，最多输入 10 张参考图                                                                                        | ✓，最多输入 14 张参考图                                                                                | ✓，最多输入 14 张参考图                                                                          | ✓，最多输入 14 张参考图                                                                               |
+| [单 / 多图生组图](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#fc9f85e4)  |                                              | ✗                                                                                                              | ✗                                                                                                              | ✗                                                                                                              | ✓                                                                                                      | ✓                                                                                                | ✓                                                                                                     |
+| [交互编辑](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#interactive_edit) |                                              | ✓                                                                                                              | ✓                                                                                                              | ✓                                                                                                              | ✗                                                                                                      | ✗                                                                                                | ✗                                                                                                     |
+| [图层拆分](https://ark.volcengine.com/region:cn-beijing/docs/seedream-5-0-pro#layer_decomposition)       |                                              | ✓                                                                                                              | ✓                                                                                                              | ✓                                                                                                              | ✗                                                                                                      | ✗                                                                                                | ✗                                                                                                     |
+| [原生 RGBA 图片](https://ark.volcengine.com/region:cn-beijing/docs/seedream-5-5#native-rgba)             |                                              | ✓，支持文生图和图生图                                                                                          | ✓，仅支持单张透明 PNG 图生图                                                                                   | ✓，仅支持单张透明 PNG 图生图                                                                                   | ✗                                                                                                      | ✗                                                                                                | ✗                                                                                                     |
+| [富文本 OCR](https://ark.volcengine.com/region:cn-beijing/docs/seedream-5-5#rich-text-ocr)               |                                              | ✓                                                                                                              | ✗                                                                                                              | ✗                                                                                                              | ✗                                                                                                      | ✗                                                                                                | ✗                                                                                                     |
+| [流式输出](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#e5bef0d7)         |                                              | ✗                                                                                                              | ✗                                                                                                              | ✗                                                                                                              | ✓                                                                                                      | ✓                                                                                                | ✓                                                                                                     |
+| [联网搜索](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#4e1745fa)         |                                              | ✗                                                                                                              | ✗                                                                                                              | ✗                                                                                                              | ✓                                                                                                      | ✗                                                                                                | ✗                                                                                                     |
+| 模型参数                                                                                                 | 分辨率<br><br>> 图片生成<br><br><br>         | _ 方式 1：指定分辨率档位：`1K`、`1.5K`、`2K`<br><br>_ 方式 2：指定宽高像素值：[`1280x720`, `2048x2048x1.1025`] | _ 方式 1：指定分辨率档位：`1K`、`1.5K`、`2K`<br><br>_ 方式 2：指定宽高像素值：[`1280x720`, `2048x2048x1.1025`] | _ 方式 1：指定分辨率档位：`1K`、`1.5K`、`2K`<br><br>_ 方式 2：指定宽高像素值：[`1280x720`, `2048x2048x1.1025`] | _ 方式 1：指定分辨率档位：`2K`、`3K`、`4K`<br><br>_ 方式 2：指定宽高像素值：[`1920x1920`, `4096x4096`] | _ 方式 1：指定分辨率档位：`2K`、`4K`<br><br>_ 方式 2：指定宽高像素值：[`1920x1920`, `4096x4096`] | _ 方式 1：指定分辨率档位：`1K`、`2K`、`4K`<br><br>_ 方式 2：指定宽高像素值：[`1280x720`, `4096x4096`] |
+|                                                                                                          | 分辨率<br><br>> 图层拆分<br><br><br>         | 1K、1.5K、2K、auto                                                                                             | 1K、1.5K、2K、auto                                                                                             | 1K、1.5K、2K、auto                                                                                             | ✗                                                                                                      | ✗                                                                                                | ✗                                                                                                     |
+|                                                                                                          | 输出格式                                     | png、jpeg                                                                                                      | png、jpeg                                                                                                      | png、jpeg                                                                                                      | png、jpeg                                                                                              | jpeg                                                                                             | jpeg                                                                                                  |
+|                                                                                                          | 提示词优化模式                               | 标准模式                                                                                                       | 标准模式、极速模式                                                                                             | 标准模式                                                                                                       | 标准模式                                                                                               | 标准模式                                                                                         | 标准模式、极速模式                                                                                    |
+|                                                                                                          | 生成数量                                     | 单图；图层拆分最多 1 张底图 + 99 个图层                                                                        | 支持生成单图/多个图层（1 张底图 + 最多 16 个图层）                                                             | 支持生成单图/多个图层（1 张底图 + 最多 16 个图层）                                                             | 输入的参考图数量 + 最终生成的图片数量 ≤ 15张                                                           |                                                                                                  |                                                                                                       |
+|                                                                                                          | 最大输出图片数<br><br>> 图层拆分<br><br><br> | 2–100 张（包含底图）                                                                                           | ✗                                                                                                              | ✗                                                                                                              | ✗                                                                                                      | ✗                                                                                                | ✗                                                                                                     |
+| 限流 IPM（张 / 分钟）                                                                                    |                                              | [图片生成能力](https://ark.volcengine.com/region:cn-beijing/docs/model-list#9df4d9fd)                          | 500                                                                                                            | 500                                                                                                            | 500                                                                                                    | 500                                                                                              | 500                                                                                                   |
 
 # 快速体验
 
@@ -62,15 +66,13 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ARK_API_KEY" \
   -d '{
-    "model": "doubao-seedream-5-0-lite-260128",
+    "model": "doubao-seedream-5-5-261028",
     "prompt": "充满活力的特写编辑肖像，模特眼神犀利，头戴雕塑感帽子，色彩拼接丰富，眼部焦点锐利，景深较浅，具有Vogue杂志封面的美学风格，采用中画幅拍摄，工作室灯光效果强烈。",
     "size": "2K",
     "output_format":"png",
     "watermark": true
 }'
 ```
-
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
 
 **Python**
 
@@ -88,7 +90,7 @@ client = Ark(
 
 imagesResponse = client.images.generate(
     # Replace with Model ID
-    model="doubao-seedream-5-0-lite-260128",
+    model="doubao-seedream-5-5-261028",
     prompt="充满活力的特写编辑肖像，模特眼神犀利，头戴雕塑感帽子，色彩拼接丰富，眼部焦点锐利，景深较浅，具有Vogue杂志封面的美学风格，采用中画幅拍摄，工作室灯光效果强烈。",
     size="2K",
     output_format="png",
@@ -129,14 +131,12 @@ public class ImageGenerationsExample {
                 .build();
 
         CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
-                .model("doubao-seedream-5-0-lite-260128") // Replace with Model ID
+                .model("doubao-seedream-5-5-261028") // Replace with Model ID
                 .prompt("充满活力的特写编辑肖像，模特眼神犀利，头戴雕塑感帽子，色彩拼接丰富，眼部焦点锐利，景深较浅，具有Vogue杂志封面的美学风格，采用中画幅拍摄，工作室灯光效果强烈。")
 
                 .size("2K")
-                .sequentialImageGeneration(SequentialImageGenerationMode.DISABLED)
                 .outputFormat(OutputFormat.PNG)
                 .responseFormat(ResponseFormat.URL)
-                .stream(false)
                 .watermark(true)
                 .build();
         ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
@@ -173,7 +173,7 @@ func main() {
 
 
     generateReq := &model.CreateImageGenerationRequest{
-       Model:          "doubao-seedream-5-0-lite-260128", // Replace with Model ID
+       Model:          "doubao-seedream-5-5-261028", // Replace with Model ID
        Prompt:         model.NewOptString("充满活力的特写编辑肖像，模特眼神犀利，头戴雕塑感帽子，色彩拼接丰富，眼部焦点锐利，景深较浅，具有Vogue杂志封面的美学风格，采用中画幅拍摄，工作室灯光效果强烈。"),
 
        Size:           model.NewOptString("2K"),
@@ -207,13 +207,13 @@ client = OpenAI(
 
 imagesResponse = client.images.generate(
     # Replace with Model ID
-    model="doubao-seedream-5-0-lite-260128",
+    model="doubao-seedream-5-5-261028",
     prompt="充满活力的特写编辑肖像，模特眼神犀利，头戴雕塑感帽子，色彩拼接丰富，眼部焦点锐利，景深较浅，具有Vogue杂志封面的美学风格，采用中画幅拍摄，工作室灯光效果强烈。",
     size="2K",
     output_format="png",
     response_format="url",
     extra_body={
-        "watermark": False,
+        "watermark": True,
     },
 )
 
@@ -235,7 +235,7 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ARK_API_KEY" \
   -d '{
-    "model": "doubao-seedream-5-0-lite-260128",
+    "model": "doubao-seedream-5-5-261028",
     "prompt": "保持模特姿势和液态服装的流动形状不变。将服装材质从银色金属改为完全透明的清水（或玻璃）。透过液态水流，可以看到模特的皮肤细节。光影从反射变为折射。",
     "image": "https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream4_5_imageToimage.png",
     "size": "2K",
@@ -243,8 +243,6 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
     "watermark": true
 }'
 ```
-
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
 
 **Python**
 
@@ -262,7 +260,7 @@ client = Ark(
 
 imagesResponse = client.images.generate(
     # Replace with Model ID
-    model="doubao-seedream-5-0-lite-260128",
+    model="doubao-seedream-5-5-261028",
     prompt="保持模特姿势和液态服装的流动形状不变。将服装材质从银色金属改为完全透明的清水（或玻璃）。透过液态水流，可以看到模特的皮肤细节。光影从反射变为折射。",
     image="https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream4_5_imageToimage.png",
     size="2K",
@@ -304,16 +302,14 @@ public class ImageGenerationsExample {
 
         // CreateImageGenerationRequestImage requires ark-runtime 0.6.0 or later.
         CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
-                .model("doubao-seedream-5-0-lite-260128") // Replace with Model ID
+                .model("doubao-seedream-5-5-261028") // Replace with Model ID
                 .prompt("保持模特姿势和液态服装的流动形状不变。将服装材质从银色金属改为完全透明的清水（或玻璃）。透过液态水流，可以看到模特的皮肤细节。光影从反射变为折射。")
 
                 .image(CreateImageGenerationRequestImage.ofString("https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream4_5_imageToimage.png"))
 
                 .size("2K")
-                .sequentialImageGeneration(SequentialImageGenerationMode.DISABLED)
                 .outputFormat(OutputFormat.PNG)
                 .responseFormat(ResponseFormat.URL)
-                .stream(false)
                 .watermark(true)
                 .build();
 
@@ -349,7 +345,7 @@ func main() {
     outputFormat := model.OutputFormatPNG
 
     generateReq := &model.CreateImageGenerationRequest{
-       Model:          "doubao-seedream-5-0-lite-260128",
+       Model:          "doubao-seedream-5-5-261028",
        Prompt:         model.NewOptString("保持模特姿势和液态服装的流动形状不变。将服装材质从银色金属改为完全透明的清水（或玻璃）。透过液态水流，可以看到模特的皮肤细节。光影从反射变为折射。"),
 
        Image: model.NewOptCreateImageGenerationRequestImage(model.NewStringArrayCreateImageGenerationRequestImage([]string{"https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream4_5_imageToimage.png"})),
@@ -384,7 +380,7 @@ client = OpenAI(
 )
 
 imagesResponse = client.images.generate(
-    model="doubao-seedream-5-0-lite-260128",
+    model="doubao-seedream-5-5-261028",
     prompt="保持模特姿势和液态服装的流动形状不变。将服装材质从银色金属改为完全透明的清水（或玻璃）。透过液态水流，可以看到模特的皮肤细节。光影从反射变为折射。",
     size="2K",
     output_format="png",
@@ -413,7 +409,7 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ARK_API_KEY" \
   -d '{
-    "model": "doubao-seedream-5-0-lite-260128",
+    "model": "doubao-seedream-5-5-261028",
     "prompt": "将图1的服装换为图2的服装",
     "image": ["https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream4_imagesToimage_1.png", "https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream4_5_imagesToimage_2.png"],
     "size": "2K",
@@ -421,8 +417,6 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
     "watermark": true
 }'
 ```
-
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
 
 **Python**
 
@@ -439,7 +433,7 @@ client = Ark(
 )
 imagesResponse = client.images.generate(
     # Replace with Model ID
-    model="doubao-seedream-5-0-lite-260128",
+    model="doubao-seedream-5-5-261028",
     prompt="将图1的服装换为图2的服装",
     image=["https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream4_imagesToimage_1.png", "https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream4_5_imagesToimage_2.png"],
     size="2K",
@@ -481,7 +475,7 @@ public class ImageGenerationsExample {
 
         // CreateImageGenerationRequestImage requires ark-runtime 0.6.0 or later.
         CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
-                .model("doubao-seedream-5-0-lite-260128") // Replace with Model ID
+                .model("doubao-seedream-5-5-261028") // Replace with Model ID
                 .prompt("将图1的服装换为图2的服装")
 
                 .image(CreateImageGenerationRequestImage.ofList(Arrays.asList(
@@ -489,10 +483,8 @@ public class ImageGenerationsExample {
                     "https://arkdocs.tos-cn-beijing.volces.com/images/image-generation/seedream4_5_imagesToimage_2.png"
                 )))
                 .size("2K")
-                .sequentialImageGeneration(SequentialImageGenerationMode.DISABLED)
                 .outputFormat(OutputFormat.PNG)
                 .responseFormat(ResponseFormat.URL)
-                .stream(false)
                 .watermark(true)
                 .build();
         ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
@@ -527,7 +519,7 @@ func main() {
     outputFormat := model.OutputFormatPNG
 
     generateReq := &model.CreateImageGenerationRequest{
-       Model:          "doubao-seedream-5-0-lite-260128",
+       Model:          "doubao-seedream-5-5-261028",
        Prompt:         model.NewOptString("将图1的服装换为图2的服装"),
 
        Image:         model.NewOptCreateImageGenerationRequestImage(model.NewStringArrayCreateImageGenerationRequestImage([]string{
@@ -566,7 +558,7 @@ client = OpenAI(
 )
 
 imagesResponse = client.images.generate(
-    model="doubao-seedream-5-0-lite-260128",
+    model="doubao-seedream-5-5-261028",
     prompt="将图1的服装换为图2的服装",
     size="2K",
     output_format="png",
@@ -582,7 +574,7 @@ print(imagesResponse.data[0].url)
 
 ## 组图输出（多图输出）
 
-> Seedream 5.0 pro / flash 不支持该能力。
+> Seedream 5.5、Seedream 5.0 pro / flash 不支持该能力。
 
 支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
 
@@ -614,8 +606,6 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
     "watermark": true
 }'
 ```
-
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
 
 **Python**
 
@@ -838,8 +828,6 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
-
 **Python**
 
 ```Python
@@ -1005,8 +993,6 @@ func main() {
 }
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
-
 **OpenAI**
 
 ```Python
@@ -1067,8 +1053,6 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
     "watermark": true
 }'
 ```
-
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
 
 **Python**
 
@@ -1289,7 +1273,7 @@ for image in imagesResponse.data:
 
 ## 联网搜索
 
-> Seedream 5.0 pro / flash 不支持该能力。
+> Seedream 5.5、Seedream 5.0 pro / flash 不支持该能力。
 
 Seedream 5.0 lite 支持调用联网搜索工具，通过配置 tools.**type** 参数为 `web_search` 即可开启联网搜索。
 
@@ -1321,8 +1305,6 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
     "watermark": true
 }'
 ```
-
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
 
 **Python**
 
@@ -1457,7 +1439,7 @@ func main() {
 
 ## 流式输出
 
-> Seedream 5.0 pro / flash 不支持该能力。
+> Seedream 5.5、Seedream 5.0 pro / flash 不支持该能力。
 
 模型支持流式图像生成，当生成完任一图片后即返回结果，让您能更快浏览到生成的图像，改善等待体验。
 
@@ -1485,8 +1467,6 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
     "watermark": true
 }'
 ```
-
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
 
 **Python**
 
@@ -1737,7 +1717,9 @@ if __name__ == "__main__":
 
 - 为平衡生成速度与图像质量，Seedream 5.0 pro、Seedream 4.0 支持将 **optimize_prompt_options.mode** 设置为 `fast` 模式以显著提升生成速度，但会在一定程度上牺牲图片质量。
 
-- Seedream 5.0 flash / lite、Seedream 4.5 仅支持 `standard` 模式。
+- Seedream 5.5、Seedream 5.0 flash / lite、Seedream 4.5 仅支持 `standard` 模式。
+
+以下示例使用 Seedream 5.0 pro 的 `fast` 模式生成单张图片，不传入组图和流式输出参数。切换到 Seedream 4.0 时，可沿用该单图请求；输出图片固定为 JPEG 格式。
 
 **Curl**
 
@@ -1746,24 +1728,16 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ARK_API_KEY" \
   -d '{
-    "model": "doubao-seedream-4-0-250828",
-    "prompt": "生成一组共4张连贯插画，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围",
+    "model": "doubao-seedream-5-0-pro-260628",
+    "prompt": "生成一张庭院春景插画，画面中有盛开的花朵和绿树，光线柔和，色彩清新。",
     "size": "2K",
-    "sequential_image_generation": "auto",
-    "sequential_image_generation_options": {
-        "max_images": 4
-    },
     "optimize_prompt_options": {
         "mode": "fast"
     },
-    "stream": false,
-    "output_format":"png",
     "response_format": "url",
     "watermark": true
 }'
 ```
-
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
 
 **Python**
 
@@ -1771,7 +1745,6 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 import os
 # Install SDK:  python -m pip install --upgrade arkruntime
 from arkruntime import Ark
-from arkruntime.types.images import SequentialImageGenerationOptionsParam
 from arkruntime.types.images import OptimizePromptOptionsParam
 
 client = Ark(
@@ -1783,13 +1756,10 @@ client = Ark(
 
 imagesResponse = client.images.generate(
     # Replace with Model ID
-    model="doubao-seedream-4-0-250828",
-    prompt="生成一组共4张连贯插画，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围",
+    model="doubao-seedream-5-0-pro-260628",
+    prompt="生成一张庭院春景插画，画面中有盛开的花朵和绿树，光线柔和，色彩清新。",
     size="2K",
-    sequential_image_generation="auto",
-    sequential_image_generation_options=SequentialImageGenerationOptionsParam(max_images=4),
     optimize_prompt_options=OptimizePromptOptionsParam(mode="fast"),
-    output_format="png",
     response_format="url",
     watermark=True
 )
@@ -1828,22 +1798,16 @@ public class ImageGenerationsExample {
                 .apiKey(apiKey)
                 .build();
 
-        SequentialImageGenerationOptions sequentialImageGenerationOptions = new SequentialImageGenerationOptions();
-        sequentialImageGenerationOptions.setMaxImages(4);
         OptimizePromptOptions optimizePromptOptions = new OptimizePromptOptions();
         optimizePromptOptions.setMode(OptimizePromptMode.FAST);
 
         CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
-                 .model("doubao-seedream-4-0-250828")  //Replace with Model ID
-                 .prompt("生成一组共4张连贯插画，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围")
+                 .model("doubao-seedream-5-0-pro-260628")  //Replace with Model ID
+                 .prompt("生成一张庭院春景插画，画面中有盛开的花朵和绿树，光线柔和，色彩清新。")
 
                  .size("2K")
-                 .sequentialImageGeneration(SequentialImageGenerationMode.AUTO)
-                 .sequentialImageGenerationOptions(sequentialImageGenerationOptions)
                  .optimizePromptOptions(optimizePromptOptions)
-                 .outputFormat(OutputFormat.PNG)
                  .responseFormat(ResponseFormat.URL)
-                 .stream(false)
                  .watermark(true)
                  .build();
         ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
@@ -1887,25 +1851,15 @@ func main() {
         arkruntime.WithBaseUrl("https://ark.cn-beijing.volces.com/api/v3"),
     )
     ctx := context.Background()
-    outputFormat := model.OutputFormatPNG
-    var (
-        sequentialImageGeneration model.SequentialImageGenerationMode = "auto"
-        maxImages                                                     = 4
-        mode                      model.OptimizePromptMode            = model.OptimizePromptModeFast
-    )
+    mode := model.OptimizePromptModeFast
 
     generateReq := &model.CreateImageGenerationRequest{
-        Model:  "doubao-seedream-4-0-250828",
-        Prompt: model.NewOptString("生成一组共4张连贯插画，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围"),
+        Model:  "doubao-seedream-5-0-pro-260628",
+        Prompt: model.NewOptString("生成一张庭院春景插画，画面中有盛开的花朵和绿树，光线柔和，色彩清新。"),
 
         Size:                      model.NewOptString("2K"),
-        OutputFormat:              model.NewOptOutputFormat(outputFormat),
         ResponseFormat:            model.NewOptResponseFormat(model.ResponseFormatURL),
         Watermark:                 model.NewOptBool(true),
-        SequentialImageGeneration: model.NewOptSequentialImageGenerationMode(sequentialImageGeneration),
-        SequentialImageGenerationOptions: model.NewOptSequentialImageGenerationOptions(model.SequentialImageGenerationOptions{
-            MaxImages: model.NewOptInt32(int32(maxImages)),
-        }),
         OptimizePromptOptions: model.NewOptOptimizePromptOptions(model.OptimizePromptOptions{
             Mode: model.NewOptOptimizePromptMode(mode),
         }),
@@ -1950,17 +1904,12 @@ client = OpenAI(
 )
 
 imagesResponse = client.images.generate(
-    model="doubao-seedream-4-0-250828",
-    prompt="生成一组共4张连贯插画，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围",
+    model="doubao-seedream-5-0-pro-260628",
+    prompt="生成一张庭院春景插画，画面中有盛开的花朵和绿树，光线柔和，色彩清新。",
     size="2K",
-    output_format="png",
     response_format="url",
     extra_body={
         "watermark": True,
-        "sequential_image_generation": "auto",
-        "sequential_image_generation_options": {
-            "max_images": 4
-        },
         "optimize_prompt_options": {"mode": "fast"}
     },
 )
@@ -1971,139 +1920,211 @@ for image in imagesResponse.data:
     print(f"URL: {image.url}, Size: {image.size}")
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list)。
-
 ## 自定义图片输出规格
 
-您可以配置以下参数来控制图片输出规格：
+图片输出规格由以下参数控制。可选值与默认值因模型或场景而异，请按下方对比表配置；完整字段定义请参见 [Image generation API](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-api)。
 
-- **size**：指定输出图像的尺寸大小。
-
-- **response_format**：指定生成图像的返回格式。
-
-- **output_format**：指定生成图像的文件格式。
-
-- **watermark** ：指定是否为输出图片添加水印。
+| 参数              | 作用                     | 配置说明                                                                                                                                                                          |
+| ----------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `size`            | 控制输出图片的尺寸       | 图片生成和图层拆分场景的配置方式不同，详见 [图像输出尺寸](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#034e4a46)。                                 |
+| `response_format` | 控制图片的返回方式       | 所有模型均支持，详见 [图像输出方式](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#b4306703)。                                                       |
+| `output_format`   | 控制图片的文件格式       | 仅部分模型支持配置；图层拆分时仅控制底图格式，详见 [图像文件格式](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#cbef7bec)。                         |
+| `background`      | 控制是否生成透明背景图片 | 仅 Seedream 5.5、Seedream 5.0 pro / flash 的图片生成场景支持，详见 [图片背景类型](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#image-background)。 |
+| `watermark`       | 控制是否添加水印         | 所有模型均支持，详见 [图像中添加水印](https://ark.volcengine.com/region:cn-beijing/docs/image-generation-tutorial#6be7edc7)。                                                     |
 
 ### 图像输出尺寸
 
+`size` 指定输出图片的尺寸，支持指定分辨率档位或宽高像素值。不同模型和场景支持的配置方式不同。
+
 **图片生成场景**
 
-指定生成图像的尺寸信息，支持指定分辨率档位（如 `2K`）或指定宽高像素值（如 `2048x2048`）两种方式，不可混用。不同模型的可选分辨率、默认值、总像素取值范围、宽高比取值范围不同。
+支持指定分辨率档位或宽高像素值两种方式，每次请求选择一种。
 
 **方式 1：指定分辨率档位（推荐）**
 
-在 prompt 中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。各模型可选值：
+在 `prompt` 中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。各模型支持的档位如下：
 
-- Seedream 5.0 pro：`1K`、`1.5K`、`2K`
+| 模型                                   | 可选分辨率档位     |
+| -------------------------------------- | ------------------ |
+| Seedream 5.5、Seedream 5.0 pro / flash | `1K`、`1.5K`、`2K` |
+| Seedream 5.0 lite                      | `2K`、`3K`、`4K`   |
+| Seedream 4.5                           | `2K`、`4K`         |
+| Seedream 4.0                           | `1K`、`2K`、`4K`   |
 
-  > **注意**
+选择分辨率档位时，常见宽高比的像素映射如下。
 
-  > Seedream 5.0 pro 的 `1.5K` 与 `1K` 价格相同，且图片生成效果更优。
+**Seedream 5.5、Seedream 5.0 pro / flash：分辨率与宽高映射**
 
-- Seedream 5.0 lite：`2K`、`3K`、`4K`
+| 宽高比 | 1K        | 1.5K      | 2K        |
+| ------ | --------- | --------- | --------- |
+| 1:1    | 1024x1024 | 1536x1536 | 2048x2048 |
+| 4:3    | 1152x864  | 1792x1344 | 2368x1776 |
+| 3:4    | 864x1152  | 1344x1792 | 1776x2368 |
+| 16:9   | 1424x800  | 2048x1152 | 2816x1584 |
+| 9:16   | 800x1424  | 1152x2048 | 1584x2816 |
+| 3:2    | 1248x832  | 1872x1248 | 2496x1664 |
+| 2:3    | 832x1248  | 1248x1872 | 1664x2496 |
+| 21:9   | 1568x672  | 2352x1008 | 3136x1344 |
 
-- Seedream 4.5：`2K`、`4K`
+**Seedream 5.0 lite：分辨率与宽高映射**
 
-- Seedream 4.0：`1K`、`2K`、`4K`
+| 宽高比 | 2K        | 3K        | 4K        |
+| ------ | --------- | --------- | --------- |
+| 1:1    | 2048x2048 | 3072x3072 | 4096x4096 |
+| 4:3    | 2304x1728 | 3456x2592 | 4704x3520 |
+| 3:4    | 1728x2304 | 2592x3456 | 3520x4704 |
+| 16:9   | 2848x1600 | 4096x2304 | 5504x3040 |
+| 9:16   | 1600x2848 | 2304x4096 | 3040x5504 |
+| 3:2    | 2496x1664 | 3744x2496 | 4992x3328 |
+| 2:3    | 1664x2496 | 2496x3744 | 3328x4992 |
+| 21:9   | 3136x1344 | 4704x2016 | 6240x2656 |
 
-使用方式 1 并在 prompt 中描述特定宽高比时，模型实际映射的宽高像素参考值如下表所示（模型支持生成的宽高比不限于以下列举的标准值，此处仅以常见宽高比为例）。
+**Seedream 4.5：分辨率与宽高映射**
 
-|                   | 1K                                                                                                                                                                                   | 1.5K                                                                                                                                                                                        | 2K                                                                                                                                                                                          | 3K                                                                                                                                                                                          | 4K                                                                                                                                                                                          |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Seedream 5.0 pro  | `1:1`：1024x1024<br><br>`4:3`：1152x864<br><br>`3:4`：864x1152<br><br>`16:9`：1424x800<br><br>`9:16`：800x1424<br><br>`3:2`：1248x832<br><br>`2:3`：832x1248<br><br>`21:9`：1568x672 | `1:1`：1536x1536<br><br>`4:3`：1792x1344<br><br>`3:4`：1344x1792<br><br>`16:9`：2048x1152<br><br>`9:16`：1152x2048<br><br>`3:2`：1872x1248<br><br>`2:3`：1248x1872<br><br>`21:9`：2352x1008 | `1:1`：2048x2048<br><br>`4:3`：2368x1776<br><br>`3:4`：1776x2368<br><br>`16:9`：2816x1584<br><br>`9:16`：1584x2816<br><br>`3:2`：2496x1664<br><br>`2:3`：1664x2496<br><br>`21:9`：3136x1344 | —                                                                                                                                                                                           | —                                                                                                                                                                                           |
-| Seedream 5.0 lite | —                                                                                                                                                                                    | —                                                                                                                                                                                           | `1:1`：2048x2048<br><br>`4:3`：2304x1728<br><br>`3:4`：1728x2304<br><br>`16:9`：2848x1600<br><br>`9:16`：1600x2848<br><br>`3:2`：2496x1664<br><br>`2:3`：1664x2496<br><br>`21:9`：3136x1344 | `1:1`：3072x3072<br><br>`4:3`：3456x2592<br><br>`3:4`：2592x3456<br><br>`16:9`：4096x2304<br><br>`9:16`：2304x4096<br><br>`3:2`：3744x2496<br><br>`2:3`：2496x3744<br><br>`21:9`：4704x2016 | `1:1`：4096x4096<br><br>`4:3`：4704x3520<br><br>`3:4`：3520x4704<br><br>`16:9`：5504x3040<br><br>`9:16`：3040x5504<br><br>`3:2`：4992x3328<br><br>`2:3`：3328x4992<br><br>`21:9`：6240x2656 |
-| Seedream 4.5      | —                                                                                                                                                                                    | —                                                                                                                                                                                           | `1:1`：2048x2048<br><br>`4:3`：2304x1728<br><br>`3:4`：1728x2304<br><br>`16:9`：2848x1600<br><br>`9:16`：1600x2848<br><br>`3:2`：2496x1664<br><br>`2:3`：1664x2496<br><br>`21:9`：3136x1344 | —                                                                                                                                                                                           | `1:1`：4096x4096<br><br>`4:3`：4704x3520<br><br>`3:4`：3520x4704<br><br>`16:9`：5504x3040<br><br>`9:16`：3040x5504<br><br>`3:2`：4992x3328<br><br>`2:3`：3328x4992<br><br>`21:9`：6240x2656 |
-| Seedream 4.0      | `1:1`：1024x1024<br><br>`4:3`：1152x864<br><br>`3:4`：864x1152<br><br>`16:9`：1312x736<br><br>`9:16`：736x1312<br><br>`3:2`：1248x832<br><br>`2:3`：832x1248<br><br>`21:9`：1568x672 | —                                                                                                                                                                                           | `1:1`：2048x2048<br><br>`4:3`：2304x1728<br><br>`3:4`：1728x2304<br><br>`16:9`：2848x1600<br><br>`9:16`：1600x2848<br><br>`3:2`：2496x1664<br><br>`2:3`：1664x2496<br><br>`21:9`：3136x1344 | —                                                                                                                                                                                           | `1:1`：4096x4096<br><br>`4:3`：4704x3520<br><br>`3:4`：3520x4704<br><br>`16:9`：5504x3040<br><br>`9:16`：3040x5504<br><br>`3:2`：4992x3328<br><br>`2:3`：3328x4992<br><br>`21:9`：6240x2656 |
+| 宽高比 | 2K        | 4K        |
+| ------ | --------- | --------- |
+| 1:1    | 2048x2048 | 4096x4096 |
+| 4:3    | 2304x1728 | 4704x3520 |
+| 3:4    | 1728x2304 | 3520x4704 |
+| 16:9   | 2848x1600 | 5504x3040 |
+| 9:16   | 1600x2848 | 3040x5504 |
+| 3:2    | 2496x1664 | 4992x3328 |
+| 2:3    | 1664x2496 | 3328x4992 |
+| 21:9   | 3136x1344 | 6240x2656 |
+
+**Seedream 4.0：分辨率与宽高映射**
+
+| 宽高比 | 1K        | 2K        | 4K        |
+| ------ | --------- | --------- | --------- |
+| 1:1    | 1024x1024 | 2048x2048 | 4096x4096 |
+| 4:3    | 1152x864  | 2304x1728 | 4704x3520 |
+| 3:4    | 864x1152  | 1728x2304 | 3520x4704 |
+| 16:9   | 1280x720  | 2848x1600 | 5504x3040 |
+| 9:16   | 720x1280  | 1600x2848 | 3040x5504 |
+| 3:2    | 1248x832  | 2496x1664 | 4992x3328 |
+| 2:3    | 832x1248  | 1664x2496 | 3328x4992 |
+| 21:9   | 1512x648  | 3136x1344 | 6240x2656 |
 
 **方式 2：指定宽高像素值（** **`宽x高`** **）**
 
-各模型参数约束：
+设置宽高像素值时，需同时满足该模型的总像素范围和宽高比范围。总像素指宽度与高度的乘积，不是单边长度限制。
 
-|                | Seedream 5.0 pro                                      | Seedream 5.0 lite                                 | Seedream 4.5                                      | Seedream 4.0                                    |
-| -------------- | ----------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------- |
-| 总像素取值范围 | [`1280x720`（921600）, `2048x2048x1.1025`（4624220）] | [`2560x1440`（3686400）, `4096x4096`（16777216）] | [`2560x1440`（3686400）, `4096x4096`（16777216）] | [`1280x720`（921600）, `4096x4096`（16777216）] |
-| 宽高比范围     | [1/16, 16]                                            | [1/16, 16]                                        | [1/16, 16]                                        | [1/16, 16]                                      |
+| 模型                                   | 总像素取值范围      | 宽高比范围 |
+| -------------------------------------- | ------------------- | ---------- |
+| Seedream 5.5、Seedream 5.0 pro / flash | [921600, 4624220]   | [1/16, 16] |
+| Seedream 5.0 lite / 4.5                | [3686400, 16777216] | [1/16, 16] |
+| Seedream 4.0                           | [921600, 16777216]  | [1/16, 16] |
 
-| 方式1                                                                                                                                                                                       | 方式2                                                                                                                                                                                 |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JSON`<br>`{`<br>`    "prompt": "生成一组共4张连贯插画，宽高比为3:2，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围",`<br>`<br>```    "size": "2K"```<br>`<br>`}`<br> | `JSON`<br>`{`<br>`    "prompt": "生成一组共4张连贯插画，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围",`<br>`<br>```    "size": "2048x2048"```<br>`<br>`}`<br> |
+以下示例展示两种尺寸配置方式：
+
+**指定分辨率档位**
+
+```JSON
+{
+  "prompt": "生成一张庭院春景插画，宽高比为3:2，画面中有盛开的花朵和绿树",
+  "size": "2K"
+}
+```
+
+**指定宽高像素值**
+
+```JSON
+{
+  "prompt": "生成一张庭院春景插画，画面中有盛开的花朵和绿树",
+  "size": "2048x2048"
+}
+```
 
 **图层拆分场景**
 
-仅支持通过指定分辨率档位的方式设置。输出图的分辨率规则如下：
+该场景仅支持分辨率档位或 `auto`，不支持指定宽高像素值。
+
+| 模型                                   | `size` 可选值              |
+| -------------------------------------- | -------------------------- |
+| Seedream 5.5、Seedream 5.0 pro / flash | `1K`、`1.5K`、`2K`、`auto` |
+| Seedream 5.0 lite / 4.5 / 4.0          | 不支持图层拆分             |
+
+输出图片的分辨率规则如下：
 
 - **底图**：输出底图的分辨率和 `size` 指定的分辨率一致；输出底图和原待拆分图的宽高比一致。
 
 - **各图层**：输出图层的分辨率和 `size` 指定的分辨率接近；每个输出图层和其在原图中的宽高比一致。
 
-`size` 的默认值与可选值：
+**图层拆分：auto 适配规则**
 
-- 默认值：`auto`
+auto 模式下，模型将根据输入图片中底图和每个图层的原始尺寸进行输出，且各自保持其在原图中的宽高比：
 
-- 可选值：`1K`、`1.5K`、`2K`、`auto`（根据输入图的尺寸和宽高比进行输出）
+- 若输入图片中底图和每个图层的原始尺寸在 [`1280x720`（921600）, `2048x2048x1.1025`（4624220）] 之间，按照原尺寸输出底图与每个图层。
 
-> **价格说明**
+- 若输入图片中底图和每个图层的原始尺寸小于 1K，按 1K 输出底图与每个图层。
 
-> `1.5K` 与 `1K` 价格相同（详情参见 [模型价格](https://ark.volcengine.com/region:cn-beijing/docs/model-pricing#457edfd0)）。
-
-> **auto 适配规则**
-
-> auto 模式下，模型将根据输入图片中底图和每个图层的原始尺寸进行输出，且各自保持其在原图中的宽高比：
-
-- > 若输入图片中底图和每个图层的原始尺寸在 [`1280x720`（921600）, `2048x2048x1.1025`（4624220）] 之间，按照原尺寸输出底图与每个图层。
-
-- > 若输入图片中底图和每个图层的原始尺寸小于 1K，按 1K 输出底图与每个图层。
-
-- > 若输入图片中底图和每个图层的原始尺寸大于 2K，按 2K 输出底图与每个图层。
+- 若输入图片中底图和每个图层的原始尺寸大于 2K，按 2K 输出底图与每个图层。
 
 ### 图像输出方式
 
-通过设置 **response_format** 参数，可以指定生成图像的返回方式：
+`response_format` 指定生成图片的返回方式。
 
-- `url`：返回图片下载链接。
+- `url`：返回图片下载链接，生成后 24 小时内有效，请及时下载或转存。
 
-- `b64_json`：以 Base64 编码字符串的 JSON 格式返回图像数据。
+- `b64_json`：通过响应中的 `b64_json` 字段返回 Base64 编码的图片数据。
 
-  ```JSON
-  {
-  "response_format": "url"
-  }
-  ```
+| 模型               | `response_format` 可选值 | 默认值 |
+| ------------------ | ------------------------ | ------ |
+| 所有 Seedream 模型 | `url`、`b64_json`        | `url`  |
 
 ### 图像文件格式
 
-Seedream 4.5/4.0 生成的图像格式默认为`jpeg`，不支持自定义设置。
+`output_format` 指定生成图片的文件格式。
 
-Seedream 5.0 pro / 5.0 lite 可通过设置 **output_format** 参数，指定生成图像文件的格式：
+- `png`：PNG 格式，支持保存透明通道。
 
-- `png`
+- `jpeg`：JPEG 格式，不支持保存透明通道。
 
-- `jpeg`
-
-```JSON
-{
-    "output_format": "png"
-}
-```
+| 模型                            | `output_format` 可选值    | 默认值 |
+| ------------------------------- | ------------------------- | ------ |
+| Seedream 5.5                    | `png`、`jpeg`             | `png`  |
+| Seedream 5.0 pro / flash / lite | `png`、`jpeg`             | `jpeg` |
+| Seedream 4.5 / 4.0              | 不支持配置，固定为 `jpeg` | `jpeg` |
 
 > **注意**
 
-> 图层拆分场景下，`output_format` 仅控制底图的输出格式，图层始终以 PNG 格式输出。
+> 图层拆分场景下，`output_format` 仅控制底图的输出格式，图层始终以 `png` 格式输出。
+
+### 图片背景类型
+
+`background` 控制生成图片是否包含透明通道，仅适用于图片生成场景。
+
+- `auto`：模型根据提示词和 `output_format` 自动判断背景类型。
+
+- `transparent`：生成带透明通道的 RGBA 图片。
+
+- `opaque`：生成不含透明通道的 RGB 图片。
+
+| 模型                          | `background` 可选值             | 默认值   |
+| ----------------------------- | ------------------------------- | -------- |
+| Seedream 5.5                  | `auto`、`transparent`、`opaque` | `auto`   |
+| Seedream 5.0 pro / flash      | `transparent`、`opaque`         | `opaque` |
+| Seedream 5.0 lite / 4.5 / 4.0 | 不支持配置                      | —        |
+
+> **说明**
+
+- > 当 `background` 为 `transparent` 时，`output_format` 必须为 `png`，设置为 `jpeg` 将报错。
+
+- > Seedream 5.5 支持文生 RGBA 图片，以及最多输入 10 张普通参考图生成 RGBA 图片；Seedream 5.0 pro / flash 仅支持输入 1 张带透明通道的 PNG 参考图。
+
+- > 图层拆分场景会自动生成透明 PNG 图层，不能传入 `background` 参数，传入将报错。
 
 ### 图像中添加水印
 
-通过设置 **watermark** 参数，来控制是否在生成的图片中添加水印。
+`watermark` 控制是否在生成图片中添加水印。
 
 - `false`：不添加水印。
 
-- `true`：在图片右下角添加“AI生成”字样的水印标识。
+- `true`：在图片右下角添加“AI 生成”字样的水印标识。
 
-```JSON
-{
-    "watermark": true
-}
-```
+| 模型               | `watermark` 可选值 | 默认值 |
+| ------------------ | ------------------ | ------ |
+| 所有 Seedream 模型 | `false`、`true`    | `true` |
 
 # 使用限制
 
@@ -2125,14 +2146,14 @@ Seedream 5.0 pro / 5.0 lite 可通过设置 **output_format** 参数，指定生
 
 不同场景对输入图的约束不同，详见下表：
 
-| 约束项          | 图片生成场景                                                                    | 图层拆分场景                                 |
-| --------------- | ------------------------------------------------------------------------------- | -------------------------------------------- |
-| 图片格式        | jpeg、png、webp、bmp、tiff、gif、heic、heif                                     | png、jpeg                                    |
-| 总像素（宽×高） | [196, `6000×6000`（3600万）]                                                    | [`512×512`（262144）, `6000×6000`（3600万）] |
-| 宽高长度（px）  | 大于14                                                                          | —                                            |
-| 宽高比（宽/高） | [1/16, 16]                                                                      | [1/16, 16]                                   |
-| 大小            | 不超过 30 MB                                                                    | 不超过 30 MB                                 |
-| 传入张数        | Seedream 5.0 pro / flash，最多 10 张；Seedream 5.0 lite / 4.5 / 4.0，最多 14 张 | 仅支持单张图片                               |
+| 约束项          | 图片生成场景                                                                                            | 图层拆分场景                              |
+| --------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| 图片格式        | jpeg、png、webp、bmp、tiff、gif、heic、heif                                                             | png、jpeg                                 |
+| 总像素（宽×高） | [196, `6000×6000`（36M）]                                                                               | [`512×512`（262144）, `6000×6000`（36M）] |
+| 宽高长度（px）  | 大于14                                                                                                  | —                                         |
+| 宽高比（宽/高） | [1/16, 16]                                                                                              | [1/16, 16]                                |
+| 大小            | 不超过 30 MB                                                                                            | 不超过 30 MB                              |
+| 传入张数        | _ Seedream 5.5、Seedream 5.0 pro / flash：最多 10 张<br><br>_ Seedream 5.0 lite / 4.5 / 4.0：最多 14 张 | 仅支持单张图片                            |
 
 > **说明**
 
@@ -2142,96 +2163,11 @@ Seedream 5.0 pro / 5.0 lite 可通过设置 **output_format** 参数，指定生
 
 图片URL仅保留24小时，超时后会被自动清除。请您务必及时保存生成的图片。
 
-推荐配置火山引擎 TOS 提供的数据订阅功能，将您的模型推理产物自动转存到自己的 TOS 桶中，便于长期备份或二次加工。详细介绍请参见 [TOS 数据订阅](https://docs.volcengine.com/docs/TorchObjectStorage/Datasubscription-5?lang=zh)。
+推荐配置火山引擎 TOS 提供的数据订阅功能，将您的模型推理产物自动转存到自己的 TOS 桶中，便于长期备份或二次加工。详细介绍请参见 [TOS 数据订阅](https://docs.volcengine.com/docs/torch-object-storage/data-subscription?lang=zh)。
 
 **限流说明**
 
 - IPM 限流：账号下同模型（区分模型版本）每分钟生成图片数量上限。若超过该限制，生成图片时会报错。
-  - 图层拆分场景下，每次请求预扣减 17 IPM（按最多输出 1 张底图和 16 张图层预留配额）；全部图片生成后，按实际生成数量返还多扣减的额度。
+  - 图层拆分场景下，Seedream 5.5 按 `layer_decomposition_options.max_images` 的值预扣减 IPM（默认 30）；Seedream 5.0 pro / flash 每次请求预扣减 17 IPM。全部图片生成后，按实际生成数量返还多扣减的额度。
 
 - 不同模型的限制值不同，详见 [图片生成能力](https://ark.volcengine.com/region:cn-beijing/docs/model-list#9df4d9fd)。
-
-# 附：故事书/连环画制作
-
-[火山方舟大模型体验中心](https://www.volcengine.com/experience/ark?mode=vision&model=doubao-seedream-4-0-250828) 提供了故事书和连环画功能，该功能结合了 Doubao Seed 2.1 Lite 模型和 Seedream 4.0 模型，可实现一句话生成动漫、连环画、故事书，满足用户多样化的创作需求。
-
-连环画的实现过程与故事书类似，本文以故事书为例，为您介绍生成故事书的工作流和技术实现步骤，方便您在本地快速复现。
-
-![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/d590e440ff7447feaed8fa8f4d91e746~tplv-goo7wpa0wc-image.image)
-
-## 工作流
-
-故事书生成的工作流如下：
-
-![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/0177dd5714aa4750aebc27bbc02ea9f6~tplv-goo7wpa0wc-image.image)
-
-## 技术实现
-
-1. 根据用户提供的提示词和参考图，调用 doubao\-seed\-2.1\-lite 模型，进行故事创作 \> 故事分镜拆解 \> 生成分镜的文案和画面描述 \> 生成书名 \> 生成故事总结，并汇总成 JSON 格式输出。
-
-   System Prompt 如下：
-
-```Text
-# 角色
-
-你是一位**绘本创作大师**。
-
-## 任务
-
-贴合用户指定的**读者群（儿童/青少年/成人/全年龄）**，创作**情节线性连贯的、生动有趣的、充满情绪价值和温度的、有情感共鸣的、分镜-文案-画面严格顺序对应的绘本内容**：
-- 核心约束：**分镜拆分→文案（scenes）→画面描述（scenes_detail）必须1:1顺序绑定**，从故事开头到结尾，像「放电影」一样按时间线推进，绝无错位。
-
-## 工作流程
-
-1.  充分理解用户诉求。 优先按照用户的创作细节要求执行（如果有）
-2.  **故事构思:** 创作一个能够精准回应用户诉求、提供情感慰藉的故事脉络。整个故事必须围绕“共情”和“情绪价值”展开。
-3.  **分镜结构与数量:**
-    * 将故事浓缩成 **5~10** 个关键分镜，最多10个（不能超过10个）。
-    * 必须遵循清晰的叙事弧线：开端 → 发展 → 高潮 → 结局。
-4.  **文案与画面 (一一对应):**
-    * **文案 ("scenes"字段):** 为每个分镜创作具备情感穿透力的文案。文案必须与画面描述紧密贴合，共同服务于情绪的传递。**禁止在文案中使用任何英文引号 ("")**。不能超过10个。
-    * **画面 ("scenes_detail"字段):** 为每个分镜构思详细的画面。画风必须贴合用户诉求和故事氛围。描述需包含构图、光影、色彩、角色神态等关键视觉要素，达到可直接用于图片生成的标准。
-5.  **书名 ("title"字段):**
-    * 构思一个简洁、好记、有创意的书名。
-    * 书名必须能巧妙地概括故事精髓，并能瞬间“戳中”目标用户的情绪共鸣点。
-6.  **故事总结 ("summary"字段):**
-    * 创作一句**不超过30个汉字**的总结。
-    * 总结需高度凝练故事的核心思想与情感价值。
-7. 整合输出：将所有内容按指定 JSON 格式整理输出。
-
-## 安全限制
-生成的内容必须严格遵守以下规定：
-1.  **禁止暴力与血腥:** 不得包含任何详细的暴力、伤害、血腥或令人不适的画面描述。
-2.  **禁止色情内容:** 不得包含任何色情、性暗示或不适宜的裸露内容。
-3.  **禁止仇恨与歧视:** 不得包含针对任何群体（基于种族、宗教、性别、性取向等）的仇恨、歧视或攻击性言论。
-4.  **禁止违法与危险行为:** 不得描绘或鼓励任何非法活动、自残或危险行为。
-5.  **确保普遍适宜性:** 整体内容应保持在社会普遍接受的艺术创作范围内，避免极端争议性话题。
-
-## 输出格式要求
-整理成以下JSON格式，scenes 和 scenes_detail 要与分镜保持顺序一致，一一对应，最多10个（不能超过10个）：
-{
-  "title": "书名",
-  "summary": "30字内的总结",
-  "scenes": [
-    "分镜1的文案，用50字篇幅传递情绪和情感，引发读者共鸣，语言风格需符合设定。",
-    "分镜2的文案"
-  ],
-  "scenes_detail": [
-    "图片1：这是第一页的画面描述。必须以'图片'+序号开头。要有强烈的视觉感，详细描述构图（如特写、远景）、光影、色彩、角色表情、动作和环境细节，符合生图提示词的要求。",
-    "图片2："
-  ]
-}
-```
-
-2. 提取返回结果 JSON 中的 scenes_detail 字段，作为图片生成的 Prompt 。
-
-3. 处理图片生成的 Prompt:
-   1. 将数组转化成字符串
-
-   2. 在 prompt 末尾补充"最后，为故事书创作一个封面。 再检查所有图片，去除图片中的文字"。
-
-   3. 在 prompt 开头添加用户输入的提示词。
-
-4. 根据图片生成的 Prompt 和用户提供的参考图，调用 doubao\-seedream\-4.0 模型的生成组图能力，为故事的所有分镜文案生成配图。
-
-5. 按照顺序拼装图片和文字即可得到故事书内容 ，用户按需进行展示即可。

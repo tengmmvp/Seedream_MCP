@@ -1,10 +1,8 @@
 当请求时设置 `stream: true`，图片生成 API 会以 Server\-Sent Events（SSE）的形式实时推送每张图片的生成结果。本节内容介绍服务器会推送的各类事件。
 
-<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
+> **说明**
 
-<div data-tips="true" data-tips-type="tip">流式输出的示例代码及返回示例，详见 <a href="https://ark.volcengine.com/region:cn-beijing/docs/ark/streaming-output">流式输出</a> 教程。</div>
-
-<span id="error"></span>
+> 流式输出的示例代码及返回示例，详见 [流式输出](https://ark.volcengine.com/region:cn-beijing/docs/streaming-output) 教程。
 
 ## error
 
@@ -20,7 +18,7 @@
 
 `error.error.code`
 
-错误码，请参见 [错误码](https://ark.volcengine.com/region:cn-beijing/docs/ark/error-codes)
+错误码，请参见 [错误码](https://ark.volcengine.com/region:cn-beijing/docs/error-codes)
 
 **message** `string` | 错误消息
 
@@ -30,16 +28,12 @@
 
 error 响应示例
 
-```JSON
+```Plain Text
 "error": {
   "code":"BadRequest"，
   "message":"The request failed because it is missing one or multiple required parameters. Request ID: {id}"
 }
 ```
-
-&nbsp;
-
-<span id="image-generation-completed"></span>
 
 ## image_generation.completed
 
@@ -77,11 +71,11 @@ error 响应示例
 
 - `web_search`：联网搜索功能。
 
-<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
+> **说明**
 
-- <div data-tips="true" data-tips-type="tip">开启联网搜索后，模型会根据用户的提示词自主判断是否搜索互联网内容（如商品、天气等），提升生成图片的时效性，但也会增加一定的时延。</div>
+- > 开启联网搜索后，模型会根据用户的提示词自主判断是否搜索互联网内容（如商品、天气等），提升生成图片的时效性，但也会增加一定的时延。
 
-- <div data-tips="true" data-tips-type="tip">实际搜索次数可通过字段 <code>usage.tool_usage.web_search</code> 查询，如果为 0 表示未搜索。</div>
+- > 实际搜索次数可通过字段 `usage.tool_usage.web_search` 查询，如果为 0 表示未搜索。
 
 **usage** `object` | 用量信息
 
@@ -94,18 +88,6 @@ error 响应示例
 `image_generation.completed.usage.generated_images`
 
 模型成功生成的图片张数，不包含生成失败的图片。仅对成功生成图片按张数进行计费
-
-**input_images<mark><sup>new</sup></mark>** `integer` | 输入图片数
-
-`image_generation.completed.usage.input_images`
-
-输入模型的图片张数。
-
-**模型支持**：
-
-- `Seedream 5.0 pro`
-
-- `Seedream 5.0 flash`
 
 **output_tokens** `integer` | 输出 token 数
 
@@ -137,7 +119,7 @@ error 响应示例
 
 image_generation.completed 响应示例
 
-```JSON
+```Plain Text
 {
   "type": "image_generation.completed",
   "model": "doubao-seedream-5-0-260128",
@@ -157,10 +139,6 @@ image_generation.completed 响应示例
   }
 }
 ```
-
-&nbsp;
-
-<span id="image-generation-partial-failed"></span>
 
 ## image_generation.partial_failed
 
@@ -194,7 +172,7 @@ image_generation.completed 响应示例
 
 `image_generation.partial_failed.error.code`
 
-错误码，请参见 [错误码](https://ark.volcengine.com/region:cn-beijing/docs/ark/error-codes)
+错误码，请参见 [错误码](https://ark.volcengine.com/region:cn-beijing/docs/error-codes)
 
 **message** `string` | 错误消息
 
@@ -210,7 +188,7 @@ image_generation.completed 响应示例
 
 image_generation.partial_failed 响应示例
 
-```JSON
+```Plain Text
 {
   "type": "image_generation.partial_failed",
   "model": "doubao-seedream-5-0-260128",
@@ -222,10 +200,6 @@ image_generation.partial_failed 响应示例
   }
 }
 ```
-
-&nbsp;
-
-<span id="image-generation-partial-succeeded"></span>
 
 ## image_generation.partial_succeeded
 
@@ -275,7 +249,7 @@ image_generation.partial_failed 响应示例
 
 image_generation.partial_succeeded 响应示例
 
-```JSON
+```Plain Text
 {
   "type": "image_generation.partial_succeeded",
   "model": "doubao-seedream-5-0-260128",
