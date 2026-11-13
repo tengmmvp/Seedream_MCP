@@ -5,24 +5,16 @@
       "args": ["seedream-image-mcp"],
       "env": {
         "ARK_API_KEY": "your_ark_api_key_here",
-        "ARK_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
 
-        "SEEDREAM_MODEL_ID": "doubao-seedream-5.0",
+        "SEEDREAM_MODEL_ID": "doubao-seedream-5.5",
+
         "SEEDREAM_DEFAULT_SIZE": "2K",
+        "SEEDREAM_DEFAULT_WATERMARK": "false",
 
         "SEEDREAM_LOG_LEVEL": "INFO",
 
         "SEEDREAM_AUTO_SAVE_ENABLED": "true",
-        "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT": "5",
-        "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT": "30",
-        "SEEDREAM_AUTO_SAVE_MAX_RETRIES": "3",
-        "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE": "52428800",
-        "SEEDREAM_AUTO_SAVE_DATE_FOLDER": "true",
-        "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS": "30",
-
-        "SEEDREAM_TIMEOUT": "60",
-        "SEEDREAM_API_TIMEOUT": "600",
-        "SEEDREAM_MAX_RETRIES": "3"
+        "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS": "30"
       }
     }
   }
