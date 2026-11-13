@@ -38,4 +38,4 @@ jobs:
       python-versions: '["3.12"]'
       timeout-minutes: 20
       run-tests: true
-      mcp-pin-version: "2.0.0"
+      mcp-pin-version: "2.3.0"
