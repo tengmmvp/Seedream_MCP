@@ -1,7 +1,7 @@
 """streamable-http 传输层：ASGI 中间件与传输配置。
 
 包含请求体大小限制、大请求体并发准入、Bearer 鉴权、健康检查、回环与非回环 Host 头防护、
-Web 操作台同源 Origin 与跨站 Sec-Fetch 校验及内层异常边界八个 ASGI 中间件，
+Web 操作台同源 Origin 与跨站 Sec-Fetch 校验、内层异常边界与最外层调用关联作用域九个 ASGI 中间件，
 /.well-known/mcp 端点发现 303 重定向路由，以及 streamable-http 监听与 TLS 配置。
 中间件经 Starlette add_middleware 装配到 MCPServer 的 streamable_http_app 外层，
 按装配逆序执行。
@@ -37,7 +37,7 @@ from ..config import get_active_config
 from ..utils.core.errors import SeedreamConfigError, as_plain, error_text, raw_error_text
 from ..utils.core.http_int import strict_http_int
 from ..utils.core.json_envelope import SECURE_JSON_HEADER_BYTES, flat_error_body
-from ..utils.core.logs import get_logger
+from ..utils.core.logs import call_id_scope, get_logger
 from ..utils.core.loop_bound import loop_bound_semaphore
 from ..utils.core.settle import await_settled_op, settle_detached_op
 
@@ -1136,6 +1136,25 @@ class _WebOriginGuardMiddleware:
         return site.strip().lower() in cls._REJECTED_FETCH_SITES
 
 
+class _CallIdScopeMiddleware:
+    """ASGI 链最外层开调用关联作用域：传输层失败行与分发层 handler 行同 ID 配对，每请求腿一 ID 内层复用。
+
+    SDK 会话 serve_loop 任务继承开场 POST 腿的 ID，
+    「Session … crashed」等会话生命周期行挂开场 POST 腿的 ID（SDK 内部 spawn，无 context 参数），
+    逐请求 handler 归因不受影响。
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        with call_id_scope():
+            await self.app(scope, receive, send)
+
+
 # ==================== streamable-http 中间件装配 ====================
 
 # 本模块装配到 streamable-http app 的全部中间件类，供重复装配检测使用。
@@ -1148,6 +1167,7 @@ _STREAMABLE_HTTP_MIDDLEWARE_CLASSES = (
     _WebOriginGuardMiddleware,
     _HealthCheckMiddleware,
     _ErrorBoundaryMiddleware,
+    _CallIdScopeMiddleware,
 )
 
 
@@ -1189,9 +1209,9 @@ def _attach_streamable_http_middleware(
     大请求体准入阈值自请求体上限经 _large_body_admission_threshold 派生。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
-    HostGuard（回环绑定为 LoopbackHostGuard，web 开启的非回环绑定为 AppHostGuard）
-    -> CORS（配置 http_allowed_origins 时）-> HealthCheck -> LimitRequestBody ->
-    ErrorBoundary（配置 origins 时）-> 鉴权层 -> LargeBodyAdmission -> app，
+    CallIdScope -> HostGuard（回环绑定为 LoopbackHostGuard，
+    web 开启的非回环绑定为 AppHostGuard）-> CORS（配置 http_allowed_origins 时）-> HealthCheck -> LimitRequestBody
+    -> ErrorBoundary（配置 origins 时）-> 鉴权层 -> LargeBodyAdmission -> app，
     鉴权层为 Bearer（配置令牌时）或 Web Origin 守卫（web_enabled 且无令牌时，仅守
     /web/api 前缀），大请求体准入居鉴权层之内，未鉴权请求不占准入许可；超长请求
     与双申报走私形态在鉴权前被 413/400 早拒且错误体经 CORS 层可被跨源客户端读取，
@@ -1267,6 +1287,8 @@ def _attach_streamable_http_middleware(
         allowlist = _web_app_host_allowlist(host, config.http_allowed_hosts or ())
         if allowlist:
             app.add_middleware(_AppHostGuardMiddleware, allowed_hosts=allowlist)
+    # 收尾装配使调用关联作用域居全链最外层，异常边界与读体层失败行同请求腿 ID 归因。
+    app.add_middleware(_CallIdScopeMiddleware)
 
 
 # ==================== streamable-http 传输配置 ====================

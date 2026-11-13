@@ -356,8 +356,10 @@ async def _run_tool_pipeline(
 async def _workspace_roots_dependency(
     ctx: Context[Any, Any] | None = None,
 ) -> ListRootsResult | ListRoots | None:
-    """roots 依赖解析器，SEP-2577 非废弃形态。
+    """roots 依赖解析器。
 
+    Roots 特性整体已弃用（2026-07-28 规范 SEP-2577，移除资格不早于 2027-07-28）；
+    本 resolver 形态仅免旧直连形态（ctx.session.list_roots）的弃用告警。
     现代修订（2026-07-28 及以后）返回 ListRoots()，SDK 在工具调用前经
     InputRequiredResult 多轮取回客户端 roots 并注入工具参数；旧修订由 resolver
     以短超时直连取回，超时或失败经 ToolError 报错不降级。未声明能力，或旧修订

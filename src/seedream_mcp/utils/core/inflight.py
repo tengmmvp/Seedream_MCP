@@ -6,7 +6,8 @@ LoopKeyedInflight 供 download 的 DNS 在途解析、prepare 的参考图预处
 未被消费时，失败 task 经 arm_unretrieved_exception_logging 登记的兜底回调以
 warning 记录。TransientInflightError 为共享在途瞬态失败标记，
 clone_shared_exception 为共享异常对象的独立投递副本构造助手，供本模块
-投递点与计划层重放共用。
+投递点与计划层重放共用。spawn_detached_task 以清除调用关联 ID 的上下文副本
+创建 task，供 loop_bound 单飞注册表的 leader 创建与 save 的后台清理归因脱钩。
 """
 
 from __future__ import annotations
@@ -14,10 +15,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Any, Generic, TypeVar
 
 from loguru import logger
+
+from .logs import cleared_call_id_context
 
 
 def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
@@ -65,11 +68,23 @@ def arm_unretrieved_exception_logging(
         return
     _UNRETRIEVED_ARMED_TASKS.add(task)
     resolved_callback = callback if callback is not None else log_unretrieved_task_exception
-    task.add_done_callback(resolved_callback)
+    # 孤儿告警属全局事件，不归因登记方（可能已结束的消费者）的调用。
+    task.add_done_callback(resolved_callback, context=cleared_call_id_context())
 
 
 # 单飞在途条目持有的共享 task 结果类型。
 _InflightResultT = TypeVar("_InflightResultT")
+
+
+def spawn_detached_task(
+    coro: "Coroutine[Any, Any, _InflightResultT]",
+) -> "asyncio.Task[_InflightResultT]":
+    """创建与创建者调用归因脱钩的后台 task。
+
+    task 可服务多个调用方、可存活到创建者结束之后。任务体内的日志回到占位符、
+    不归因创建者调用，等待结果的调用方日志仍持各自的 ID。
+    """
+    return asyncio.create_task(coro, context=cleared_call_id_context())
 
 
 class TransientInflightError(Exception):

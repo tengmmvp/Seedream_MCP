@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import weakref
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Coroutine, Hashable
 from typing import Any, Generic, TypeVar
 
 from .errors import as_plain, raw_error_text
-from .inflight import InflightEntry
+from .inflight import InflightEntry, spawn_detached_task
 
 # 各调用点的最近信号量缓存：key -> (事件循环, 限值, 信号量)。key 集合由调用点
 # 决定为有限集，不做驱逐；identity 比较防 id 复用误判。
@@ -142,17 +142,20 @@ class LoopKeyedInflight(Generic[_RegistryKeyT, _ResultT]):
         return entry
 
     def register_if_absent(
-        self, key: _RegistryKeyT, task_factory: Callable[[], "asyncio.Task[_ResultT]"]
+        self, key: _RegistryKeyT, coro_factory: Callable[[], Coroutine[Any, Any, _ResultT]]
     ) -> tuple[InflightEntry[_ResultT], bool]:
-        """键空闲时经工厂创建 task 登记返回 (新条目, True)，被占用返回 (既有条目, False)。
+        """键空闲时经工厂取协程创建 leader task 登记返回 (新条目, True)，被占用返回 (既有条目, False)。
 
         命中检查与登记在单次同步调用内完成，调用方无法在两步之间插入 await 点，
-        无需约定即不会顶替仍在途的条目；工厂仅在空闲时被调用。
+        无需约定即不会顶替仍在途的条目；工厂仅在空闲时被调用，未调用的工厂
+        不产生悬空协程。leader 统一经 spawn_detached_task 创建，
+        与创建者调用归因脱钩，调用点无法绕过。
         """
         entry = self.peek(key)
         if entry is not None:
             return entry, False
-        return self._register(key, task_factory()), True
+        leader: "asyncio.Task[_ResultT]" = spawn_detached_task(coro_factory())
+        return self._register(key, leader), True
 
     def __len__(self) -> int:
         """返回当前事件循环的在途条目数，弱引用已死的残留不计入。"""
@@ -162,8 +165,8 @@ class LoopKeyedInflight(Generic[_RegistryKeyT, _ResultT]):
         return sum(1 for entry_ref in registry.values() if entry_ref() is not None)
 
     async def consume_shared(
-        self, key: _RegistryKeyT, task_factory: Callable[[], "asyncio.Task[_ResultT]"]
+        self, key: _RegistryKeyT, coro_factory: Callable[[], Coroutine[Any, Any, _ResultT]]
     ) -> _ResultT:
-        """命中在途条目直接共享等待，未命中经工厂创建 task 登记后等待。"""
-        entry, _created = self.register_if_absent(key, task_factory)
+        """命中在途条目直接共享等待，未命中经工厂创建 leader task 登记后等待。"""
+        entry, _created = self.register_if_absent(key, coro_factory)
         return await entry.consume()

@@ -3,8 +3,8 @@
 基于 loguru 初始化日志系统，配置控制台与文件双通道输出。文件日志按配置的大小
 轮换、保留天数超期清理并压缩归档。通过 InterceptHandler 将标准库 logging 调用
 重定向至 loguru，统一第三方库与项目内部的日志通道。全局 patcher 在每条日志
-格式化前剥离消息与异常文本的控制字符，防文件名、上游错误体等经日志注入伪造
-日志行。
+格式化前注入调用关联 ID 并剥离消息与异常文本的控制字符，防文件名、
+上游错误体等经日志注入伪造日志行。
 """
 
 from __future__ import annotations
@@ -12,7 +12,10 @@ from __future__ import annotations
 import logging
 import sys
 import threading
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import Context, ContextVar, copy_context
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any, Iterable
@@ -37,8 +40,8 @@ if TYPE_CHECKING:
 class EarlyMessageBuffer:
     """早于日志初始化的消息缓冲，冲刷与回滚由内部锁串行化。
 
-    config 构建告警与 path 目录回退提示共用同一机制，drain 在 setup_logging
-    之后由 server 调用。
+    config 构建告警、path 目录回退提示与 server 前移漂移告警共用同一机制，
+    drain 在 setup_logging 之后由 server 调用。
     """
 
     def __init__(self) -> None:
@@ -125,6 +128,52 @@ class InterceptHandler(logging.Handler):
             self.handleError(record)
 
 
+# ==================== 调用关联 ID ====================
+
+# 当前工具调用或 Web 生成请求的关联 ID：入口经 call_id_scope 设置，
+# 日志 patcher 注入每条记录，同一调用的开始、重试、下载与结局日志行可配对归因。
+# asyncio.to_thread 与 CPU 卸载池均复制任务上下文，其内日志同样携带。
+_CALL_ID: ContextVar[str | None] = ContextVar("seedream_call_id", default=None)
+
+# 无调用上下文时 call_id 字段的渲染占位符。
+CALL_ID_PLACEHOLDER = "-"
+
+
+@contextmanager
+def call_id_scope() -> Iterator[str]:
+    """进入调用关联作用域：无既有 ID 时分配新 ID，退出时恢复先前值。
+
+    已处于作用域内时复用外层 ID，
+    一次逻辑调用（如 Web 端点包裹的生成请求）的日志保持单一 ID。
+    并发调用在各自任务上下文持独立 ID。
+    """
+    existing = _CALL_ID.get()
+    if existing is not None:
+        yield existing
+        return
+    call_id = uuid.uuid4().hex[:12]
+    token = _CALL_ID.set(call_id)
+    try:
+        yield call_id
+    finally:
+        _CALL_ID.reset(token)
+
+
+def current_call_id() -> str:
+    """当前调用关联 ID，无调用上下文时返回占位符。"""
+    return _CALL_ID.get() or CALL_ID_PLACEHOLDER
+
+
+def cleared_call_id_context() -> Context:
+    """返回已清除调用关联 ID 的上下文副本，供脱离调用归因的后台任务与回调共用。
+
+    后台任务与回调的日志回到占位符形态，全局性失败不归因早已结束的调用。
+    """
+    context = copy_context()
+    context.run(_CALL_ID.set, None)
+    return context
+
+
 # 字符类取 sanitizers.CONTROL_CHARS_PATTERN 单一来源，与错误文本脱敏通道保持同一口径。
 _LOG_MESSAGE_CONTROL_CHARS = CONTROL_CHARS_PATTERN
 
@@ -132,7 +181,7 @@ _LOG_MESSAGE_CONTROL_CHARS = CONTROL_CHARS_PATTERN
 def _strip_message_control_chars(record: Any) -> None:
     """剥离日志消息与异常消息的控制字符，防日志注入。
 
-    作为全局 patcher 在每条日志格式化前剥离，一处覆盖所有日志点：路径名、上游错误
+    经全局 patcher 在每条日志格式化前剥离，一处覆盖所有日志点：路径名、上游错误
     体中的 CR/LF 原样记录会在日志文件中伪造额外行。exc_info 的异常消息文本经
     _strip_exception_control_chars 同步清洗，traceback 帧源代码行来自本地文件不受
     影响。本层只压平控制字符，不剥离键值形态的凭据：日志通道有意保留异常原文便于
@@ -170,6 +219,16 @@ def _strip_exception_control_chars(record: Any) -> None:
     )
     if cleaned != args:
         value.args = cleaned
+
+
+def _prepare_log_record(record: Any) -> None:
+    """日志记录统一预处理：注入调用关联 ID，再剥离控制字符。
+
+    作为全局 patcher 在每条日志格式化前执行。call_id 注入 extra，
+    供 sink 的 format 渲染。已显式 bind 的值不覆盖。
+    """
+    record["extra"].setdefault("call_id", current_call_id())
+    _strip_message_control_chars(record)
 
 
 # 级别名到严重度序号的映射；不查 loguru 注册表，测试替换 logger 后仍可用。
@@ -230,7 +289,7 @@ def setup_logging(
         retention_days: 轮转日志的保留天数，超期自动清理。
     """
     logger.remove()
-    logger.configure(patcher=_strip_message_control_chars)
+    logger.configure(patcher=_prepare_log_record)
 
     level = log_level.upper()
     # sink 级别门取配置与 WARNING 的较小者：security 告警均为 WARNING，先经
@@ -244,6 +303,7 @@ def setup_logging(
             filter=_sink_filter(level),
             format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
             "<level>{level: <8}</level> | "
+            "[{extra[call_id]}] "
             "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
             "<level>{message}</level>",
             # colorize=None 交由 loguru 按流是否 TTY 自动决定，非终端 sink 不输出 ANSI 转义。
@@ -266,7 +326,8 @@ def setup_logging(
             level=sink_level,
             filter=_sink_filter(level),
             format=(
-                "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | " "{name}:{function}:{line} - {message}"
+                "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | "
+                "[{extra[call_id]}] {name}:{function}:{line} - {message}"
             ),
             rotation=f"{rotation_mb} MB",
             retention=f"{retention_days} days",

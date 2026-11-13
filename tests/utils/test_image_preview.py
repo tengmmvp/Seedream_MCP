@@ -24,11 +24,12 @@ from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.tools.schemas import TextToImageInput
 from seedream_mcp.tools.runners import run_text_to_image
+from seedream_mcp.utils.core.logs import CALL_ID_PLACEHOLDER, call_id_scope
 from seedream_mcp.utils.images.thumbnail import (
     PREVIEW_MAX_IMAGES,
     THUMBNAIL_MAX_EDGE,
+    _build_thumbnail_outcome,
     build_preview_contents,
-    build_thumbnail_bytes,
     cached_thumbnail_bytes,
 )
 from seedream_mcp.utils.io import save as io_save
@@ -36,6 +37,7 @@ from seedream_mcp.utils.io import save as io_save
 from _lib.cpu_offload_spy import CpuOffloadSpy
 from _lib.generation_fixtures import _patch_client_success, _patch_save_real_file
 from _lib.inflight_fakes import _reap_if_pending, await_shared_leader, cancel_shared_leader
+from _lib.log_fakes import stage_call_ids
 from _lib.png_fixtures import forged_png_bytes
 
 
@@ -176,14 +178,14 @@ async def test_build_preview_contents_skips_inflight_cancelled(
     healthy = _write_png(tmp_path / "healthy.png", (64, 64))
     images_root = tmp_path / ".seedream" / "images"
     images_root.mkdir(parents=True)
-    real_limited = image_thumbnail.build_thumbnail_bytes_limited
+    real_limited = image_thumbnail._build_thumbnail_outcome_limited
 
-    async def _pending_for_cancelled(path: Path) -> bytes | None:
+    async def _pending_for_cancelled(path: Path) -> image_thumbnail._DecodeOutcome:
         if path == cancelled:
             await asyncio.get_running_loop().create_future()
         return await real_limited(path)
 
-    monkeypatch.setattr(image_thumbnail, "build_thumbnail_bytes_limited", _pending_for_cancelled)
+    monkeypatch.setattr(image_thumbnail, "_build_thumbnail_outcome_limited", _pending_for_cancelled)
 
     preview = asyncio.ensure_future(build_preview_contents([cancelled, healthy], images_root))
     try:
@@ -202,11 +204,11 @@ async def test_build_preview_contents_skips_inflight_cancelled(
         await _reap_if_pending(preview)
 
 
-def test_build_thumbnail_bytes_downsamples_large_image(tmp_path: Path) -> None:
+def test_build_thumbnail_outcome_downsamples_large_image(tmp_path: Path) -> None:
     """大于上限的图片按长边收敛到 768 且保持纵横比。"""
     source = _write_png(tmp_path / "large.png", (1600, 1000))
 
-    thumbnail = build_thumbnail_bytes(source)
+    thumbnail = _build_thumbnail_outcome(source).data
 
     assert thumbnail is not None
     with Image.open(BytesIO(thumbnail)) as decoded:
@@ -215,39 +217,39 @@ def test_build_thumbnail_bytes_downsamples_large_image(tmp_path: Path) -> None:
         assert decoded.size[0] / decoded.size[1] == pytest.approx(1.6, abs=0.01)
 
 
-def test_build_thumbnail_bytes_keeps_small_image_unchanged(tmp_path: Path) -> None:
+def test_build_thumbnail_outcome_keeps_small_image_unchanged(tmp_path: Path) -> None:
     """小于上限的图片不放大，按原尺寸编码。"""
     source = _write_png(tmp_path / "small.png", (100, 80))
 
-    thumbnail = build_thumbnail_bytes(source)
+    thumbnail = _build_thumbnail_outcome(source).data
 
     assert thumbnail is not None
     with Image.open(BytesIO(thumbnail)) as decoded:
         assert decoded.size == (100, 80)
 
 
-def test_build_thumbnail_bytes_flattens_alpha_onto_white(tmp_path: Path) -> None:
+def test_build_thumbnail_outcome_flattens_alpha_onto_white(tmp_path: Path) -> None:
     """带透明通道的图片合成白底编码为无 alpha 的 JPEG。"""
     source = _write_png(tmp_path / "alpha.png", (200, 200), mode="RGBA")
 
-    thumbnail = build_thumbnail_bytes(source)
+    thumbnail = _build_thumbnail_outcome(source).data
 
     assert thumbnail is not None
     with Image.open(BytesIO(thumbnail)) as decoded:
         assert decoded.mode == "RGB"
 
 
-def test_build_thumbnail_bytes_returns_none_for_invalid_input(tmp_path: Path) -> None:
+def test_build_thumbnail_outcome_returns_none_for_invalid_input(tmp_path: Path) -> None:
     """损坏数据归一为 None，源图缺失上抛 FileNotFoundError 分档。"""
     corrupt = tmp_path / "corrupt.png"
     corrupt.write_bytes(b"not an image at all")
 
-    assert build_thumbnail_bytes(corrupt) is None
+    assert _build_thumbnail_outcome(corrupt).data is None
     with pytest.raises(FileNotFoundError):
-        build_thumbnail_bytes(tmp_path / "missing.png")
+        _build_thumbnail_outcome(tmp_path / "missing.png")
 
 
-def test_build_thumbnail_bytes_rejects_pixels_between_limit_and_double(
+def test_build_thumbnail_outcome_rejects_pixels_between_limit_and_double(
     tmp_path: Path,
 ) -> None:
     """声明像素介于 36M 与两倍之间的源图被显式拒绝，不依赖 PIL 告警区间放行。"""
@@ -257,10 +259,10 @@ def test_build_thumbnail_bytes_rejects_pixels_between_limit_and_double(
     declared = tmp_path / "declared-big.png"
     declared.write_bytes(forged_png_bytes(6_100, 6_100))
 
-    assert build_thumbnail_bytes(declared) is None
+    assert _build_thumbnail_outcome(declared).data is None
 
 
-def test_build_thumbnail_bytes_applies_exif_orientation_after_draft(tmp_path: Path) -> None:
+def test_build_thumbnail_outcome_applies_exif_orientation_after_draft(tmp_path: Path) -> None:
     """JPEG 大图的方向标签在 draft 缩尺解码后仍被读取并正确转置。
 
     4096x3072 以方向 6 保存，draft 先把解码分辨率降为二分之一，转置交换宽高后
@@ -268,18 +270,18 @@ def test_build_thumbnail_bytes_applies_exif_orientation_after_draft(tmp_path: Pa
     """
     source = _write_jpeg(tmp_path / "oriented.jpg", (4096, 3072), orientation=6)
 
-    thumbnail = build_thumbnail_bytes(source)
+    thumbnail = _build_thumbnail_outcome(source).data
 
     assert thumbnail is not None
     with Image.open(BytesIO(thumbnail)) as decoded:
         assert decoded.size == (576, 768)
 
 
-def test_build_thumbnail_bytes_jpeg_without_exif(tmp_path: Path) -> None:
+def test_build_thumbnail_outcome_jpeg_without_exif(tmp_path: Path) -> None:
     """无 EXIF 的 JPEG 跳过整图转置拷贝，缩尺解码后仍正常生成缩略图。"""
     source = _write_jpeg(tmp_path / "plain.jpg", (4096, 3072))
 
-    thumbnail = build_thumbnail_bytes(source)
+    thumbnail = _build_thumbnail_outcome(source).data
 
     assert thumbnail is not None
     with Image.open(BytesIO(thumbnail)) as decoded:
@@ -287,18 +289,18 @@ def test_build_thumbnail_bytes_jpeg_without_exif(tmp_path: Path) -> None:
         assert decoded.size == (768, 576)
 
 
-def test_build_thumbnail_bytes_png_without_exif_unchanged(tmp_path: Path) -> None:
+def test_build_thumbnail_outcome_png_without_exif_unchanged(tmp_path: Path) -> None:
     """PNG 不进入 JPEG draft 分支，无 EXIF 时按原尺寸编码。"""
     source = _write_png(tmp_path / "plain.png", (120, 90))
 
-    thumbnail = build_thumbnail_bytes(source)
+    thumbnail = _build_thumbnail_outcome(source).data
 
     assert thumbnail is not None
     with Image.open(BytesIO(thumbnail)) as decoded:
         assert decoded.size == (120, 90)
 
 
-def test_build_thumbnail_bytes_rejects_symlink_source(tmp_path: Path) -> None:
+def test_build_thumbnail_outcome_rejects_symlink_source(tmp_path: Path) -> None:
     """符号链接源图经 O_NOFOLLOW 读取拒绝，不跟随解码，统一归一为 None。"""
     import os
 
@@ -309,11 +311,11 @@ def test_build_thumbnail_bytes_rejects_symlink_source(tmp_path: Path) -> None:
     except (OSError, AttributeError):
         pytest.skip("当前进程无法创建符号链接，Windows 需开发者模式或管理员权限")
 
-    assert build_thumbnail_bytes(link) is None
+    assert _build_thumbnail_outcome(link).data is None
     assert target.exists()
 
 
-def test_build_thumbnail_bytes_rejects_non_regular_source(
+def test_build_thumbnail_outcome_rejects_non_regular_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """FIFO 等非常规源图在打开单点拒绝，归一为 None 不把工作线程钉死在阻塞读取。"""
@@ -342,11 +344,11 @@ def test_build_thumbnail_bytes_rejects_non_regular_source(
 
     monkeypatch.setattr(os, "fstat", _fifo_fstat)
 
-    assert build_thumbnail_bytes(source) is None
+    assert _build_thumbnail_outcome(source).data is None
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="os.mkfifo 仅 POSIX 提供")
-def test_build_thumbnail_bytes_rejects_real_fifo_source(tmp_path: Path) -> None:
+def test_build_thumbnail_outcome_rejects_real_fifo_source(tmp_path: Path) -> None:
     """真实 FIFO 源图在打开单点被拒，缩略图生成路径不阻塞在无写入端的读取。"""
     import os
 
@@ -355,10 +357,10 @@ def test_build_thumbnail_bytes_rejects_real_fifo_source(tmp_path: Path) -> None:
     fifo = tmp_path / "fifo.png"
     mkfifo(fifo)
 
-    assert build_thumbnail_bytes(fifo) is None
+    assert _build_thumbnail_outcome(fifo).data is None
 
 
-def test_build_thumbnail_bytes_decodes_from_file_object_not_full_copy(
+def test_build_thumbnail_outcome_decodes_from_file_object_not_full_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """解码直接消费打开的文件对象，不把源图整读为全量内存字节串。"""
@@ -374,24 +376,24 @@ def test_build_thumbnail_bytes_decodes_from_file_object_not_full_copy(
 
     monkeypatch.setattr(pil_image_module, "open", _capturing_open)
 
-    assert build_thumbnail_bytes(source) is not None
+    assert _build_thumbnail_outcome(source).data is not None
     assert len(opened_fps) == 1
     assert not isinstance(opened_fps[0], BytesIO)
     assert hasattr(opened_fps[0], "fileno")
 
 
-async def test_build_thumbnail_bytes_limited_runs_in_cpu_pool(
+async def test_build_thumbnail_outcome_limited_runs_in_cpu_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """缩略图解码经专用线程池执行，不与默认执行器短任务同池排队。"""
     from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "decode.png", (300, 200))
-    spy = CpuOffloadSpy(thumbnail_module.build_thumbnail_bytes)
+    spy = CpuOffloadSpy(thumbnail_module._build_thumbnail_outcome)
 
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", spy)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome", spy)
 
-    thumbnail = await thumbnail_module.build_thumbnail_bytes_limited(image)
+    thumbnail = (await thumbnail_module._build_thumbnail_outcome_limited(image)).data
 
     assert thumbnail is not None
     spy.assert_ran_in_cpu_pool()
@@ -527,13 +529,13 @@ async def test_cached_thumbnail_hits_disk_cache_without_redecode(
     images_root = tmp_path / ".seedream" / "images"
     images_root.mkdir(parents=True)
     decode_calls = {"count": 0}
-    original_build = thumbnail_module.build_thumbnail_bytes
+    original_outcome = thumbnail_module._build_thumbnail_outcome
 
-    def _counting_build(path: Path) -> bytes | None:
+    def _counting_outcome(path: Path) -> thumbnail_module._DecodeOutcome:
         decode_calls["count"] += 1
-        return original_build(path)
+        return original_outcome(path)
 
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _counting_build)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome", _counting_outcome)
 
     first = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
     second = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
@@ -569,13 +571,13 @@ async def test_cached_thumbnail_empty_entry_treated_as_miss_and_regenerated(
     images_root = tmp_path / ".seedream" / "images"
     images_root.mkdir(parents=True)
     decode_calls = {"count": 0}
-    original_build = thumbnail_module.build_thumbnail_bytes
+    original_outcome = thumbnail_module._build_thumbnail_outcome
 
-    def _counting_build(path: Path) -> bytes | None:
+    def _counting_outcome(path: Path) -> thumbnail_module._DecodeOutcome:
         decode_calls["count"] += 1
-        return original_build(path)
+        return original_outcome(path)
 
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _counting_build)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome", _counting_outcome)
 
     stat = image.stat()
     thumb = thumbnail_module.thumbnail_cache_root(images_root) / thumbnail_module._thumb_key(
@@ -619,15 +621,15 @@ async def test_cached_thumbnail_concurrent_miss_decodes_once_and_shares_result(
     decode_calls = {"count": 0}
     started = threading.Event()
     release = threading.Event()
-    original_build = thumbnail_module.build_thumbnail_bytes
+    original_outcome = thumbnail_module._build_thumbnail_outcome
 
-    def _gated_build(path: Path) -> bytes | None:
+    def _gated_outcome(path: Path) -> thumbnail_module._DecodeOutcome:
         decode_calls["count"] += 1
         started.set()
         release.wait(timeout=5)
-        return original_build(path)
+        return original_outcome(path)
 
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _gated_build)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome", _gated_outcome)
 
     first = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
     second: asyncio.Task[bytes | None] | None = None
@@ -677,14 +679,14 @@ async def test_concurrent_loops_keep_isolated_inflight_registries(
 
     decode_calls = {"count": 0}
     release: queue.Queue[None] = queue.Queue()
-    original_build = thumbnail_module.build_thumbnail_bytes
+    original_outcome = thumbnail_module._build_thumbnail_outcome
 
-    def _gated_build(path: Path) -> bytes | None:
+    def _gated_outcome(path: Path) -> thumbnail_module._DecodeOutcome:
         decode_calls["count"] += 1
         release.get(timeout=10)
-        return original_build(path)
+        return original_outcome(path)
 
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _gated_build)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome", _gated_outcome)
 
     first = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
     # 轮询推进事件循环，首个解码进入工作线程阻塞后本循环注册表恰有一条在途条目。
@@ -760,15 +762,15 @@ async def test_retired_loop_with_pending_decode_is_collectable(
     image = _write_png(tmp_path / "src.png", (300, 200))
     images_root = tmp_path / ".seedream" / "images"
     images_root.mkdir(parents=True)
-    real_limited = thumbnail_module.build_thumbnail_bytes_limited
+    real_limited = thumbnail_module._build_thumbnail_outcome_limited
 
-    async def _eternal_limited(path: Path) -> bytes | None:
+    async def _eternal_limited(path: Path) -> thumbnail_module._DecodeOutcome:
         del path
         # future 仅被 task 自身持有，等价于关闭循环上永远无法 resolve 的解码。
         await asyncio.get_running_loop().create_future()
-        return None
+        return thumbnail_module._DecodeOutcome(None, None)
 
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", _eternal_limited)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome_limited", _eternal_limited)
 
     outcome: dict[str, Any] = {}
 
@@ -824,7 +826,7 @@ async def test_retired_loop_with_pending_decode_is_collectable(
     )
 
     # 第二循环照常解码，登记去重不受退役循环残留影响。
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", real_limited)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome_limited", real_limited)
     assert await thumbnail_module.cached_thumbnail_bytes(image, images_root) is not None
     assert not thumbnail_module._thumb_inflight.by_loop[asyncio.get_running_loop()]
 
@@ -843,16 +845,18 @@ async def test_late_waiter_shares_orphan_decode_after_creator_cancel(
     images_root = tmp_path / ".seedream" / "images"
     images_root.mkdir(parents=True)
     decode_calls = {"count": 0}
-    gate: dict[str, asyncio.Future[bytes | None]] = {}
+    gate: dict[str, asyncio.Future[thumbnail_module._DecodeOutcome]] = {}
 
-    async def _gated_limited(path: Path) -> bytes | None:
+    async def _gated_limited(path: Path) -> thumbnail_module._DecodeOutcome:
         del path
         decode_calls["count"] += 1
-        future: asyncio.Future[bytes | None] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[thumbnail_module._DecodeOutcome] = (
+            asyncio.get_running_loop().create_future()
+        )
         gate["future"] = future
         return await future
 
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", _gated_limited)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome_limited", _gated_limited)
 
     creator = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
     late: asyncio.Task[bytes | None] | None = None
@@ -876,7 +880,7 @@ async def test_late_waiter_shares_orphan_decode_after_creator_cancel(
             if holder is not None and holder.consumers >= 1:
                 break
             await asyncio.sleep(0.01)
-        gate["future"].set_result(b"shared-thumbnail")
+        gate["future"].set_result(thumbnail_module._DecodeOutcome(b"shared-thumbnail", None))
         assert await late == b"shared-thumbnail"
         assert decode_calls["count"] == 1
         assert not registry
@@ -896,12 +900,12 @@ async def test_cached_thumbnail_bytes_sinks_leader_cancel_to_none(
     images_root = tmp_path / ".seedream" / "images"
     images_root.mkdir(parents=True)
 
-    async def _pending_limited(path: Path) -> bytes | None:
+    async def _pending_limited(path: Path) -> thumbnail_module._DecodeOutcome:
         del path
         await asyncio.get_running_loop().create_future()
-        return None
+        return thumbnail_module._DecodeOutcome(None, None)
 
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", _pending_limited)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome_limited", _pending_limited)
 
     caller = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
     try:
@@ -914,7 +918,7 @@ async def test_cached_thumbnail_bytes_sinks_leader_cancel_to_none(
 
 
 async def test_cached_thumbnail_bytes_sinks_transient_marker_beyond_cancellation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warning_records: list[Any]
 ) -> None:
     """非取消的瞬态标记携带者同样降级 None：获取层按标记而非具体类型分类。"""
     from seedream_mcp.utils.core.inflight import TransientInflightError
@@ -927,14 +931,156 @@ async def test_cached_thumbnail_bytes_sinks_transient_marker_beyond_cancellation
     images_root = tmp_path / ".seedream" / "images"
     images_root.mkdir(parents=True)
 
-    async def _failing_limited(path: Path) -> bytes | None:
+    async def _failing_limited(path: Path) -> thumbnail_module._DecodeOutcome:
         del path
         raise _ExternalTransientError("外部瞬态失败")
 
-    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", _failing_limited)
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome_limited", _failing_limited)
 
     assert await thumbnail_module.cached_thumbnail_bytes(image, images_root) is None
     assert len(thumbnail_module._thumb_inflight) == 0
+    # 瞬态失败无解码原因，跳过告警不带原因尾。
+    skip_messages = [
+        record["message"] for record in warning_records if "缩略图生成失败" in record["message"]
+    ]
+    assert skip_messages == ["缩略图生成失败，跳过该张预览: src.png"]
+
+
+async def _late_waiter_shared_failure_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    warning_records: list[Any],
+    *,
+    payload: bytes,
+    source_keyword: str,
+    skip_has_reason: bool,
+) -> str:
+    """创建者调用取消退出后，等待者共享同一在途解码并收获失败的通用场景。
+
+    写入 payload 经 threading.Event 门控真实解码，源级行恰一条且渲染占位符。
+    跳过告警恰一条并归因到等待者，
+    skip_has_reason 区分解码异常与像素超限的原因携带，返回创建者调用 ID 供独有断言复用。
+    """
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
+
+    image = tmp_path / "src.png"
+    image.write_bytes(payload)
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    release_event = threading.Event()
+    original_outcome = thumbnail_module._build_thumbnail_outcome
+
+    def _gated_outcome(path: Path) -> thumbnail_module._DecodeOutcome:
+        # 门控真实解码：创建者退出、等待者挂上后才放行，锁定共享同一次失败。
+        release_event.wait(timeout=5)
+        return original_outcome(path)
+
+    monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome", _gated_outcome)
+
+    creator: asyncio.Task[bytes | None] | None = None
+    waiter: asyncio.Task[bytes | None] | None = None
+    try:
+        with call_id_scope() as creator_id:
+            creator = asyncio.ensure_future(
+                thumbnail_module.cached_thumbnail_bytes(image, images_root)
+            )
+            holder = await await_shared_leader(thumbnail_module._thumb_inflight)
+        # 创建者调用取消退出，共享解码 task 按取消语义留在途。
+        creator.cancel()
+        try:
+            await creator
+        except asyncio.CancelledError:
+            pass
+
+        with call_id_scope() as waiter_id:
+            waiter = asyncio.ensure_future(
+                thumbnail_module.cached_thumbnail_bytes(image, images_root)
+            )
+            # 轮询直至等待者以消费者身份挂上同一在途条目，再放行失败。
+            for _ in range(1000):
+                if holder.consumers >= 1:
+                    break
+                await asyncio.sleep(0.01)
+            assert holder.consumers >= 1
+            release_event.set()
+            assert await waiter is None
+    finally:
+        if creator is not None:
+            await _reap_if_pending(creator)
+        if waiter is not None:
+            await _reap_if_pending(waiter)
+
+    assert creator_id != waiter_id
+    assert stage_call_ids(warning_records, source_keyword) == [CALL_ID_PLACEHOLDER]
+    assert stage_call_ids(warning_records, "缩略图生成失败") == [waiter_id]
+    skip_message = next(
+        record["message"] for record in warning_records if "缩略图生成失败" in record["message"]
+    )
+    assert "src.png" in skip_message
+    assert (" -> " in skip_message) is skip_has_reason
+    return creator_id
+
+
+async def test_thumbnail_failure_detail_decoupled_at_source(
+    tmp_path: Path,
+    warning_records: list[Any],
+) -> None:
+    """解码失败详情行在源头记录并渲染占位符，根因与文件名不因等待侧迁移消失。
+
+    等待者侧跳过告警携带解码失败原因，按 call_id 检索不再只见无因跳过行。
+    """
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"not an image at all")
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+
+    with call_id_scope() as call_id:
+        assert await cached_thumbnail_bytes(corrupt, images_root) is None
+
+    assert stage_call_ids(warning_records, "缩略图解码失败") == [CALL_ID_PLACEHOLDER]
+    detail_message = next(
+        record["message"] for record in warning_records if "缩略图解码失败" in record["message"]
+    )
+    assert "corrupt.png" in detail_message
+    assert "->" in detail_message
+    assert stage_call_ids(warning_records, "缩略图生成失败") == [call_id]
+    skip_message = next(
+        record["message"] for record in warning_records if "缩略图生成失败" in record["message"]
+    )
+    assert "corrupt.png" in skip_message
+    assert " -> " in skip_message
+
+
+@pytest.mark.parametrize(
+    ("payload", "source_keyword", "skip_has_reason"),
+    [
+        pytest.param(b"not an image at all", "缩略图解码失败", True, id="decode-failure"),
+        pytest.param(forged_png_bytes(6_100, 6_100), "缩略图源图像素", False, id="pixel-overlimit"),
+    ],
+)
+async def test_thumbnail_source_warning_decoupled_and_skip_attributed_to_waiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    warning_records: list[Any],
+    payload: bytes,
+    source_keyword: str,
+    skip_has_reason: bool,
+) -> None:
+    """创建者调用取消退出后共享解码照常完成：源级行只一条渲染占位符，跳过行归因到等待者。
+
+    真实解码经门控延迟到等待者挂上后放行，源级告警（解码失败详情或像素超限）随之产生。
+    跳过行原因携带随失败形态区分：解码异常带原因尾，像素超限不带。
+    全部缩略图告警不携带已退出的创建者 ID。
+    """
+    creator_id = await _late_waiter_shared_failure_scenario(
+        monkeypatch,
+        tmp_path,
+        warning_records,
+        payload=payload,
+        source_keyword=source_keyword,
+        skip_has_reason=skip_has_reason,
+    )
+    assert creator_id not in stage_call_ids(warning_records, "缩略图")
 
 
 def test_thumbnail_sweep_evicts_oldest_beyond_cap(

@@ -1032,9 +1032,7 @@ class DownloadManager:
                     return cached_ips
                 self._dns_cache.pop(host, None)
         # 在途检查与登记之间无 await 点，锁外单飞不会交错创建重复解析 task。
-        return await self._dns_inflight.consume_shared(
-            host, lambda: asyncio.ensure_future(self._resolve_and_cache(host))
-        )
+        return await self._dns_inflight.consume_shared(host, lambda: self._resolve_and_cache(host))
 
     async def _resolve_and_cache(self, host: str) -> tuple[str, ...]:
         """执行单次解析与公网校验并写入缓存，供 _resolve_public_ips 在途去重。

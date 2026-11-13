@@ -5,11 +5,12 @@
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
 import pytest
 
+from seedream_mcp.utils.core.logs import CALL_ID_PLACEHOLDER, call_id_scope, current_call_id
 from seedream_mcp.utils.core.loop_bound import LoopKeyedInflight, loop_bound_semaphore
 from seedream_mcp.utils.images import prepare as image_prepare
 
@@ -354,10 +355,8 @@ async def test_register_survives_event_loop_without_attribute_storage() -> None:
 
     task = asyncio.ensure_future(_pending())
     inflight: LoopKeyedInflight[str, str] = LoopKeyedInflight()
-    # 修复前登记在向循环对象 setattr 强引用集处以 AttributeError 崩溃。
-    entry, _created = inflight.register_if_absent(
-        "no-dict-loop", lambda: cast("asyncio.Task[str]", _LoopProxiedTask(task))
-    )
+    # 公开面自建真实 leader task，无 __dict__ 循环场景经 _register 直注替身。
+    entry = inflight._register("no-dict-loop", cast("asyncio.Task[str]", _LoopProxiedTask(task)))
     assert inflight.peek("no-dict-loop") is entry
 
     gate.set_result(None)
@@ -376,16 +375,14 @@ async def test_register_if_absent_hit_keeps_existing_entry_without_factory_call(
         return "first"
 
     registry: LoopKeyedInflight[str, str] = LoopKeyedInflight()
-    entry, _created = registry.register_if_absent(
-        "occupied", lambda: asyncio.ensure_future(_pending())
-    )
+    entry, _created = registry.register_if_absent("occupied", _pending)
 
     factory_calls = 0
 
-    def _factory() -> "asyncio.Task[str]":
+    def _factory() -> "Coroutine[Any, Any, str]":
         nonlocal factory_calls
         factory_calls += 1
-        return asyncio.ensure_future(_pending())
+        return _pending()
 
     shared, created = registry.register_if_absent("occupied", _factory)
     assert created is False
@@ -399,8 +396,8 @@ async def test_register_if_absent_hit_keeps_existing_entry_without_factory_call(
     assert len(registry) == 0
 
 
-async def test_register_if_absent_miss_registers_factory_task() -> None:
-    """键空闲时 register_if_absent 经工厂创建登记，后到同键命中共享该条目。"""
+async def test_register_if_absent_miss_registers_factory_leader() -> None:
+    """键空闲时 register_if_absent 经协程工厂创建 leader 登记，后到同键命中共享该条目。"""
     gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
     async def _pending() -> str:
@@ -408,13 +405,11 @@ async def test_register_if_absent_miss_registers_factory_task() -> None:
         return "fresh"
 
     registry: LoopKeyedInflight[str, str] = LoopKeyedInflight()
-    entry, created = registry.register_if_absent("free", lambda: asyncio.ensure_future(_pending()))
+    entry, created = registry.register_if_absent("free", _pending)
     assert created is True
     assert registry.peek("free") is entry
 
-    second, second_created = registry.register_if_absent(
-        "free", lambda: asyncio.ensure_future(_pending())
-    )
+    second, second_created = registry.register_if_absent("free", _pending)
     assert second_created is False
     assert second is entry
 
@@ -422,6 +417,22 @@ async def test_register_if_absent_miss_registers_factory_task() -> None:
     assert await second.consume() == "fresh"
     await asyncio.sleep(0)
     assert len(registry) == 0
+
+
+async def test_register_if_absent_leader_detaches_creator_call_id() -> None:
+    """leader 由注册表统一脱钩创建：任务体内调用关联 ID 回占位符，不继承创建者。"""
+    seen: list[str] = []
+
+    async def _records_call_id() -> str:
+        seen.append(current_call_id())
+        return "done"
+
+    with call_id_scope():
+        registry: LoopKeyedInflight[str, str] = LoopKeyedInflight()
+        entry, created = registry.register_if_absent("detach", _records_call_id)
+        assert created is True
+        assert await entry.consume() == "done"
+    assert seen == [CALL_ID_PLACEHOLDER]
 
 
 def test_loop_keyed_inflight_public_registration_entrypoint_unique() -> None:

@@ -2,7 +2,7 @@
 
 | 项             | 值                                                                             |
 | -------------- | ------------------------------------------------------------------------------ |
-| **版本**       | v1.10                                                                          |
+| **版本**       | v1.11                                                                          |
 | **适用范围**   | src/seedream_mcp、src/seedream_cli、tests、scripts、docs、仓库根工程文件       |
 | **规范关键词** | 须＝强制；禁止＝强制不做；仅允许＝封闭集合；应当＝无充分理由须遵守；可以＝可选 |
 | **行文**       | 遵循 docs/development/writing-guide.md；模块路径省略 `seedream_mcp.` 前缀      |
@@ -203,7 +203,7 @@ utils 组内方向：`model` 为组内叶子，`core` 依赖 `model`，`io` 与 
 | tools.schemas、tools.outputs | 仅 utils                                                                                                 |
 | tools.pipeline               | client、config、tools.schemas、tools.outputs、utils                                                      |
 | tools.handlers               | tools.pipeline、tools.schemas、tools.outputs、config、utils；client 仅 TYPE_CHECKING                     |
-| tools.runners                | tools.handlers、tools.schemas、config、utils.io                                                          |
+| tools.runners                | tools.handlers、tools.schemas、config、utils.core、utils.io                                              |
 | server                       | tools、config、utils；client 仅 TYPE_CHECKING 与函数级；webapp 仅函数级                                  |
 | webapp                       | tools、config、utils；server 仅函数级                                                                    |
 | 包根门面                     | 根 `__init__` 经 `_LAZY_EXPORTS` → client/config/server；tools.`__init__` → tools.schemas、tools.runners |
@@ -284,6 +284,7 @@ utils 组内方向：`model` 为组内叶子，`core` 依赖 `model`，`io` 与 
 
 | 版本      | 日期       | 要点                                                                                                                                                                                                                                                                                                     |
 | --------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| v1.11     | 2026-11-11 | D1 表 tools.runners 允许目标增列 utils.core：调用关联作用域（utils.core.logs 的 call_id_scope）在 SDK 分发层与 Web 端点分配、runners 层兜底导入；守护 \_ALLOWED_MODULE_DEPS 同步                                                                                                                         |
 | v1.10     | 2026-10-28 | runner 失败码 BROWSE_FAILED_ERROR_TYPE / MODEL_INFO_FAILED_ERROR_TYPE 上收 definitions/conventions，handler 生产侧与 webapp/\_responses 两侧同引；守护测试更名 test_error_type_slot_values_registered，语义调整为 error_type 槽位取值同源校验                                                            |
 | v1.9      | 2026-10-26 | 并行生成上限 MAX_PARALLEL_REQUEST_COUNT 上收 definitions/conventions，validators 改为引用并同步全部消费方导入，单点定义入 test_consistency_guards 守护                                                                                                                                                   |
 | v1.8      | 2026-10-20 | 新增 definitions 定义域（S8、D1 行与豁免、术语、近名对、扩展路径）；新增阅读指南、设计原则、架构总览三章；「六域」双义拆解为「tests 六域镜像」与七域「域包」；D3 快照外移附录 A；全部条款增补意图行，有守护锚点的条款补机器执行行；行文约定改引 writing-guide.md；工具名常量上收 definitions/conventions |

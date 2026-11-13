@@ -18,7 +18,7 @@ import threading
 import time
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from mcp.types import ImageContent
 
@@ -84,17 +84,15 @@ def _flatten_to_rgb(image: Image.Image) -> Image.Image:
     return image
 
 
-def build_thumbnail_bytes(image_path: Path) -> bytes | None:
-    """读取图片文件并生成 JPEG 缩略图字节。
+class _DecodeOutcome(NamedTuple):
+    """单次缩略图解码的结果与失败原因，供调用方跳过告警携带原因。"""
 
-    经 PIL thumbnail 缩放，保持纵横比且只缩小不放大，小于上限的原图按原尺寸
-    编码。数据损坏、解码超限等生成失败统一归一为 None，跳过策略由调用方决定。
+    data: bytes | None
+    failure_reason: str | None
 
-    Args:
-        image_path: 已保存图片的文件路径。
 
-    Returns:
-        JPEG 缩略图字节；无法生成时为 None。
+def _build_thumbnail_outcome(image_path: Path) -> _DecodeOutcome:
+    """解码单张源图生成缩略图，失败在源头留痕并把原因带给调用方。
 
     Raises:
         FileNotFoundError: 源图缺失，与生成失败分档供调用方映射。
@@ -121,7 +119,7 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
                     MAX_IMAGE_PIXELS,
                     image_path.name,
                 )
-                return None
+                return _DecodeOutcome(None, None)
             # JPEG 先请求 draft 缩尺解码：解码器按请求尺寸缩减采样，只解码必要
             # 分辨率的像素，解码量下降约 4 至 16 倍；请求尺寸取上限的两倍，为后续
             # 缩放保留质量余量。draft 须在像素数据加载前调用才生效，对非 JPEG
@@ -146,29 +144,19 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
             flattened = _flatten_to_rgb(oriented)
             buffer = BytesIO()
             flattened.save(buffer, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY)
-            return buffer.getvalue()
+            return _DecodeOutcome(buffer.getvalue(), None)
     except FileNotFoundError:
-        # 源图缺失上抛与生成失败分档，避免误记生成失败日志。
+        # 源图缺失上抛与生成失败分档，供调用方区分静默跳过与失败告警。
         raise
-    except Exception as e:
-        logger.warning("缩略图生成失败，跳过该张预览: {} -> {}", image_path.name, e)
-        return None
+    except Exception as exc:
+        logger.warning("缩略图解码失败: {} -> {}", image_path.name, exc)
+        return _DecodeOutcome(None, str(exc))
 
 
-async def build_thumbnail_bytes_limited(image_path: Path) -> bytes | None:
-    """在进程级解码限流信号量内生成单张缩略图字节。
-
-    与批量预览共用同一并发上限，Web 操作台缩略图端点等独立调用方不绕开限流；
-    信号量绑定当前事件循环且随循环更替自动重建，跨循环调用安全。
-
-    Args:
-        image_path: 已保存图片的文件路径。
-
-    Returns:
-        JPEG 缩略图字节；无法生成时为 None。
-    """
+async def _build_thumbnail_outcome_limited(image_path: Path) -> _DecodeOutcome:
+    """在进程级解码限流信号量与 CPU 卸载池内生成单张解码结果。"""
     async with _get_decode_semaphore():
-        return await run_in_cpu_pool(build_thumbnail_bytes, image_path)
+        return await run_in_cpu_pool(_build_thumbnail_outcome, image_path)
 
 
 def thumbnail_cache_root(images_root: Path) -> Path:
@@ -260,7 +248,15 @@ def reset_thumb_sweep_gate() -> None:
 
 
 # 缩略图在途去重的循环键控单飞注册表。
-_thumb_inflight: LoopKeyedInflight[Path, bytes | None] = LoopKeyedInflight()
+_thumb_inflight: LoopKeyedInflight[Path, _DecodeOutcome] = LoopKeyedInflight()
+
+
+def _log_thumbnail_skip(image_name: str, reason: str | None) -> None:
+    """记录单张预览跳过告警：缓存等待侧与无缓存直解共用，归因调用方上下文。"""
+    if reason is None:
+        logger.warning("缩略图生成失败，跳过该张预览: {}", image_name)
+        return
+    logger.warning("缩略图生成失败，跳过该张预览: {} -> {}", image_name, reason)
 
 
 async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes | None:
@@ -268,7 +264,8 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
 
     缓存键取进入解码前的一次源图 no-follow stat，解码期间源图被替换时旧键写入
     的缩略图随旧图失效，新图的键未命中重新生成；同循环内并发同键共享同一解码
-    task（跨循环各自解码），取消语义与孤儿异常兜底由 InflightEntry 承担。
+    task（跨循环各自解码），取消语义与孤儿异常兜底由 InflightEntry 承担，
+    跳过告警由各等待者在自身调用方上下文携带失败原因记录。
 
     Args:
         image_path: 已保存图片的文件路径。
@@ -304,30 +301,33 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
     if cached:
         return cached
 
+    # 失败详情在 task 体内源头记录（渲染占位符），无人等待时不产生跳过告警。
     try:
-        return await _thumb_inflight.consume_shared(
-            thumb,
-            lambda: asyncio.ensure_future(
-                _decode_and_cache_thumbnail(image_path, thumb, thumbs_root)
-            ),
+        result = await _thumb_inflight.consume_shared(
+            thumb, lambda: _decode_and_cache_thumbnail(image_path, thumb, thumbs_root)
         )
     except TransientInflightError:
         # 共享在途瞬态失败（标记混入）归生成失败降级为 None，其余异常原样上抛。
+        _log_thumbnail_skip(image_path.name, None)
         return None
+    if result.data is None:
+        _log_thumbnail_skip(image_path.name, result.failure_reason)
+        return None
+    return result.data
 
 
 async def _decode_and_cache_thumbnail(
     image_path: Path, thumb: Path, thumbs_root: Path
-) -> bytes | None:
+) -> _DecodeOutcome:
     """执行单次限流解码，成功时写入缓存，供 cached_thumbnail_bytes 在途去重。
 
     在途登记由创建方经完成回调按条目身份清理；创建者被取消时 task 继续运行，
     保护共享同一 task 的其他等待者不被连带取消。
     """
-    generated = await build_thumbnail_bytes_limited(image_path)
-    if generated is not None:
-        await asyncio.to_thread(_store_thumbnail, thumb, thumbs_root, generated)
-    return generated
+    outcome = await _build_thumbnail_outcome_limited(image_path)
+    if outcome.data is not None:
+        await asyncio.to_thread(_store_thumbnail, thumb, thumbs_root, outcome.data)
+    return outcome
 
 
 async def build_preview_contents(
@@ -353,10 +353,13 @@ async def build_preview_contents(
         try:
             if images_root is not None:
                 return await cached_thumbnail_bytes(path, images_root)
-            return await build_thumbnail_bytes_limited(path)
+            outcome = await _build_thumbnail_outcome_limited(path)
         except OSError:
             # 源图缺失与 stat 瞬时失败跳过该张。
             return None
+        if outcome.data is None:
+            _log_thumbnail_skip(path.name, outcome.failure_reason)
+        return outcome.data
 
     thumbnails = await asyncio.gather(*(_or_none(path) for path in image_paths))
     contents: list[ImageContent] = []

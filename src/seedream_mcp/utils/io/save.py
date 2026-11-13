@@ -23,6 +23,7 @@ from ..core.errors import (
     has_message_value,
 )
 from ..core.executors import CpuOffloadPoolClosedError, run_in_cpu_pool, should_offload_size
+from ..core.inflight import spawn_detached_task
 from ...definitions.defaults import (
     DEFAULT_CLEANUP_DAYS,
     DEFAULT_DATE_FOLDER,
@@ -523,7 +524,7 @@ class AutoSaveManager:
                 return
             _cleanup_gate.mark(cleanup_key, _CLEANUP_MIN_INTERVAL_SECONDS)
         # 后台执行清理，不阻塞当前请求返回；失败改写退避到期供下次重试。
-        task = asyncio.create_task(self._run_cleanup_in_background(cleanup_key))
+        task = spawn_detached_task(self._run_cleanup_in_background(cleanup_key))
         _cleanup_tasks.add(task)
         task.add_done_callback(_cleanup_tasks.discard)
 
@@ -533,7 +534,8 @@ class AutoSaveManager:
         run_cleanup_policies 宽捕获扫描级与逐项错误并收入 errors 而非上抛，逐项
         失败同样改写退避到期：目录可能仍超限，下次保存应尽快重试而非等待完整
         节流间隔；连续失败经 _apply_cleanup_failure_backoff 按次放大间隔，首次
-        重试仍为最短退避。
+        重试仍为最短退避。任务生命周期超出创建者调用，清理日志不归因到早已结束的
+        调用。
         """
         if self._cleanup_file_manager is None:
             return

@@ -689,13 +689,9 @@ def test_rebind_request_state_security_syncs_declared_audience() -> None:
     新旧策略的封签 audience 口径不一致。
     """
     from mcp.server.mcpserver import RequestStateSecurity
-    from mcp.server.request_state import RequestStateBoundary
 
-    boundary = next(
-        middleware
-        for middleware in runtime.mcp.middleware
-        if isinstance(middleware, RequestStateBoundary)
-    )
+    boundary = runtime.locate_request_state_boundary()
+    assert boundary is not None
     policy = RequestStateSecurity(keys=(b"\x01" * 32,), audience="seedream-rebind")
 
     assert runtime.rebind_request_state_security(policy) is True

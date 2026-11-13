@@ -77,10 +77,6 @@ _ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
 # 错误体完整 JSON 解析的输入上限，超限不做 dict 解析以避免大字典驻留异常对象。
 _ERROR_JSON_PARSE_LIMIT = 64 * 1024
 
-# 未显式配置 response_body_limit 时按 auto_save_max_file_size 的倍数推导，覆盖
-# 组图 15 张 b64_json 图片的最坏合法响应体。
-_RESPONSE_BODY_LIMIT_FACTOR = 20
-
 # 请求体「嵌套过深」判定阈值：默认递归限额 1000 下，json 无 C 扩展的纯 Python
 # 编码器每层容器约耗 2 个递归配额、浅栈可序列化深度约 500，取其一半留安全边。
 _REQUEST_NESTING_DEPTH_LIMIT = 250
@@ -397,14 +393,8 @@ class _ClientHTTPMixin:
         raise handle_api_error(status_code, error_data, retry_after=retry_after)
 
     def _response_body_byte_limit(self) -> int:
-        """上游响应体读取总量上限。
-
-        显式配置 response_body_limit 时直接生效；未配置时按
-        auto_save_max_file_size × _RESPONSE_BODY_LIMIT_FACTOR 推导。
-        """
-        if self.config.response_body_limit is not None:
-            return self.config.response_body_limit
-        return self.config.auto_save_max_file_size * _RESPONSE_BODY_LIMIT_FACTOR
+        """上游响应体读取总量上限，委托 config 的生效值单点。"""
+        return self.config.effective_response_body_limit()
 
     def _error_body_limit(self) -> tuple[int, bool]:
         """错误路径读体上限与超限消息是否提示环境变量调整。
@@ -416,12 +406,6 @@ class _ClientHTTPMixin:
         if total_limit < _ERROR_BODY_BYTE_LIMIT:
             return total_limit, True
         return _ERROR_BODY_BYTE_LIMIT, False
-
-    def _sse_event_truncate_threshold(self) -> int:
-        """单个 SSE 事件的截断阈值，显式配置优先，未配置时取推导下界。"""
-        if self.config.sse_event_max_size is not None:
-            return self.config.sse_event_max_size
-        return self.config.derived_sse_event_max_size()
 
     def _parsed_data_items_limit(self) -> int:
         """成功 JSON 响应 data 条目数的硬上限，与 SSE 条目上限同口径从总量上限推导。"""
@@ -676,7 +660,7 @@ class _ClientHTTPMixin:
             response,
             model_id=self.config.model_id,
             buffer_max_size=self.config.stream_buffer_max_size,
-            event_truncate_threshold=self._sse_event_truncate_threshold(),
+            event_truncate_threshold=self.config.effective_sse_event_max_size(),
             total_bytes_limit=self._response_body_byte_limit(),
             log=self.logger,
             deadline=deadline,

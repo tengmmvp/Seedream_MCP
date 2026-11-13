@@ -363,8 +363,10 @@ async def test_prepare_rechecks_inflight_after_semaphore_wait(
 
     # 等待窗口内他人登记同键在途条目，缓存保持未写。
     cache_key = (image_data_uri, (), (0.0, 0))
-    inflight_task = asyncio.ensure_future(preparer._prepare_and_cache(image_data_uri, cache_key))
-    preparer._prepare_inflight.register_if_absent(cache_key, lambda: inflight_task)
+    entry, _created = preparer._prepare_inflight.register_if_absent(
+        cache_key, lambda: preparer._prepare_and_cache(image_data_uri, cache_key)
+    )
+    inflight_task = entry.task
     await asyncio.sleep(0)
 
     semaphore.release()

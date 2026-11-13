@@ -1710,7 +1710,7 @@ def test_build_config_unparsable_int_error_mentions_env_var(
     assert "无法解析整数值" in excinfo.value.message
 
 
-# ==================== response_body_limit 响应体读取上限 ====================
+# ==================== response_body_limit 与 sse_event_max_size 生效值 ====================
 
 
 def test_build_config_loads_response_body_limit(
@@ -1729,10 +1729,7 @@ def test_build_config_loads_response_body_limit(
 def test_build_config_response_body_limit_defaults_to_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未设置时 response_body_limit 为 None。
-
-    由 client 按 auto_save_max_file_size × 20 推导。
-    """
+    """未设置时 response_body_limit 为 None，生效值由 effective_response_body_limit 推导。"""
     monkeypatch.delenv("SEEDREAM_RESPONSE_BODY_LIMIT", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\n")
@@ -1756,6 +1753,35 @@ def test_build_config_rejects_non_positive_response_body_limit(
 
     with pytest.raises(SeedreamConfigError, match="response_body_limit"):
         build_config_from_sources(env_file=str(env_file))
+
+
+def test_effective_response_body_limit_prefers_explicit_value() -> None:
+    """显式配置的 response_body_limit 直接作为生效值，优先于倍数推导。"""
+    config = SeedreamConfig(api_key="k", response_body_limit=1048576)
+
+    assert config.effective_response_body_limit() == 1048576
+
+
+def test_effective_response_body_limit_derives_from_max_file_size() -> None:
+    """未配置时生效值按 auto_save_max_file_size × 20 推导。"""
+    config = SeedreamConfig(api_key="k", auto_save_max_file_size=50 * 1024 * 1024)
+
+    assert config.effective_response_body_limit() == 50 * 1024 * 1024 * 20
+
+
+def test_effective_sse_event_max_size_prefers_explicit_value() -> None:
+    """显式配置的 sse_event_max_size 直接作为生效值，优先于推导下界。"""
+    config = SeedreamConfig(api_key="k", sse_event_max_size=128 * 1024 * 1024)
+
+    assert config.effective_sse_event_max_size() == 128 * 1024 * 1024
+
+
+def test_effective_sse_event_max_size_derives_when_unset() -> None:
+    """未配置时生效值取推导下界，与 derived_sse_event_max_size 单源一致。"""
+    config = SeedreamConfig(api_key="k")
+
+    assert config.sse_event_max_size is None
+    assert config.effective_sse_event_max_size() == config.derived_sse_event_max_size()
 
 
 # ==================== SEEDREAM_BODY_READ_TIMEOUT 大请求体读体窗口超时 ====================

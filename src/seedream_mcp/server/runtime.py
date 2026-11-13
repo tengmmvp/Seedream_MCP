@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
 
 from mcp.server.caching import CacheHint, CacheableMethod
 from mcp.server.mcpserver import MCPServer, RequestStateSecurity
-from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
 from mcp.server.request_state import RequestStateBoundary
 from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
@@ -33,16 +33,13 @@ from ..config import (
 )
 from ..utils.core.errors import as_plain, as_text, safe_error_text, validation_error_user_message
 from ..utils.core.executors import shutdown_cpu_offload_executor
-from ..utils.core.logs import get_logger
+from ..utils.core.logs import EarlyMessageBuffer, call_id_scope, get_logger
 from ..version import __version__
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
-    from mcp.server.lowlevel.helper_types import ReadResourceContents
+    from mcp.server.context import CallNext, HandlerResult, ServerMiddleware, ServerRequestContext
     from mcp.server.mcpserver import Context
     from mcp.types import CallToolResult, GetPromptResult, InputRequiredResult
-    from pydantic.networks import AnyUrl
 
     from ..client import SeedreamClient
     from ..utils.io.download import DownloadManager
@@ -284,8 +281,8 @@ def _reset_lifespan_state() -> None:
     重建 _shared_init_lock 避免跨事件循环复用旧锁；_global_config 一并复位避免
     跨用例残留，赋值经函数内延迟 import 取当前 config 模块对象，测试重载模块后
     不会清错目标。CPU 卸载池随活动配置派生池深，关闭后待按需重建。path 的
-    resolve 缓存与 config 的构建告警缓冲同属复位协议，一并在此收口；conftest 仅
-    补充测试域专属状态。
+    resolve 缓存、config 的构建告警缓冲与导入期告警缓冲同属复位协议，
+    一并在此收口；conftest 仅补充测试域专属状态。
     """
     global _shared_init_lock, _active_resource
     _active_resource = None
@@ -296,6 +293,7 @@ def _reset_lifespan_state() -> None:
 
     config_builder._global_config = None
     _BUILD_WARNINGS.clear()
+    _IMPORT_TIME_WARNINGS.clear()
     _shared_init_lock = asyncio.Lock()
     shutdown_cpu_offload_executor()
     from ..utils.images.thumbnail import reset_thumb_sweep_gate
@@ -335,6 +333,82 @@ def _build_request_state_security() -> RequestStateSecurity | None:
     if not keys:
         return None
     return RequestStateSecurity(keys=keys)
+
+
+class _CallIdScopeMiddleware:
+    """请求在 SDK 分发层开调用关联作用域，SDK 日志与崩溃行同 ID 归因。"""
+
+    # 以 request_id 为 None 判定通知而非枚举请求方法：枚举遗漏新请求方法时
+    # 其日志静默落占位符。同一轮请求内 roots 解析与工具函数全程同 ID。
+    # 多轮流程（InputRequired）每腿是独立 wire 请求，各分配新 ID。
+    # 跨轮不继承为已裁决语义，勿实现继承。
+    async def __call__(
+        self,
+        ctx: ServerRequestContext[Any, Any],
+        call_next: CallNext,
+    ) -> HandlerResult:
+        if ctx.request_id is None:
+            return await call_next(ctx)
+        with call_id_scope():
+            return await call_next(ctx)
+
+
+def _first_middleware_of_type[T](
+    chain: Sequence[ServerMiddleware[Any]] | None,
+    cls: type[T],
+) -> T | None:
+    """返回 middleware 链中首个指定类型的中间件，链缺失或未命中返回 None。
+
+    前移与密钥环重绑的链内类型查找共用此单点。
+    """
+    return next(
+        (middleware for middleware in chain or () if isinstance(middleware, cls)),
+        None,
+    )
+
+
+# 导入期告警缓冲：前移探测早于日志系统初始化，漂移告警先进队列。
+# 由 drain_pending_import_time_warnings 在 setup_logging 之后冲刷进文件通道。
+_IMPORT_TIME_WARNINGS = EarlyMessageBuffer()
+
+
+def drain_pending_import_time_warnings() -> None:
+    """输出并清空导入期缓冲的前移漂移告警。
+
+    server 在日志系统就绪后调用。嵌入式调用方需自行调用，否则缓冲中的告警不输出。
+    """
+    _IMPORT_TIME_WARNINGS.drain()
+
+
+def _move_call_id_scope_outside_boundary(server: MCPServer) -> None:
+    """调用关联作用域中间件前移到「RequestStateBoundary」之前，成为更外层。
+
+    SDK 构造先 append boundary 再 extend 用户 middleware，
+    经构造参数注入的作用域中间件位于 boundary 内层，
+    boundary 的解封/封存失败日志在作用域之外触发、渲染占位符。
+    经 provisional 属性 mcp.middleware 前移：列表构造后可变，
+    分发逐请求按列表序折叠。探测失败时保持构造位并告警，
+    作用域仍覆盖 handler 与项目侧日志。
+    """
+    chain = getattr(server, "middleware", None)
+    # 形态守卫置于使用前：非可变列表链不可原位前移。
+    if isinstance(chain, list):
+        boundary = _first_middleware_of_type(chain, RequestStateBoundary)
+        scope = _first_middleware_of_type(chain, _CallIdScopeMiddleware)
+        if boundary is not None and scope is not None:
+            boundary_index = chain.index(boundary)
+            scope_index = chain.index(scope)
+            if boundary_index < scope_index:
+                chain.insert(boundary_index, chain.pop(scope_index))
+            # 已在 boundary 之外时幂等静默。
+            return
+    drift_warning = (
+        "SDK middleware 链形态变化，调用关联作用域中间件未前移到"
+        "「RequestStateBoundary」之外，requestState 失败日志将渲染占位符"
+    )
+    # 导入期即时告警，同消息进缓冲由启动路径回放。
+    logger.warning(drift_warning)
+    _IMPORT_TIME_WARNINGS.append_once("WARNING", drift_warning)
 
 
 def _locate_validation_error(exc: BaseException) -> ValidationError | None:
@@ -427,32 +501,10 @@ class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
             )
         return await super().call_tool(name, arguments, context)
 
-    async def read_resource(
-        self,
-        uri: "AnyUrl | str",
-        context: "Context[dict[str, Any], Any] | None" = None,
-    ) -> "Iterable[ReadResourceContents] | InputRequiredResult":
-        # mcp 2.0.0 把 handler 异常经资源函数层 ValueError 中转（无 from、仅
-        # __context__）后重包装为普通 ResourceError，子类判定丢失致 -32602 沉为
-        # -32603；沿因果链归位 ResourceNotFoundError。
-        try:
-            return await super().read_resource(uri, context)
-        except ResourceError as exc:
-            chained: BaseException | None = exc
-            seen: set[int] = set()
-            while chained is not None and id(chained) not in seen:
-                if isinstance(chained, ResourceNotFoundError):
-                    raise chained
-                seen.add(id(chained))
-                chained = chained.__cause__ or (
-                    chained.__context__ if not chained.__suppress_context__ else None
-                )
-            raise
-
 
 def _create_mcp_server() -> MCPServer:
-    """构造进程级 MCPServer 实例，静态列表面附缓存提示并按配置启用密钥环。"""
-    return _SeedreamMCPServer(
+    """构造进程级 MCPServer 实例，静态列表面附缓存提示、按配置启用密钥环并挂调用关联作用域中间件。"""
+    server = _SeedreamMCPServer(
         SERVER_NAME,
         title=SERVER_TITLE,
         description=SERVER_DESCRIPTION,
@@ -461,7 +513,10 @@ def _create_mcp_server() -> MCPServer:
         lifespan=app_lifespan,
         cache_hints=_STATIC_LIST_CACHE_HINTS,
         request_state_security=_build_request_state_security(),
+        middleware=(_CallIdScopeMiddleware(),),
     )
+    _move_call_id_scope_outside_boundary(server)
+    return server
 
 
 # 导入期默认环境源探测到的密钥环：单例已持该环时重绑失败不影响解封。
@@ -501,18 +556,11 @@ def _warn_rebind_failure_on_stderr(
 
 
 def locate_request_state_boundary() -> RequestStateBoundary | None:
-    """返回单例 middleware 链中的 requestState boundary，探测失败返回 None。
+    """返回单例 mcp middleware 链中的 requestState boundary，探测失败返回 None。
 
-    SDK 私有路径变更时只改此处。
+    test_cli_log_init_failure 以零参 lambda 替换本函数驱动重绑失败分支。
     """
-    return next(
-        (
-            middleware
-            for middleware in getattr(mcp, "middleware", None) or ()
-            if isinstance(middleware, RequestStateBoundary)
-        ),
-        None,
-    )
+    return _first_middleware_of_type(getattr(mcp, "middleware", None), RequestStateBoundary)
 
 
 def rebind_request_state_security(

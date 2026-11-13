@@ -1,6 +1,7 @@
 """streamable-http 传输选项与鉴权中间件测试。
 
-覆盖 CLI 启动守卫、Bearer 鉴权中间件、绑定地址的传输安全派生与传输关闭行为。
+覆盖 CLI 启动守卫、Bearer 鉴权中间件、绑定地址的传输安全派生、
+传输关闭行为与 ASGI 调用关联作用域。
 """
 
 import asyncio
@@ -11,7 +12,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from starlette.types import Receive, Send
+from starlette.types import Message, Receive, Send
 
 import seedream_mcp.server.bootstrap as bootstrap_module
 import seedream_mcp.server.cli as cli
@@ -19,9 +20,17 @@ import seedream_mcp.server as server
 import seedream_mcp.server.transport as transport_module
 from seedream_mcp.config.host_syntax import bind_host_invalid_reason
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.utils.core.logs import call_id_scope, get_logger
 from seedream_mcp.utils.model.capabilities import MODEL_ALIASES
 
 from _lib.cli_fakes import make_run_args, stub_cli_main
+from _lib.log_fakes import (
+    assert_single_shared_real_call_id,
+    capturing_call_id_records,
+    capture_loguru_messages,
+    is_real_call_id,
+    stage_call_ids,
+)
 
 
 def test_build_arg_parser_rejects_deprecated_sse_transport() -> None:
@@ -193,6 +202,23 @@ def test_cli_main_forwards_web_enabled_to_http_runner(
 
     assert server.cli_main() == 0
     assert captured["web_enabled"] is True
+
+
+def test_cli_main_logs_effective_response_body_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启动「生成链路生效值」日志含 response_body_limit 键与缺省推导值（50MB × 20）。"""
+    args = make_run_args("stdio")
+    config = SeedreamConfig(api_key="test_key")
+    stub_cli_main(monkeypatch, args, config)
+    messages: list[str] = []
+
+    with capture_loguru_messages(messages, level="INFO"):
+        assert server.cli_main() == 0
+
+    effective_lines = [message for message in messages if "生成链路生效值" in message]
+    assert effective_lines, "启动日志缺少「生成链路生效值」行"
+    assert f"response_body_limit={50 * 1024 * 1024 * 20}" in effective_lines[0]
 
 
 def test_cli_main_refuses_non_loopback_http_without_auth_token(
@@ -923,3 +949,107 @@ def test_register_well_known_mcp_route_is_idempotent() -> None:
     ]
 
     assert paths.count(transport_module.WELL_KNOWN_MCP_PATH) == 1
+
+
+# ==================== ASGI 调用关联作用域 ====================
+
+
+async def test_call_id_scope_middleware_passes_non_http_scope_through() -> None:
+    """lifespan 等非 http 流量直接透传，不开调用关联作用域。"""
+    reached: list[object] = []
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        del receive, send
+        reached.append(scope["type"])
+
+    middleware = transport_module._CallIdScopeMiddleware(downstream)
+    await middleware({"type": "lifespan"}, cast(Receive, None), cast(Send, None))
+
+    assert reached == ["lifespan"]
+
+
+async def test_call_id_scope_mints_fresh_id_per_request_leg() -> None:
+    """每请求腿一 ID：无内层作用域的下游日志同样归因，先后两腿各持相异真实 call_id。"""
+    records: list[Any] = []
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        del scope, receive, send
+        get_logger().info("handler-stage-probe")
+
+    middleware = transport_module._CallIdScopeMiddleware(downstream)
+
+    with capturing_call_id_records(records):
+        await middleware({"type": "http"}, cast(Receive, None), cast(Send, None))
+        await middleware({"type": "http"}, cast(Receive, None), cast(Send, None))
+
+    leg_ids = stage_call_ids(records, "handler-stage-probe")
+    assert len(leg_ids) == 2
+    assert all(is_real_call_id(value) for value in leg_ids)
+    assert leg_ids[0] != leg_ids[1]
+
+
+async def test_body_limit_skip_warning_shares_call_id_with_handler_line() -> None:
+    """流中超限跳过补发 413 的传输层告警携带真实 call_id，与同请求 handler 侧行同 ID。
+
+    下游经 call_id_scope 开作用域镜像分发层注册点形态：外层 ASGI 作用域分配 ID、
+    内层复用。
+    """
+    records: list[Any] = []
+    frames: list[Message] = [
+        {"type": "http.request", "body": b"x" * 600, "more_body": True},
+        {"type": "http.request", "body": b"x" * 600, "more_body": False},
+    ]
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return frames.pop(0)
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        with call_id_scope():
+            get_logger().info("handler-stage-probe")
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            while True:
+                message = await receive()
+                if message.get("type") != "http.request" or not message.get("more_body", False):
+                    break
+            await send({"type": "http.response.body", "body": b"partial"})
+
+    middleware = transport_module._CallIdScopeMiddleware(
+        transport_module._LimitRequestBodyMiddleware(downstream, 1024)
+    )
+
+    with capturing_call_id_records(records):
+        await middleware({"type": "http", "headers": []}, cast(Receive, receive), cast(Send, send))
+
+    assert_single_shared_real_call_id(records, "跳过补发 413", "handler-stage-probe")
+    starts = [message for message in sent if message.get("type") == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 200
+
+
+async def test_error_boundary_log_shares_call_id_with_handler_line() -> None:
+    """异常边界的未捕获异常 ERROR 行携带真实 call_id，与同请求 handler 侧行同 ID。"""
+    records: list[Any] = []
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        del scope, receive
+        with call_id_scope():
+            get_logger().info("handler-stage-probe")
+            raise RuntimeError("boom")
+
+    middleware = transport_module._CallIdScopeMiddleware(
+        transport_module._ErrorBoundaryMiddleware(downstream)
+    )
+
+    with capturing_call_id_records(records):
+        await middleware({"type": "http", "headers": []}, cast(Receive, None), cast(Send, send))
+
+    assert_single_shared_real_call_id(records, "未捕获异常", "handler-stage-probe")
+    assert sent[0]["status"] == 500

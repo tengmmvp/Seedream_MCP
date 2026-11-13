@@ -15,6 +15,7 @@ from ..config import drain_pending_build_warnings, set_active_config
 from .runtime import (
     SERVER_NAME,
     SERVER_VERSION,
+    drain_pending_import_time_warnings,
     mcp,
     rebind_request_state_security,
     sync_cleanup,
@@ -69,6 +70,7 @@ def cli_main() -> int:
         return 1
     drain_pending_start_messages()
     drain_pending_build_warnings()
+    drain_pending_import_time_warnings()
 
     # 按最终活动配置重绑导入期固化的密钥环，使 --config-file 携带的密钥生效；
     # 置于日志系统就绪后，探测失败的 ERROR 落入文件通道；失败不阻断启动。
@@ -78,6 +80,15 @@ def cli_main() -> int:
         "Seedream MCP 启动: {} (version {})",
         SERVER_NAME,
         SERVER_VERSION,
+    )
+    # 生成链路生效值随启动落日志：事故排障时无需按环境变量与推导规则反推阈值。
+    logger.info(
+        "生成链路生效值: generate_concurrency={}, stream_buffer_max_size={}, "
+        "sse_event_max_size={}, response_body_limit={}",
+        config.generate_concurrency,
+        config.stream_buffer_max_size,
+        config.effective_sse_event_max_size(),
+        config.effective_response_body_limit(),
     )
 
     try:

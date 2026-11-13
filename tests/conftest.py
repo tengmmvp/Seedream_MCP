@@ -1,6 +1,7 @@
 """共享测试 fixture。
 
 lifespan 复位类 fixture 经 _lifespan_state_guard 参数化收敛，各测试文件不再自持副本。
+级别参数化的日志捕获薄 fixture 经 _lib.capturing_call_id_records 装配。
 顶层导入 seedream_mcp.server 完成工具注册，任意子集运行不依赖收集顺序。
 """
 
@@ -18,6 +19,8 @@ import pytest
 
 import seedream_mcp.server  # noqa: F401  工具注册发生在 server 导入期
 from seedream_mcp.config import ENV_FAMILY_PREFIXES, SeedreamConfig
+
+from _lib.log_fakes import capturing_call_id_records
 
 
 def _warn_sdk_private_path_missing(path: str, impact: str) -> None:
@@ -134,6 +137,31 @@ async def reset_http_app_state(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
     """
     async with _lifespan_state_guard(monkeypatch, inject_config=True, clear_session_manager=True):
         yield
+
+
+def _capture_level_records(level: str) -> Iterator[list[Any]]:
+    """按级别装配 capturing_call_id_records 并产出记录列表。"""
+    records: list[Any] = []
+    with capturing_call_id_records(records, level=level):
+        yield records
+
+
+@pytest.fixture
+def debug_log_records() -> Iterator[list[Any]]:
+    """DEBUG 级日志记录捕获。"""
+    yield from _capture_level_records("DEBUG")
+
+
+@pytest.fixture
+def warning_records() -> Iterator[list[Any]]:
+    """WARNING 级日志记录捕获。"""
+    yield from _capture_level_records("WARNING")
+
+
+@pytest.fixture
+def error_log_records() -> Iterator[list[Any]]:
+    """ERROR 级日志记录捕获。"""
+    yield from _capture_level_records("ERROR")
 
 
 @pytest.fixture(autouse=True)

@@ -4,6 +4,8 @@
 ``workspace_roots_scope_from_result`` 应用 MCP Roots 工作区边界，roots 结果由
 server 层按协商版本取回注入；再将 pydantic 校验后的入参模型委托给对应
 ``handle_*``。依赖方向为 pipeline <- handlers <- runners，避免 pipeline 反向依赖 handlers。
+全部 ``run_*`` 经 ``call_id_scope`` 兜底进入调用关联作用域，生产路径外层已开时
+复用其 ID。调用内全链日志行据此配对归因。
 输出通道（缩略图预览与 JSON 镜像）由调用方经 ``output_channels_scope``
 作用域开关，runner 与 handler 签名不感知通道开关。
 """
@@ -17,6 +19,7 @@ from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, ListRootsResult
 
 from ..config import SeedreamConfig
+from ..utils.core.logs import call_id_scope
 from ..utils.io.roots import workspace_roots_scope_from_result
 from .schemas import (
     BrowseImagesInput,
@@ -52,8 +55,9 @@ async def _run_generation_tool(
     workspace_roots: ListRootsResult | None = None,
 ) -> CallToolResult:
     """在工作区边界作用域内将类型化入参模型委托给生成 handler。"""
-    async with workspace_roots_scope_from_result(workspace_roots):
-        return await handler(params, config, ctx)
+    with call_id_scope():
+        async with workspace_roots_scope_from_result(workspace_roots):
+            return await handler(params, config, ctx)
 
 
 async def run_text_to_image(
@@ -124,10 +128,12 @@ async def run_browse_images(
         entry_bound: 请求目录与条目共用的替代界（EntryBound），请求目录越出界
             以同界门拒绝，条目与读权限求交后生效，None 时按读权限过滤。
     """
-    async with workspace_roots_scope_from_result(workspace_roots):
-        return await handle_browse_images(params, ctx=ctx, entry_bound=entry_bound)
+    with call_id_scope():
+        async with workspace_roots_scope_from_result(workspace_roots):
+            return await handle_browse_images(params, ctx=ctx, entry_bound=entry_bound)
 
 
 async def run_get_model_info(config: SeedreamConfig) -> CallToolResult:
     """委托 ``handle_get_model_info`` 返回当前配置模型的能力快照。"""
-    return await handle_get_model_info(config)
+    with call_id_scope():
+        return await handle_get_model_info(config)

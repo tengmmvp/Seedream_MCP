@@ -255,12 +255,13 @@ async def workspace_roots_scope_from_result(
 ) -> AsyncIterator[list[Path]]:
     """在当前请求作用域内应用经工具 resolver 注入的 MCP Roots。
 
-    SEP-2577 非废弃形态：工具链不经 ctx.session.list_roots 直连，由 server 工具
-    签名的 Resolve 依赖按协商版本取回后注入本函数消费。roots_result 为 None 表示
-    客户端未声明 roots capability，此处不设置边界、下游回退到环境回退根；取回失败
-    在调用层报错而非在此降级，不放宽文件访问边界。file URI 转 Path 的
-    resolve 属同步文件系统调用，下沉工作线程执行，与 browse 链路的目录预解析
-    同一口径。
+    Roots 特性整体已弃用（2026-07-28 规范 SEP-2577，移除资格不早于 2027-07-28）：
+    工具链不经 ctx.session.list_roots 直连，由 server 工具签名的 Resolve 依赖
+    按协商版本取回后注入本函数消费，仅免旧直连形态的弃用告警。
+    roots_result 为 None 表示客户端未声明 roots capability，此处不设置边界、
+    下游回退到环境回退根；取回失败在调用层报错而非在此降级，
+    不放宽文件访问边界。file URI 转 Path 的 resolve 属同步文件系统调用，
+    下沉工作线程执行，与 browse 链路的目录预解析同一口径。
 
     Args:
         roots_result: 依赖解析器注入的客户端 roots 结果；未声明能力时为 None。

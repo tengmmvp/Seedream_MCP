@@ -16,10 +16,14 @@ from typing import Any, cast
 
 import pytest
 from starlette.middleware.cors import CORSMiddleware
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.types import Message, Receive, Send
 
-from _lib.log_fakes import capture_loguru_messages
+from _lib.log_fakes import (
+    assert_single_shared_real_call_id,
+    capture_loguru_messages,
+    capturing_call_id_records,
+)
 import seedream_mcp.server.transport as transport_module
 from seedream_mcp.config.host_syntax import bind_host_invalid_reason
 from seedream_mcp.config import SeedreamConfig
@@ -30,6 +34,7 @@ from seedream_mcp.server.transport import (
     _BODYLESS_METHODS,
     _BodyReadAdmission,
     _BodyReadPolicy,
+    _CallIdScopeMiddleware,
     _ErrorBoundaryMiddleware,
     _HealthCheckMiddleware,
     _LargeBodyAdmissionMiddleware,
@@ -46,7 +51,7 @@ from seedream_mcp.server.transport import (
     is_loopback_bind_host,
     warn_remote_exposure,
 )
-from seedream_mcp.utils.core.logs import _sink_filter, get_logger
+from seedream_mcp.utils.core.logs import _sink_filter, call_id_scope, get_logger
 from seedream_mcp.utils.core.loop_bound import loop_bound_semaphore
 from seedream_mcp.webapp.constants import (
     WEB_API_PREFIX,
@@ -92,15 +97,16 @@ def active_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_attach_assembles_full_stack_for_loopback_with_token(active_config: None) -> None:
-    """回环绑定且配置令牌时装配五层：Bearer、请求体上限、健康检查、Host 校验与大请求体准入。"""
+    """回环绑定且配置令牌时装配六层：调用关联作用域、Host 校验、健康检查、请求体上限、Bearer 与大请求体准入。"""
     app = _FakeStarletteApp()
 
     _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
 
-    # add_middleware 经 insert(0) 使后添加者居前：Host 校验最外，先于健康检查
-    # 拒掉 rebinding 域名请求；健康检查居鉴权之外探针免令牌；Bearer 之内是准入闸，
-    # 未鉴权请求不占准入许可。
+    # add_middleware 经 insert(0) 使后添加者居前：调用关联作用域居全链最外，
+    # Host 校验先于健康检查拒掉 rebinding 域名请求；健康检查居鉴权之外探针免令牌；
+    # Bearer 之内是准入闸，未鉴权请求不占准入许可。
     assert app.attached_classes() == [
+        _CallIdScopeMiddleware,
         _LoopbackHostGuardMiddleware,
         _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
@@ -112,12 +118,13 @@ def test_attach_assembles_full_stack_for_loopback_with_token(active_config: None
 def test_attach_skips_auth_and_host_guard_for_remote_without_token(
     active_config: None,
 ) -> None:
-    """非回环且无令牌时仅装配请求体上限、健康检查与大请求体准入三层。"""
+    """非回环且无令牌时仅装配调用关联作用域、健康检查、请求体上限与大请求体准入四层。"""
     app = _FakeStarletteApp()
 
     _attach_streamable_http_middleware(app, "0.0.0.0", "")
 
     assert app.attached_classes() == [
+        _CallIdScopeMiddleware,
         _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
         _LargeBodyAdmissionMiddleware,
@@ -143,6 +150,7 @@ def test_attach_assembles_cors_when_origins_configured(
     _attach_streamable_http_middleware(app, "0.0.0.0", "secret")
 
     assert app.attached_classes() == [
+        _CallIdScopeMiddleware,
         CORSMiddleware,
         _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
@@ -331,6 +339,7 @@ def test_attach_passes_config_body_limit_to_limit_layer(
     _attach_streamable_http_middleware(app, "127.0.0.1", "")
 
     assert app.attached_classes() == [
+        _CallIdScopeMiddleware,
         _LoopbackHostGuardMiddleware,
         _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
@@ -361,6 +370,7 @@ def test_attach_reads_active_config_once(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert reads["count"] == 1
     assert app.attached_classes() == [
+        _CallIdScopeMiddleware,
         _LoopbackHostGuardMiddleware,
         _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
@@ -450,8 +460,10 @@ def test_attach_assembles_origin_guard_for_web_without_token(active_config: None
     _attach_streamable_http_middleware(app, "127.0.0.1", "", web_enabled=True)
 
     # 守卫与 Bearer 同槽：add_middleware 后添加者居前，守卫先于请求体上限装配，
-    # 执行序依次为 LoopbackHostGuard、HealthCheck、LimitRequestBody、Guard、准入闸。
+    # 执行序依次为 CallIdScope、LoopbackHostGuard、HealthCheck、LimitRequestBody、
+    # Guard、准入闸。
     assert app.attached_classes() == [
+        _CallIdScopeMiddleware,
         _LoopbackHostGuardMiddleware,
         _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
@@ -613,7 +625,7 @@ def test_attach_assembles_app_host_guard_for_web_on_non_loopback(
         "localhost:*",
         "proxy.example.com",
     )
-    assert app.attached_classes()[0] is _AppHostGuardMiddleware
+    assert app.attached_classes()[:2] == [_CallIdScopeMiddleware, _AppHostGuardMiddleware]
 
 
 def test_app_host_guard_config_replaces_derived_bind_entries() -> None:
@@ -3019,6 +3031,44 @@ async def test_large_body_admission_te_get_never_ending_survives_window_after_re
     await asyncio.wait_for(request, timeout=5)
     assert not request.cancelled()
     assert spy.release_calls == 1, "响应期归还后收尾不得二次归还"
+
+
+async def test_read_window_client_disconnect_log_carries_call_id() -> None:
+    """读体窗口内客户端断开的放弃行携带真实 call_id，与同请求 handler 侧行同 ID。"""
+    records: list[Any] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        # 镜像分发层注册点形态：外层 ASGI 作用域分配 ID、内层复用。
+        with call_id_scope():
+            get_logger().info("handler-stage-probe")
+        while (await receive()).get("type") != "http.disconnect":
+            pass
+        # 镜像 starlette Request.stream()：读体中途断连以 ClientDisconnect 上抛。
+        raise ClientDisconnect()
+
+    receive_calls = {"count": 0}
+
+    async def receive() -> Message:
+        receive_calls["count"] += 1
+        if receive_calls["count"] == 1:
+            return {"type": "http.request", "body": b"x" * 32, "more_body": True}
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        del message
+
+    # 阈值 16 使首帧 32 字节即越阈持闸，断连在读体窗口内到达。
+    middleware = _CallIdScopeMiddleware(_admission_stack(downstream, 1, 30, 16))
+
+    with capturing_call_id_records(records):
+        await middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")], method="GET"),
+            cast(Receive, receive),
+            cast(Send, send),
+        )
+
+    assert_single_shared_real_call_id(records, "读体窗口内客户端断开", "handler-stage-probe")
 
 
 async def test_large_body_admission_over_threshold_frame_after_response_start_skips_reacquire(

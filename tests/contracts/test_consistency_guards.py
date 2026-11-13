@@ -8,6 +8,7 @@ webapp 错误状态表与错误档案及错误码槽位取值、
 错误段分隔符的拼装点消费与内联字面量边界守护，
 error_text 两步坍缩形态的生产者收口守护，
 吞异常 error 日志的堆栈携带守护，
+run_* 入口的调用关联作用域开启守护，
 download.py PermissionError 处理器归类守护，以及 repo-layout.md 仓库与 tests
 结构契约的静态守护。新增取值或改名时两侧须同步，本文件在各处失败即暴露漂移。
 """
@@ -1248,6 +1249,57 @@ def test_context_probe_keys_match_schema_fields() -> None:
     ), f"context 探测键不在任何输入模型字段或访问器中: {sorted(probed - declared)}"
 
 
+def _opens_call_id_scope(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """判定函数体是否以 with/async with call_id_scope() 开启调用关联作用域。"""
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            continue
+        if any(
+            isinstance(item.context_expr, ast.Call)
+            and _call_tail_name(item.context_expr) == "call_id_scope"
+            for item in node.items
+        ):
+            return True
+    return False
+
+
+def _delegates_generation_tool(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """判定函数体是否经 _run_generation_tool 委托。"""
+    return any(
+        _call_tail_name(node) == "_run_generation_tool"
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call)
+    )
+
+
+def test_run_tool_entries_open_call_id_scope() -> None:
+    """runners 的每个 run_* 公开入口直接或经 _run_generation_tool 进入调用关联作用域。
+
+    名单由 AST 直接发现，新增 run_* 忘开作用域即红。
+    委托形态以 _run_generation_tool 自身包裹为前提，一并断言。
+    """
+    tree = _cached_parse(_SRC_ROOT / "tools" / "runners.py")
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    delegate = functions.get("_run_generation_tool")
+    assert delegate is not None and _opens_call_id_scope(
+        delegate
+    ), "_run_generation_tool 未开启调用关联作用域，委托形态入口随之失守"
+
+    offenders = sorted(
+        name
+        for name, node in functions.items()
+        if name.startswith("run_")
+        and not _opens_call_id_scope(node)
+        and not _delegates_generation_tool(node)
+    )
+    assert offenders == [], f"run_* 入口未进入调用关联作用域: {offenders}"
+
+
 # ==================== 零覆盖小面 ====================
 
 
@@ -1302,7 +1354,9 @@ _ALLOWED_MODULE_DEPS: dict[str, frozenset[str]] = {
     "tools.handlers": frozenset(
         {"tools.pipeline", "tools.schemas", "tools.outputs", "config", "utils"}
     ),
-    "tools.runners": frozenset({"tools.handlers", "tools.schemas", "config", "utils.io"}),
+    "tools.runners": frozenset(
+        {"tools.handlers", "tools.schemas", "config", "utils.core", "utils.io"}
+    ),
     "server": frozenset({"tools", "config", "utils"}),
     "webapp": frozenset({"tools", "config", "utils"}),
     "seedream_mcp": frozenset({"client", "config", "server"}),

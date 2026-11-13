@@ -1,7 +1,10 @@
 """setup_logging 行为测试与日志控制字符 patcher、孤儿任务异常日志测试。"""
 
 import asyncio
+import gc
+import inspect
 import logging
+import warnings
 from collections import namedtuple
 from collections.abc import Generator
 from pathlib import Path
@@ -13,14 +16,22 @@ from loguru import logger
 from seedream_mcp.utils.core.inflight import (
     arm_unretrieved_exception_logging,
     log_unretrieved_task_exception,
+    spawn_detached_task,
 )
 from seedream_mcp.utils.core.logs import (
+    CALL_ID_PLACEHOLDER,
     EarlyMessageBuffer,
     _strip_message_control_chars,
+    call_id_scope,
     setup_logging,
 )
 
-from _lib.log_fakes import RecordingLogger, preserved_loguru_globals
+from _lib.log_fakes import (
+    RecordingLogger,
+    capturing_call_id_records,
+    preserved_loguru_globals,
+    stage_call_ids,
+)
 
 # 模拟 loguru record["exception"] 的 RecordException 结构，含 type、value、traceback 三元组
 _RecordException = namedtuple("_RecordException", "type value traceback")
@@ -659,3 +670,51 @@ async def test_inflight_entry_orphan_failure_logged_once_across_rearm(
 
     # 重排的回调复查后跳过，同一失败不二次入日志
     assert capture.warnings == ["后台共享任务失败: orphan failed"]
+
+
+async def test_orphan_warning_after_consumer_cancel_renders_placeholder_call_id() -> None:
+    """持 call_id 的消费者放弃后孤儿告警渲染占位符，不误挂早已结束的调用。"""
+    from seedream_mcp.utils.core import inflight
+
+    records: list[Any] = []
+    with capturing_call_id_records(records, level="WARNING"):
+        started = asyncio.Event()
+
+        async def failing() -> str:
+            started.set()
+            await asyncio.sleep(0.05)
+            raise RuntimeError("orphan failed")
+
+        with call_id_scope():
+            entry = inflight.InflightEntry(spawn_detached_task(failing()))
+            consumer = asyncio.ensure_future(entry.consume())
+            await started.wait()
+            consumer.cancel()
+            while not consumer.done():
+                await asyncio.sleep(0)
+        # 完成回调按登记序先于 wait 的唤醒执行，返回时孤儿告警已入记录。
+        await asyncio.wait([entry.task])
+
+    assert stage_call_ids(records, "后台共享任务失败") == [CALL_ID_PLACEHOLDER]
+
+
+async def test_spawn_detached_task_immediate_cancel_closes_coroutine() -> None:
+    """创建后立即取消的脱钩后台 task 关闭内部协程，不产生 "was never awaited" 告警。"""
+
+    async def payload() -> None:
+        await asyncio.sleep(3600)
+
+    coro = payload()
+    task = spawn_detached_task(coro)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        del coro, task
+        gc.collect()
+    assert not [entry for entry in caught if "was never awaited" in str(entry.message)]

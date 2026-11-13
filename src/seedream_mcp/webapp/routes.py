@@ -6,7 +6,8 @@
 
 handler 按域拆分：meta（入口页/重定向/config-info）、generate（四个生成端点）、
 gallery（图库浏览）、files（缩略图与原图）；新增端点时在对应域模块实现后于
-下方注册表登记一行。
+下方注册表登记一行。调用关联作用域由 transport 的 ASGI 最外层中间件单点分配，
+端点内日志按请求归因。
 """
 
 from __future__ import annotations

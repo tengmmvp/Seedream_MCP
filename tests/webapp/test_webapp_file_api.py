@@ -12,6 +12,7 @@ from typing import IO, Any
 import pytest
 
 from _lib.inflight_fakes import _reap_if_pending, cancel_shared_leader
+from _lib.log_fakes import capturing_call_id_records, is_real_call_id, stage_call_ids
 from _lib.web_fixtures import (
     _assert_endpoint_error,
     asgi_body_bytes,
@@ -468,7 +469,7 @@ async def test_thumbnail_decode_concurrency_capped_by_semaphore(
     # barrier 迫使两路解码物理重叠后才放行，串行执行会在此超时失败而非侥幸通过。
     pair_gate = threading.Barrier(2, timeout=10)
 
-    def _fake_decode(image_path: Path) -> bytes | None:
+    def _fake_decode(image_path: Path) -> image_thumbnail_module._DecodeOutcome:
         del image_path
         nonlocal active, peak, calls
         calls += 1
@@ -476,9 +477,9 @@ async def test_thumbnail_decode_concurrency_capped_by_semaphore(
         peak = max(peak, active)
         pair_gate.wait()
         active -= 1
-        return b"\xff\xd8\xff"
+        return image_thumbnail_module._DecodeOutcome(b"\xff\xd8\xff", None)
 
-    monkeypatch.setattr(image_thumbnail_module, "build_thumbnail_bytes", _fake_decode)
+    monkeypatch.setattr(image_thumbnail_module, "_build_thumbnail_outcome", _fake_decode)
 
     paths = [f"2026-08-20/text_to_image/{name}.png" for name in "abcdef"]
     async with web_asgi_client(web_app_with_image) as client:
@@ -532,6 +533,25 @@ async def test_thumbnail_build_failure_returns_422(
 
     payload = _assert_endpoint_error(response, "thumbnail_failed", status=422)
     assert payload["error"] == {"type": "thumbnail_failed", "message": "缩略图生成失败"}
+
+
+async def test_thumbnail_failure_warning_carries_call_id(
+    web_app_with_image: Any, tmp_path: Path
+) -> None:
+    """损坏图片的跳过告警携带真实 call_id：调用关联作用域由 ASGI 链最外层中间件统一开启。"""
+    image_path = tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png"
+    image_path.write_bytes(b"corrupt-bytes-not-an-image")
+
+    records: list[Any] = []
+    with capturing_call_id_records(records, level="WARNING"):
+        response = await web_get(
+            web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"
+        )
+
+    assert response.status_code == 422
+    failure_ids = stage_call_ids(records, "缩略图生成失败")
+    assert failure_ids
+    assert is_real_call_id(failure_ids[0])
 
 
 async def test_thumbnail_source_missing_mid_request_returns_404(
@@ -617,12 +637,12 @@ async def test_thumbnail_inflight_cancelled_returns_422(
 
     from seedream_mcp.utils.images import thumbnail as image_thumbnail_module
 
-    async def _pending(path: Path) -> bytes | None:
+    async def _pending(path: Path) -> image_thumbnail_module._DecodeOutcome:
         del path
         await asyncio.get_running_loop().create_future()
-        return None
+        return image_thumbnail_module._DecodeOutcome(None, None)
 
-    monkeypatch.setattr(image_thumbnail_module, "build_thumbnail_bytes_limited", _pending)
+    monkeypatch.setattr(image_thumbnail_module, "_build_thumbnail_outcome_limited", _pending)
 
     request_task = asyncio.ensure_future(
         web_get(web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png")

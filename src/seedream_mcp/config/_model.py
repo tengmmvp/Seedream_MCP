@@ -81,6 +81,8 @@ _AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS = 720
 # 编码最长 4*ceil(n/3) 字符，叠加 data: 前缀等信封开销。
 _B64_WORST_CASE_NUMERATOR = 4
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
+# response_body_limit 缺省推导倍数：覆盖组图 15 张 b64_json 图片的最坏合法响应体。
+_RESPONSE_BODY_LIMIT_FACTOR = 20
 
 
 def _validate_ipv6_host_literal(literal: str, entry: str, label: str, field_name: str) -> None:
@@ -542,6 +544,24 @@ class SeedreamConfig:
             _B64_WORST_CASE_NUMERATOR * ((self.auto_save_max_file_size + 2) // 3)
             + _SSE_EVENT_ENVELOPE_MARGIN,
         )
+
+    def effective_sse_event_max_size(self) -> int:
+        """单事件截断阈值的生效值：显式配置优先，未配置时取推导下界。
+
+        消费方（客户端截断与启动日志）统一取此单点。
+        """
+        if self.sse_event_max_size is not None:
+            return self.sse_event_max_size
+        return self.derived_sse_event_max_size()
+
+    def effective_response_body_limit(self) -> int:
+        """响应体读取总量上限的生效值：显式配置优先，未配置时按 auto_save_max_file_size × 20 推导。
+
+        消费方（客户端读体上限与启动日志）统一取此单点。
+        """
+        if self.response_body_limit is not None:
+            return self.response_body_limit
+        return self.auto_save_max_file_size * _RESPONSE_BODY_LIMIT_FACTOR
 
     def _validate_prepare_cache_bounds(self) -> None:
         """校验图像预处理并发与预处理缓存容量下界。"""

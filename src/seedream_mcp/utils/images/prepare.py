@@ -296,8 +296,7 @@ class ImagePreparer:
             return cached
 
         entry, created = self._prepare_inflight.register_if_absent(
-            cache_key,
-            lambda: asyncio.ensure_future(self._prepare_and_cache(image, cache_key)),
+            cache_key, lambda: self._prepare_and_cache(image, cache_key)
         )
         if not created:
             # 等待信号量期间他人已登记同键，归还槽位转为纯等待者。
