@@ -7,8 +7,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from _lib.client_fakes import _capture_call_api
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamValidationError
@@ -227,7 +230,7 @@ def test_supports_sequential_generation_false_for_pro() -> None:
     assert get_model_capabilities(LITE).supports_sequential_generation is True
 
 
-# ==================== 图层拆分：仅 5.0 Pro / Flash 支持 ====================
+# ==================== 图层拆分：5.5 与 5.0 Pro / Flash 支持 ====================
 
 
 def test_layer_decomposition_accepted_for_pro() -> None:
@@ -302,10 +305,10 @@ def test_common_params_prompt_none_accepted_with_layer_decomposition() -> None:
         optimize_prompt_options=None,
         size="auto",
         watermark=False,
-        response_format="url",
-        output_format=None,
-        stream=False,
         tools=None,
+        output_format=None,
+        response_format="url",
+        stream=False,
         model_id=PRO,
         layer_decomposition=True,
     )
@@ -321,67 +324,170 @@ def test_common_params_prompt_none_rejected_without_layer_decomposition() -> Non
             optimize_prompt_options=None,
             size="2K",
             watermark=False,
-            response_format="url",
-            output_format=None,
-            stream=False,
             tools=None,
+            output_format=None,
+            response_format="url",
+            stream=False,
             model_id=PRO,
         )
 
 
-# ==================== 透明通道 background：仅 5.0 Pro / Flash 支持 ====================
+# ==================== 透明通道 background：5.5 与 5.0 Pro / Flash 支持 ====================
 
 
 def test_background_transparent_accepted_for_pro() -> None:
-    """Pro 接受透明背景。"""
-    assert validate_background("transparent", PRO) == "transparent"
+    """Pro 在单参考图的图生场景接受透明背景。"""
+    assert (
+        validate_background("transparent", PRO, layer_decomposition=False, image_count=1)
+        == "transparent"
+    )
 
 
 def test_background_transparent_accepted_for_flash() -> None:
-    """Flash 接受透明背景。"""
-    assert validate_background("transparent", FLASH) == "transparent"
+    """Flash 在单参考图的图生场景接受透明背景。"""
+    assert (
+        validate_background("transparent", FLASH, layer_decomposition=False, image_count=1)
+        == "transparent"
+    )
 
 
 def test_background_opaque_accepted_for_pro() -> None:
-    """Pro 接受不透明背景。"""
-    assert validate_background("opaque", PRO) == "opaque"
+    """Pro 在单参考图的图生场景接受不透明背景。"""
+    assert validate_background("opaque", PRO, layer_decomposition=False, image_count=1) == "opaque"
+
+
+def test_background_text_form_rejected_for_pro() -> None:
+    """Pro 的 transparent 仅单参考图的图生形态可用，文生形态拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="单参考图的图生场景可用"):
+        validate_background("transparent", PRO, layer_decomposition=False, image_count=0)
+
+
+def test_background_multi_form_rejected_for_pro() -> None:
+    """Pro 的 transparent 仅单参考图的图生形态可用，多参考图形态拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="单参考图的图生场景可用"):
+        validate_background("transparent", PRO, layer_decomposition=False, image_count=2)
+
+
+@pytest.mark.parametrize("model_id", [PRO, FLASH], ids=["pro", "flash"])
+@pytest.mark.parametrize("image_count", [0, 2], ids=["text", "multi"])
+def test_background_opaque_not_form_gated_for_restricted_families(
+    model_id: str, image_count: int
+) -> None:
+    """形态限制仅限定于 transparent：opaque 在文生与多参考图形态均放行。"""
+    assert (
+        validate_background("opaque", model_id, layer_decomposition=False, image_count=image_count)
+        == "opaque"
+    )
+
+
+@pytest.mark.parametrize("model_id", [PRO, FLASH], ids=["pro", "flash"])
+def test_background_auto_rejected_by_mode_gate_for_restricted_families(model_id: str) -> None:
+    """Pro/Flash 不支持 auto，任意形态均由取值门控拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="仅支持 opaque/transparent"):
+        validate_background("auto", model_id, layer_decomposition=False, image_count=0)
+
+
+def test_background_all_forms_accepted_for_seedream_55() -> None:
+    """Seedream 5.5 全调用形态可用透明通道。"""
+    model_id = "doubao-seedream-5-5-261028"
+    for image_count in (0, 1, 2):
+        assert (
+            validate_background(
+                "transparent", model_id, layer_decomposition=False, image_count=image_count
+            )
+            == "transparent"
+        )
+
+
+def test_background_all_forms_accepted_for_unknown_model() -> None:
+    """未识别模型按全放行兜底，全调用形态可用透明通道。"""
+    for image_count in (0, 1, 2):
+        assert (
+            validate_background(
+                "transparent",
+                "ep-unknown-endpoint",
+                layer_decomposition=False,
+                image_count=image_count,
+            )
+            == "transparent"
+        )
 
 
 def test_background_rejected_for_lite() -> None:
     """Lite 拒绝 background 参数。"""
     with pytest.raises(SeedreamValidationError, match="不支持透明背景（background）"):
-        validate_background("transparent", LITE)
+        validate_background("transparent", LITE, layer_decomposition=False, image_count=1)
 
 
 def test_background_rejects_invalid_value() -> None:
     """非法 background 取值拒绝。"""
     with pytest.raises(SeedreamValidationError, match="background 必须为"):
-        validate_background("alpha", PRO)
+        validate_background("alpha", PRO, layer_decomposition=False, image_count=1)
 
 
 def test_background_none_returns_none() -> None:
     """未指定 background 返回 None。"""
-    assert validate_background(None, LITE) is None
+    assert validate_background(None, LITE, layer_decomposition=False, image_count=1) is None
 
 
 def test_background_transparent_rejects_jpeg_output_format() -> None:
     """透明背景输出为 png，与 output_format=jpeg 互斥。"""
     with pytest.raises(SeedreamValidationError, match="互斥"):
-        validate_background("transparent", PRO, output_format="jpeg")
+        validate_background(
+            "transparent",
+            PRO,
+            output_format="jpeg",
+            layer_decomposition=False,
+            image_count=1,
+        )
 
 
 def test_background_transparent_allows_png_output_format() -> None:
     """透明背景与 png 输出格式兼容。"""
-    assert validate_background("transparent", PRO, output_format="png") == "transparent"
+    assert (
+        validate_background(
+            "transparent",
+            PRO,
+            output_format="png",
+            layer_decomposition=False,
+            image_count=1,
+        )
+        == "transparent"
+    )
 
 
 def test_background_transparent_allows_unspecified_output_format() -> None:
     """未指定输出格式时透明背景通过。"""
-    assert validate_background("transparent", PRO, output_format=None) == "transparent"
+    assert (
+        validate_background(
+            "transparent",
+            PRO,
+            output_format=None,
+            layer_decomposition=False,
+            image_count=1,
+        )
+        == "transparent"
+    )
+
+
+async def test_pro_text_to_image_accepts_opaque_background(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pro 文生路径放行 opaque：形态限制仅限定于 transparent，opaque 为该家族默认取值。"""
+    client = SeedreamClient(SeedreamConfig(api_key="k", model_id=PRO, max_retries=1))
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured))
+
+    await client.text_to_image(prompt="t", background="opaque")
+
+    assert captured["background"] == "opaque"
 
 
 async def test_pro_model_rejects_sequential_generation_call() -> None:
     """Pro 模型调用组图生成须在能力判定处被拒绝，不进入参数校验与 API 调用。"""
     client = SeedreamClient(SeedreamConfig(api_key="k", model_id=PRO, max_retries=1))
     with pytest.raises(SeedreamValidationError, match="不支持组图"):
-        await client.sequential_generation(prompt="t", max_images=3, size="2K")
+        await client.sequential_generation(
+            prompt="t", sequential_image_generation_options={"max_images": 3}, size="2K"
+        )

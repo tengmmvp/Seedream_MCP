@@ -4,11 +4,13 @@
 """
 
 from dataclasses import asdict
-from typing import cast, get_type_hints
+from typing import cast, get_origin, get_type_hints
 
 import pytest
 
+from seedream_mcp.definitions.conventions import LAYER_DECOMPOSITION_MAX_IMAGES
 from seedream_mcp.utils.model.capabilities import (
+    ALL_BACKGROUND_FORMS,
     CAPABILITY_LABELS,
     MODEL_ALIASES,
     MODEL_CAPABILITIES,
@@ -25,6 +27,22 @@ from seedream_mcp.utils.model.capabilities import (
     preset_numeric_sort_key,
     supported_family_display_names,
 )
+
+
+def test_background_fields_cross_invariants() -> None:
+    """background 跨字段不变量：支持 background 的家族必含 transparent，transparent
+    在取值集时形态白名单非空；绑定表键集与取值白名单一致（取值门控放行后校验器
+    直接下标的前提）且形态取值落在值域内，表编辑越界即红。
+    """
+    for family, caps in MODEL_CAPABILITIES.items():
+        if caps.allowed_background_modes:
+            assert "transparent" in caps.allowed_background_modes, family
+        if "transparent" in caps.allowed_background_modes:
+            assert caps.allowed_background_forms, family
+        assert set(caps.background_forms_by_mode) == caps.allowed_background_modes, family
+        assert all(
+            forms <= ALL_BACKGROUND_FORMS for forms in caps.background_forms_by_mode.values()
+        ), family
 
 
 def test_all_model_aliases_resolve_to_known_family() -> None:
@@ -72,7 +90,9 @@ def test_get_model_capabilities_lite_profile() -> None:
 
 
 def test_get_model_capabilities_flash_profile() -> None:
-    """Flash 与 Pro 同档（图层拆分/透明背景/参考图 10/1K-2K 档），但不支持 fast 提示词优化。"""
+    """Flash 与 Pro 同档（图层拆分/透明背景/参考图 10/1K-2K 档），唯一差异是
+    Flash 不支持 fast 提示词优化；拆分配置 Pro 与 Flash 均不支持，仅 5.5 支持。
+    """
     caps = get_model_capabilities("doubao-seedream-5-0-flash-260915")
     assert caps.supports_output_format is True
     assert caps.supports_tools is False
@@ -80,7 +100,9 @@ def test_get_model_capabilities_flash_profile() -> None:
     assert caps.supports_sequential_generation is False
     assert caps.supports_fast_optimize_prompt is False
     assert caps.supports_layer_decomposition is True
-    assert caps.supports_background is True
+    assert caps.supports_layer_decomposition_options is False
+    assert caps.allowed_background_modes == frozenset({"opaque", "transparent"})
+    assert caps.allowed_background_forms == frozenset({"single"})
     assert caps.max_reference_images == 10
     assert caps.allowed_presets == frozenset({"1K", "1.5K", "2K"})
     assert caps.min_size_pixels == 1280 * 720
@@ -97,8 +119,32 @@ def test_get_model_capabilities_legacy_and_unknown_default_to_permissive() -> No
     assert unknown.supports_tools is True
     assert unknown.supports_stream is True
     assert unknown.supports_layer_decomposition is True
-    assert unknown.supports_background is True
+    assert unknown.supports_layer_decomposition_options is True
+    assert unknown.max_layer_decomposition_images == LAYER_DECOMPOSITION_MAX_IMAGES
+    assert unknown.allowed_background_modes == frozenset({"auto", "opaque", "transparent"})
+    assert unknown.allowed_background_forms == frozenset({"text", "single", "multi"})
     assert unknown.max_reference_images == 14
+
+
+def test_options_capable_families_declare_full_layer_max() -> None:
+    """支持拆分配置的家族满额须对齐 max_images 值域上界，行声明不得钳低按投影取值的产图数。"""
+    offenders = [
+        caps.family
+        for caps in MODEL_CAPABILITIES.values()
+        if caps.supports_layer_decomposition_options
+        and caps.max_layer_decomposition_images != LAYER_DECOMPOSITION_MAX_IMAGES
+    ]
+    assert offenders == [], f"options 放行家族的拆分满额偏离值域上界: {offenders}"
+
+
+def test_layer_decomposition_support_matches_max_images() -> None:
+    """拆分支持为双编码字段（bool 开关与满额产图数），全表行须一致，新家族漏填在表级暴露。"""
+    offenders = [
+        caps.family
+        for caps in MODEL_CAPABILITIES.values()
+        if caps.supports_layer_decomposition != (caps.max_layer_decomposition_images > 0)
+    ]
+    assert offenders == [], f"图层拆分双编码字段不一致的家族: {offenders}"
 
 
 def test_model_capabilities_table_is_read_only() -> None:
@@ -113,7 +159,10 @@ def test_model_payloads_entries_match_alias_table() -> None:
 
     assert len(payloads) == len(MODEL_ALIASES)
     assert [entry["alias"] for entry in payloads] == list(MODEL_ALIASES)
-    expected_fields = set(ModelCapabilities.__dataclass_fields__)
+    # 绑定映射换出为既有 allowed_background_forms 呈现键，载荷维度不变。
+    expected_fields = (
+        set(ModelCapabilities.__dataclass_fields__) - {"background_forms_by_mode"}
+    ) | {"allowed_background_forms"}
     for entry in payloads:
         assert set(entry) == {"alias", "model_id"} | expected_fields, entry["alias"]
         assert entry["model_id"] == MODEL_ALIASES[cast(str, entry["alias"])]
@@ -133,19 +182,24 @@ def test_model_payloads_allowed_presets_are_sorted_lists() -> None:
 
 
 def test_model_payloads_capability_values_match_asdict() -> None:
-    """条目能力取值与 asdict 全等，仅 allowed_presets 归一为数值序列表。"""
+    """条目能力取值与 asdict 全等，三个集合字段归一为排序列表。"""
     for entry in model_payloads():
-        expected = asdict(get_model_capabilities(cast(str, entry["model_id"])))
+        caps = get_model_capabilities(cast(str, entry["model_id"]))
+        expected = asdict(caps)
+        del expected["background_forms_by_mode"]
         expected["allowed_presets"] = sorted(
             expected["allowed_presets"], key=preset_numeric_sort_key
         )
+        expected["allowed_background_modes"] = sorted(expected["allowed_background_modes"])
+        expected["allowed_background_forms"] = sorted(caps.allowed_background_forms)
         assert {key: entry[key] for key in expected} == expected, entry["alias"]
 
 
 def test_supported_family_display_names_returns_joined_string() -> None:
     """支持家族展示名以顿号拼接返回，文案消费方无需再 join。"""
     assert supported_family_display_names("supports_output_format") == (
-        "doubao-seedream-5.0-pro、doubao-seedream-5.0、doubao-seedream-5.0-flash"
+        "doubao-seedream-5.5、doubao-seedream-5.0-pro、doubao-seedream-5.0、"
+        "doubao-seedream-5.0-flash"
     )
     assert supported_family_display_names("supports_tools") == "doubao-seedream-5.0"
 
@@ -154,27 +208,37 @@ def test_capability_labels_locked_verbatim() -> None:
     """能力开关中文标签与载荷键逐字锁定，改动须同步审视快照文本与门控报错的对外文案。"""
     assert [entry.label for entry in CAPABILITY_LABELS] == [
         "图层拆分（layer_decomposition）",
+        "图层拆分配置与富文本 OCR（layer_decomposition_options）",
         "透明背景（background）",
+        "透明通道全形态（background）",
         "输出格式（output_format）",
         "流式输出（stream）",
         "联网搜索（tools）",
         "组图生成（sequential_generation）",
+        "终端用户标识（safety_identifier）",
     ]
     assert [entry.payload_key for entry in CAPABILITY_LABELS] == [
         "layer_decomposition",
+        "layer_decomposition_options",
         "transparent_background",
+        "full_form_transparency",
         "output_format",
         "stream",
         "web_search",
         "sequential_generation",
+        "safety_identifier",
     ]
 
 
-def test_capability_labels_map_unique_bool_capability_fields() -> None:
-    """标签表的 capability 字段与载荷键互异，capability 均为能力表布尔字段。"""
-    bool_fields = {name for name, tp in get_type_hints(ModelCapabilities).items() if tp is bool}
+def test_capability_labels_map_unique_capability_fields() -> None:
+    """标签表的 capability 字段与载荷键互异，capability 均为能力表布尔或集合白名单字段。"""
+    type_hints = get_type_hints(ModelCapabilities)
+    bool_fields = {name for name, tp in type_hints.items() if tp is bool}
+    set_fields = {name for name, tp in type_hints.items() if get_origin(tp) is frozenset}
+    # transparent 形态白名单经绑定映射派生为属性，不在类型注解面。
+    derived_fields = {"allowed_background_forms"}
     capabilities = [entry.capability for entry in CAPABILITY_LABELS]
     assert len(set(capabilities)) == len(capabilities)
-    assert set(capabilities) <= bool_fields
+    assert set(capabilities) <= bool_fields | set_fields | derived_fields
     payload_keys = [entry.payload_key for entry in CAPABILITY_LABELS]
     assert len(set(payload_keys)) == len(payload_keys)
