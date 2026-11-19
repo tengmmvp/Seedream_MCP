@@ -584,6 +584,8 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "model_id": (_pick_str, "model"),
     "default_size": (_pick_str, None),
     "default_watermark": (_pick_bool, "watermark"),
+    "safety_identifier_enabled": (_pick_bool, None),
+    "safety_identifier": (_pick_optional_str, None),
     "timeout": (_pick_int, None),
     "api_timeout": (_pick_int, None),
     "max_retries": (_pick_int, None),

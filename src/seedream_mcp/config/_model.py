@@ -61,7 +61,10 @@ from ..definitions.defaults import (
 from ..utils.core.logs import LEGAL_LOG_LEVELS
 from ..utils.core.validators import validate_size_for_model
 from ..utils.io.path import reject_unc_declaration
-from ..utils.model.capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
+from ..utils.model.capabilities import (
+    MODEL_ALIASES,
+    DEPRECATED_MODEL_TOKENS,
+)
 
 LIFESPAN_KEY_CONFIG = "config"
 LIFESPAN_KEY_CLIENT = "client"
@@ -77,12 +80,15 @@ HTTP_AUTH_TOKEN_MIN_LENGTH = 16
 # 720 秒恰等于 .part 临时文件 24 小时清扫宽限；超过后预算反超宽限，在途慢下载
 # 的临时文件会被并发清扫删除。
 _AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS = 720
-# SSE 单事件阈值的推导常量：base64 最坏膨胀系数与事件信封余量，n 字节图片经
-# 编码最长 4*ceil(n/3) 字符，叠加 data: 前缀等信封开销。
+# base64 最坏膨胀系数：n 字节图片经编码最长 4*ceil(n/3) 字符。
 _B64_WORST_CASE_NUMERATOR = 4
+# SSE 单事件阈值的信封余量：data: 前缀等开销。
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
-# response_body_limit 缺省推导倍数：覆盖组图 15 张 b64_json 图片的最坏合法响应体。
-_RESPONSE_BODY_LIMIT_FACTOR = 20
+# response_body_limit 缺省时 url 响应格式的结构性读取上限：响应仅含 JSON 框架
+# 与产图 URL 数组，满额百张签名 URL 也只数百 KB 量级，4MB 封顶留一个数量级余量。
+_URL_RESPONSE_BODY_LIMIT = 4 * 1024 * 1024
+# safety_identifier 显式配置值的长度上限：官方 API Reference 约束不超过 64 字符。
+_SAFETY_IDENTIFIER_MAX_LENGTH = 64
 
 
 def _validate_ipv6_host_literal(literal: str, entry: str, label: str, field_name: str) -> None:
@@ -127,6 +133,12 @@ class SeedreamConfig:
             （ep- 开头）。
         default_size: 默认图像尺寸，构造校验时按模型能力标准化。
         default_watermark: 是否默认为生成结果添加水印。
+        safety_identifier_enabled: 是否在模型支持时向 API 自动附加终端用户标识；
+            标识经 safety_identifier 显式配置或由系统按机器名与用户名派生。
+            仅 Seedream 5.5、5.0 Pro 与 5.0 Flash 家族附加，关闭时即使模型
+            支持也不附加。
+        safety_identifier: 显式配置的终端用户标识，None 表示未配置走系统派生；
+            是否附加仍由 safety_identifier_enabled 决定。
         timeout: 通用超时秒数。
         api_timeout: API 调用超时秒数。
         max_retries: API 调用最大重试次数。
@@ -150,8 +162,9 @@ class SeedreamConfig:
         stream_buffer_max_size: SSE 流式响应缓冲区上限字节数。
         sse_event_max_size: 单个 SSE 事件的截断阈值字节数；None 时按缓冲区上限与
             单图 base64 最坏展开二者的较大值推导。
-        response_body_limit: 上游响应体读取总量上限字节数；
-            None 时按 auto_save_max_file_size × 20 推导。
+        response_body_limit: 上游响应体读取总量上限字节数；None 时按请求形态
+            投影——b64_json 按产图数上限乘单图 base64 最坏展开推导，url 取
+            结构性固定上限。
         image_prepare_concurrency: 参考图预处理并发上限。
         prepare_cache_max: 参考图预处理结果 LRU 缓存的条目数上限。
         prepare_cache_max_bytes: 参考图预处理结果缓存的累计字节上限。
@@ -187,9 +200,11 @@ class SeedreamConfig:
 
     base_url: str = _env_field("https://ark.cn-beijing.volces.com/api/v3", "ARK_BASE_URL")
     allow_http_base_url: bool = _env_field(False, "SEEDREAM_ALLOW_HTTP_BASE_URL")
-    model_id: str = _env_field(MODEL_ALIASES["doubao-seedream-5.0"], "SEEDREAM_MODEL_ID")
+    model_id: str = _env_field(MODEL_ALIASES["doubao-seedream-5.5"], "SEEDREAM_MODEL_ID")
     default_size: str = _env_field("2K", "SEEDREAM_DEFAULT_SIZE")
     default_watermark: bool = _env_field(False, "SEEDREAM_DEFAULT_WATERMARK")
+    safety_identifier_enabled: bool = _env_field(True, "SEEDREAM_SAFETY_IDENTIFIER_ENABLED")
+    safety_identifier: str | None = _env_field(None, "SEEDREAM_SAFETY_IDENTIFIER")
     timeout: int = _env_field(60, "SEEDREAM_TIMEOUT")
     api_timeout: int = _env_field(600, "SEEDREAM_API_TIMEOUT")
     max_retries: int = _env_field(3, "SEEDREAM_MAX_RETRIES")
@@ -273,6 +288,7 @@ class SeedreamConfig:
         self._validate_api_endpoint()
         self._validate_model_selection()
         self._validate_default_size()
+        self._validate_safety_identifier()
         self._validate_client_timeouts()
         self._validate_log_settings()
         self._validate_auto_save_bounds()
@@ -415,6 +431,33 @@ class SeedreamConfig:
                 )
             ) from exc
 
+    def _validate_safety_identifier(self) -> None:
+        """校验显式终端用户标识为英文字符串且不超官方长度上限，空白视为未配置、规范化为 strip 后值。"""
+        if self.safety_identifier is None:
+            return
+        stripped = self.safety_identifier.strip()
+        if not stripped:
+            # 空白与未配置同义，与其他可选键的空赋值约定一致。
+            object.__setattr__(self, "safety_identifier", None)
+            return
+        if len(stripped) > _SAFETY_IDENTIFIER_MAX_LENGTH:
+            raise SeedreamConfigError(
+                _config_error(
+                    "safety_identifier 长度不得超过 {max_length} 字符{suffix}",
+                    "safety_identifier",
+                    max_length=as_plain(_SAFETY_IDENTIFIER_MAX_LENGTH),
+                )
+            )
+        # 官方口径为英文字符串且未禁空格：复用可打印 ASCII 判定，空格单独放行。
+        if not all(ch == " " or is_printable_ascii(ch) for ch in stripped):
+            raise SeedreamConfigError(
+                _config_error(
+                    "safety_identifier 须为英文字符串（可打印ASCII字符）{suffix}",
+                    "safety_identifier",
+                )
+            )
+        object.__setattr__(self, "safety_identifier", stripped)
+
     def _validate_client_timeouts(self) -> None:
         """校验通用超时、API 超时、生成并发与 API 重试次数下界及超时字段的 float 可转换性。"""
         for field_name in ("timeout", "api_timeout"):
@@ -534,6 +577,10 @@ class SeedreamConfig:
                 _config_error("response_body_limit必须大于0{suffix}", "response_body_limit")
             )
 
+    def _single_image_b64_worst_size(self) -> int:
+        """单图 base64 最坏展开字节数：n 字节图片经编码最长 4*ceil(n/3) 字符。"""
+        return _B64_WORST_CASE_NUMERATOR * ((self.auto_save_max_file_size + 2) // 3)
+
     def derived_sse_event_max_size(self) -> int:
         """单事件阈值的推导下界：缓冲区上限与单图 base64 最坏展开二者的较大值。
 
@@ -541,8 +588,7 @@ class SeedreamConfig:
         """
         return max(
             self.stream_buffer_max_size,
-            _B64_WORST_CASE_NUMERATOR * ((self.auto_save_max_file_size + 2) // 3)
-            + _SSE_EVENT_ENVELOPE_MARGIN,
+            self._single_image_b64_worst_size() + _SSE_EVENT_ENVELOPE_MARGIN,
         )
 
     def effective_sse_event_max_size(self) -> int:
@@ -554,14 +600,27 @@ class SeedreamConfig:
             return self.sse_event_max_size
         return self.derived_sse_event_max_size()
 
-    def effective_response_body_limit(self) -> int:
-        """响应体读取总量上限的生效值：显式配置优先，未配置时按 auto_save_max_file_size × 20 推导。
+    def effective_response_body_limit(self, *, response_format: str, max_image_count: int) -> int:
+        """响应体读取总量上限的生效值：显式配置直接生效，未配置按请求形态投影。
 
-        消费方（客户端读体上限与启动日志）统一取此单点。
+        b64_json 按产图数上限乘单图 base64 最坏展开推导——满额响应中途中止时
+        计费已发生且图片不可恢复，投影须覆盖合法最坏；url 响应仅含 JSON 框架
+        与 URL 数组，取结构性固定上限。消费方（客户端读体上限）统一取此单点。
         """
         if self.response_body_limit is not None:
             return self.response_body_limit
-        return self.auto_save_max_file_size * _RESPONSE_BODY_LIMIT_FACTOR
+        if response_format == "b64_json":
+            return max_image_count * self._single_image_b64_worst_size()
+        return _URL_RESPONSE_BODY_LIMIT
+
+    def response_body_limit_log_text(self) -> str:
+        """启动日志用的生效值描述：显式配置为字节数，未配置给出按请求投影的锚点值。"""
+        if self.response_body_limit is not None:
+            return str(self.response_body_limit)
+        return (
+            f"auto(url={_URL_RESPONSE_BODY_LIMIT},"
+            f"b64_json={self._single_image_b64_worst_size()}×N)"
+        )
 
     def _validate_prepare_cache_bounds(self) -> None:
         """校验图像预处理并发与预处理缓存容量下界。"""

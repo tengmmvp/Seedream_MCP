@@ -150,6 +150,76 @@ def test_build_config_blank_override_and_env_fall_through_to_env_file(
     assert config.model_id == "doubao-seedream-4-0-250828"
 
 
+def test_build_config_reads_explicit_safety_identifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式终端用户标识经 SEEDREAM_SAFETY_IDENTIFIER 读取并 strip 归一，未配置为 None。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    monkeypatch.setenv("SEEDREAM_SAFETY_IDENTIFIER", "  deploy-a  ")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.safety_identifier == "deploy-a"
+
+    monkeypatch.delenv("SEEDREAM_SAFETY_IDENTIFIER")
+    fallback = build_config_from_sources(env_file=str(env_file))
+
+    assert fallback.safety_identifier is None
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_build_config_blank_safety_identifier_means_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """系统环境变量层的空白终端用户标识视为未配置，回退系统派生。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    monkeypatch.setenv("SEEDREAM_SAFETY_IDENTIFIER", blank)
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.safety_identifier is None
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_build_config_blank_safety_identifier_from_env_file_means_unset(
+    tmp_path: Path, blank: str
+) -> None:
+    """env 文件层的空白终端用户标识同样视为未配置。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_SAFETY_IDENTIFIER={blank}\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.safety_identifier is None
+
+
+def test_safety_identifier_length_limit_and_blank_normalizes_to_none() -> None:
+    """直构路径空白标识归 None，超过官方 64 字符上限仍构建期拒绝。"""
+    assert SeedreamConfig(api_key="k", safety_identifier="   ").safety_identifier is None
+
+    with pytest.raises(SeedreamConfigError, match="64"):
+        SeedreamConfig(api_key="k", safety_identifier="a" * 65)
+
+
+@pytest.mark.parametrize("value", ["用户甲", "deploy-a\x01", "deploy\ta"])
+def test_safety_identifier_rejects_non_english_string(value: str) -> None:
+    """官方约束为英文字符串：中文与控制字符在构建期拒绝。"""
+
+    with pytest.raises(SeedreamConfigError, match="英文字符串"):
+        SeedreamConfig(api_key="k", safety_identifier=value)
+
+
+def test_safety_identifier_accepts_printable_ascii_with_inner_space() -> None:
+    """官方未禁内部空格：64 字符内可打印 ASCII 通过并 strip 归一。"""
+    assert SeedreamConfig(api_key="k", safety_identifier="a" * 64).safety_identifier == "a" * 64
+    assert (
+        SeedreamConfig(api_key="k", safety_identifier="  deploy unit 42 ").safety_identifier
+        == "deploy unit 42"
+    )
+
+
 def test_build_config_reads_seedream_log_level_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -183,10 +253,10 @@ def test_build_config_resolves_seedream_50_alias(
     assert config.model_id == "doubao-seedream-5-0-260128"
 
 
-def test_build_config_uses_seedream_50_as_default_model(
+def test_build_config_uses_seedream_55_as_default_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未指定模型时默认取 5.0 并解析为完整模型 ID。"""
+    """未指定模型时默认取 5.5 并解析为完整模型 ID。"""
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\n")
     monkeypatch.delenv("ARK_API_KEY", raising=False)
@@ -194,7 +264,7 @@ def test_build_config_uses_seedream_50_as_default_model(
 
     config = build_config_from_sources(env_file=str(env_file))
 
-    assert config.model_id == "doubao-seedream-5-0-260128"
+    assert config.model_id == "doubao-seedream-5-5-261028"
 
 
 def test_build_config_raises_when_explicit_env_file_missing(tmp_path: Path) -> None:
@@ -224,7 +294,7 @@ def test_build_config_explicit_env_file_excludes_implicit_layers(
         drain_pending_build_warnings()
 
     assert config.api_key == "file_key"
-    assert config.model_id == "doubao-seedream-5-0-260128"
+    assert config.model_id == "doubao-seedream-5-5-261028"
     assert not any("当前工作目录 .env" in record for record in records)
 
 
@@ -1160,7 +1230,7 @@ def test_build_config_none_overrides_fall_through_to_defaults(
     assert config.api_key == "file_key"
     # None override 不阻断后续链路：watermark/model 均回落到默认值
     assert config.default_watermark is False
-    assert config.model_id == "doubao-seedream-5-0-260128"
+    assert config.model_id == "doubao-seedream-5-5-261028"
 
 
 @pytest.mark.parametrize(
@@ -1756,17 +1826,38 @@ def test_build_config_rejects_non_positive_response_body_limit(
 
 
 def test_effective_response_body_limit_prefers_explicit_value() -> None:
-    """显式配置的 response_body_limit 直接作为生效值，优先于倍数推导。"""
+    """显式配置的 response_body_limit 直接作为生效值，优先于按请求形态投影。"""
     config = SeedreamConfig(api_key="k", response_body_limit=1048576)
 
-    assert config.effective_response_body_limit() == 1048576
+    assert (
+        config.effective_response_body_limit(response_format="b64_json", max_image_count=15)
+        == 1048576
+    )
 
 
-def test_effective_response_body_limit_derives_from_max_file_size() -> None:
-    """未配置时生效值按 auto_save_max_file_size × 20 推导。"""
+def test_effective_response_body_limit_projects_b64_by_image_count() -> None:
+    """未配置时 b64_json 按产图数上限乘单图 base64 最坏展开投影。"""
     config = SeedreamConfig(api_key="k", auto_save_max_file_size=50 * 1024 * 1024)
 
-    assert config.effective_response_body_limit() == 50 * 1024 * 1024 * 20
+    single = 4 * ((50 * 1024 * 1024 + 2) // 3)
+    assert (
+        config.effective_response_body_limit(response_format="b64_json", max_image_count=1)
+        == single
+    )
+    assert (
+        config.effective_response_body_limit(response_format="b64_json", max_image_count=100)
+        == 100 * single
+    )
+
+
+def test_effective_response_body_limit_uses_structural_url_cap() -> None:
+    """未配置时 url 响应取与产图数、文件上限无关的结构性固定上限。"""
+    config = SeedreamConfig(api_key="k", auto_save_max_file_size=50 * 1024 * 1024)
+
+    assert (
+        config.effective_response_body_limit(response_format="url", max_image_count=100)
+        == 4 * 1024 * 1024
+    )
 
 
 def test_effective_sse_event_max_size_prefers_explicit_value() -> None:
