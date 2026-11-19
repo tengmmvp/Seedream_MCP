@@ -577,11 +577,14 @@ async def test_background_control_mirrors_backend_capability_gates(
     capabilities_body = _js_code_without_comments(
         function_body(generate_js, r"function backgroundCapabilities\(.*?^}")
     )
-    for anchor in (
-        'capabilityList("allowed_background_modes", "fallback_background_modes")',
-        'capabilityList("allowed_background_forms", "fallback_background_forms")',
+    for allowed_key, fallback_key in (
+        ("allowed_background_modes", "fallback_background_modes"),
+        ("allowed_background_forms", "fallback_background_forms"),
     ):
-        assert anchor in capabilities_body, f"背景回退白名单未消费 {anchor}"
+        assert re.search(
+            rf'capabilityList\(\s*"{allowed_key}",\s*"{fallback_key}",?\s*\)',
+            capabilities_body,
+        ), f"背景回退白名单未消费 {allowed_key}"
 
     # 静态直出项与标签表等值：config-info 未就绪时静态项即生效选项集。
     static_entries = dict(re.findall(r'<option value="([a-z]+)">([^<]*)</option>', select.group(1)))
@@ -1146,11 +1149,14 @@ def test_generate_submit_full_path_wrapped_by_restore_finally() -> None:
     for anchor in (
         'setStatus("running", "生成中，请稍候");',
         "const body = buildRequestBody();",
-        "await preflightTimeoutMs(tool, body, cancelController.signal);",
         "await postJson(",
         "await renderResults(payload);",
     ):
         assert anchor in try_block, f"提交主路径步骤逸出恢复块: {anchor}"
+    assert re.search(
+        r"await preflightTimeoutMs\(\s*tool,\s*body,\s*cancelController\.signal,?\s*\);",
+        try_block,
+    ), "提交主路径步骤逸出恢复块: preflightTimeoutMs(tool, body, cancelController.signal)"
     catch_head = re.compile(r"\s*catch\s*\(\w+\)\s*\{").match(code, try_end + 1)
     assert catch_head is not None, "全程 try 未直接挂 catch 收场"
     catch_block, catch_end = _balanced_brace_block(code, catch_head.end() - 1)
@@ -1183,8 +1189,8 @@ def test_generate_submit_inflight_button_cancels_request() -> None:
         r"isAbortError\(error\) && cancelController\.signal\.aborted", submit
     ), "取消与超时未按取消信号分流"
     assert "cancelController.signal," in submit, "生成请求未携带取消信号"
-    assert (
-        "preflightTimeoutMs(tool, body, cancelController.signal)" in submit
+    assert re.search(
+        r"preflightTimeoutMs\(\s*tool,\s*body,\s*cancelController\.signal", submit
     ), "取消信号未透传预检，取消在预检窗口无效"
     skeleton = function_body(api_js, r"export async function postJson\(.*?^}")
     assert "mergeAbortSignals(" in skeleton, "postJson 未汇流调用方取消与内部超时"

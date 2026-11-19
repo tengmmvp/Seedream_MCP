@@ -159,7 +159,8 @@ def test_generate_preflight_submit_snapshot_and_wire_contract() -> None:
     assert re.search(
         r"const tool = state\.tool;\s*"
         r"const body = buildRequestBody\(\);\s*"
-        r"const timeoutMs = await preflightTimeoutMs\(tool, body, cancelController\.signal\);",
+        r"const timeoutMs = await preflightTimeoutMs\(\s*tool,\s*body,\s*"
+        r"cancelController\.signal,?\s*\);",
         generate_js,
     ), "提交路径未先快照请求体与工具再预检"
     assert (
