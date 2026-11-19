@@ -22,12 +22,14 @@ from seedream_mcp.utils.core.validators import (
     validate_common_generation_params,
     validate_generation_tools,
     validate_layer_decomposition,
+    validate_layer_decomposition_options,
     validate_max_images,
     validate_optimize_prompt_options,
     validate_output_format,
     validate_parallel_generation_options,
     validate_prompt,
     validate_response_format,
+    validate_sequential_image_generation_options,
     validate_size_for_model,
     validate_stream,
     validate_watermark,
@@ -42,6 +44,12 @@ _PRO_MODEL_ID = "doubao-seedream-5-0-pro-260628"
 
 # 5.0（lite）模型标识，tools 条目级用例须家族声明 supports_tools 才能越过能力门。
 _LITE_MODEL_ID = "doubao-seedream-5-0-260128"
+
+# 5.5 模型标识，layer_decomposition_options 仅该家族支持。
+_55_MODEL_ID = "doubao-seedream-5-5-261028"
+
+# 5.0 Flash 模型标识，与 5.0 Pro 同为支持拆分但不支持拆分配置的家族。
+_FLASH_MODEL_ID = "doubao-seedream-5-0-flash-260915"
 
 # ==================== parse_bool ====================
 
@@ -204,12 +212,12 @@ def test_validate_max_images_above_max() -> None:
 
 def test_resolve_sequential_max_images_explicit_value_passthrough() -> None:
     """显式 max_images 原值返回，不参与推导。"""
-    assert resolve_sequential_max_images(7, 3) == 7
+    assert resolve_sequential_max_images(3, 7) == 7
 
 
 def test_resolve_sequential_max_images_derives_from_reference_count() -> None:
     """缺省 max_images 按总上限减参考图张数推导。"""
-    assert resolve_sequential_max_images(None, 3) == MAX_SEQUENTIAL_TOTAL_IMAGES - 3
+    assert resolve_sequential_max_images(3) == MAX_SEQUENTIAL_TOTAL_IMAGES - 3
 
 
 def test_resolve_sequential_max_images_defaults_to_no_reference() -> None:
@@ -220,6 +228,20 @@ def test_resolve_sequential_max_images_defaults_to_no_reference() -> None:
 def test_resolve_sequential_max_images_none_count_as_zero() -> None:
     """None 张数在 callee 内归零，null 守卫不向调用方转嫁。"""
     assert resolve_sequential_max_images(None, None) == MAX_SEQUENTIAL_TOTAL_IMAGES
+
+
+# ==================== validate_sequential_image_generation_options ====================
+
+
+def test_sequential_options_returns_explicit_max_images() -> None:
+    """返回显式给定的 max_images，值校验留给下游链路。"""
+    assert validate_sequential_image_generation_options({"max_images": 3}) == 3
+    assert validate_sequential_image_generation_options(None) is None
+
+
+def test_sequential_options_explicit_null_max_images_equals_omitted() -> None:
+    """显式 null 的 max_images 视同未指定，返回 None 交由调用方推导默认值。"""
+    assert validate_sequential_image_generation_options({"max_images": None}) is None
 
 
 # ==================== _coerce_int_in_range ====================
@@ -357,7 +379,7 @@ def test_parallel_options_explicit_parallelism() -> None:
 
 def test_parallel_options_parallelism_exceeds_request_count() -> None:
     """parallelism 大于 request_count 抛校验错误。"""
-    with pytest.raises(SeedreamValidationError, match="不能大于"):
+    with pytest.raises(SeedreamValidationError, match="不能小于"):
         validate_parallel_generation_options(request_count=2, parallelism=3, stream=False)
 
 
@@ -386,7 +408,7 @@ def test_parallel_options_parallelism_above_max() -> None:
 
 
 def test_parallel_options_parallelism_equal_request_count_ok() -> None:
-    """parallelism == request_count 不触发「不能大于」约束。"""
+    """parallelism == request_count 不触发「不能小于」约束。"""
     rc, par = validate_parallel_generation_options(request_count=3, parallelism=3, stream=False)
     assert rc == 3
     assert par == 3
@@ -411,19 +433,102 @@ def test_optimize_options_reject_unknown_keys() -> None:
         )
 
 
+# ==================== validate_layer_decomposition_options ====================
+
+
+def test_layer_decomposition_options_unknown_key_precedes_capability_gate() -> None:
+    """5.0 Pro（不支持该配置）传未知键先报不支持字段，入参错误优先于模型支持判定。"""
+    with pytest.raises(SeedreamValidationError, match="包含不支持的字段"):
+        validate_layer_decomposition_options({"bogus": 1}, _PRO_MODEL_ID, layer_decomposition=True)
+
+
+def test_layer_decomposition_options_unknown_key_rejected_on_supporting_model() -> None:
+    """5.5（支持该配置）传未知键同样报不支持字段，不静默丢弃。"""
+    with pytest.raises(SeedreamValidationError, match="包含不支持的字段"):
+        validate_layer_decomposition_options({"bogus": 1}, _55_MODEL_ID, layer_decomposition=True)
+
+
+def test_layer_decomposition_options_accepts_valid_forms() -> None:
+    """合法形态归一返回仅含显式键的字典，None 输入先于场景与能力门控短路返回 None。"""
+    assert validate_layer_decomposition_options(
+        {"max_images": 2, "text_recognition": True}, _55_MODEL_ID, layer_decomposition=True
+    ) == {"max_images": 2, "text_recognition": True}
+    # 上界与单键形态均放行，未给定键不进入归一结果。
+    assert validate_layer_decomposition_options(
+        {"max_images": 100}, _55_MODEL_ID, layer_decomposition=True
+    ) == {"max_images": 100}
+    assert validate_layer_decomposition_options(
+        {"text_recognition": False}, _55_MODEL_ID, layer_decomposition=True
+    ) == {"text_recognition": False}
+    assert (
+        validate_layer_decomposition_options(None, _PRO_MODEL_ID, layer_decomposition=False) is None
+    )
+
+
+def test_layer_decomposition_options_explicit_null_subfields_equal_omitted() -> None:
+    """client 直调路径显式 null 的子字段视同未指定，镜像 MCP 路径守护语义。"""
+    assert (
+        validate_layer_decomposition_options(
+            {"max_images": None}, _55_MODEL_ID, layer_decomposition=True
+        )
+        is None
+    )
+    assert validate_layer_decomposition_options(
+        {"max_images": None, "text_recognition": True},
+        _55_MODEL_ID,
+        layer_decomposition=True,
+    ) == {"text_recognition": True}
+    assert validate_layer_decomposition_options(
+        {"max_images": 2, "text_recognition": None},
+        _55_MODEL_ID,
+        layer_decomposition=True,
+    ) == {"max_images": 2}
+
+
+@pytest.mark.parametrize("max_images", [1, 101], ids=["below-min", "above-max"])
+def test_layer_decomposition_options_max_images_out_of_range(max_images: int) -> None:
+    """max_images 越出 2-100 值域在支持模型上同样拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="必须在 2-100 之间"):
+        validate_layer_decomposition_options(
+            {"max_images": max_images}, _55_MODEL_ID, layer_decomposition=True
+        )
+
+
+@pytest.mark.parametrize("model_id", [_PRO_MODEL_ID, _FLASH_MODEL_ID], ids=["pro", "flash"])
+def test_layer_decomposition_options_rejected_on_models_without_support(model_id: str) -> None:
+    """良构 options 在不支持该配置的家族经能力门控拒绝，client 直调路径同守。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_layer_decomposition_options({"max_images": 50}, model_id, layer_decomposition=True)
+
+    label = capability_param_label("supports_layer_decomposition_options")
+    assert f"不支持{label}" in exc_info.value.message
+
+
 # ==================== validate_background：output_format 类型防御 ====================
 
 
 def test_validate_background_rejects_non_string_output_format() -> None:
     """output_format 非字符串时显式报错，与 background 参数的类型防御口径一致。"""
     with pytest.raises(SeedreamValidationError, match="output_format 必须为字符串"):
-        validate_background("transparent", _PRO_MODEL_ID, output_format=123)  # type: ignore[arg-type]
+        validate_background(
+            "transparent",
+            _PRO_MODEL_ID,
+            output_format=123,  # type: ignore[arg-type]
+            layer_decomposition=False,
+            image_count=1,
+        )
 
 
 def test_validate_background_rejects_non_string_output_format_for_opaque() -> None:
     """background 取 opaque 时同样先做 output_format 类型校验，不因短路跳过。"""
     with pytest.raises(SeedreamValidationError, match="output_format 必须为字符串"):
-        validate_background("opaque", _PRO_MODEL_ID, output_format=["jpeg"])  # type: ignore[arg-type]
+        validate_background(
+            "opaque",
+            _PRO_MODEL_ID,
+            output_format=["jpeg"],  # type: ignore[arg-type]
+            layer_decomposition=False,
+            image_count=1,
+        )
 
 
 # ==================== 单边像素区间约束 ====================
@@ -437,7 +542,10 @@ def _make_caps(min_pixels: int | None, max_pixels: int | None) -> ModelCapabilit
         supports_fast_optimize_prompt=True,
         max_reference_images=14,
         supports_layer_decomposition=False,
-        supports_background=False,
+        max_layer_decomposition_images=0,
+        supports_layer_decomposition_options=False,
+        allowed_background_modes=frozenset(),
+        background_forms_by_mode={},
         allowed_presets=frozenset({"1K"}),
         min_size_pixels=min_pixels,
         max_size_pixels=max_pixels,
@@ -445,6 +553,7 @@ def _make_caps(min_pixels: int | None, max_pixels: int | None) -> ModelCapabilit
         supports_stream=True,
         supports_tools=True,
         supports_sequential_generation=True,
+        supports_safety_identifier=False,
     )
 
 
@@ -558,10 +667,10 @@ def _invoke_common_generation_params(prompt: object) -> None:
         optimize_prompt_options=None,
         size="2K",
         watermark=True,
-        response_format="url",
-        output_format=None,
-        stream=False,
         tools=None,
+        output_format=None,
+        response_format="url",
+        stream=False,
         model_id=_PRO_MODEL_ID,
     )
 
@@ -630,10 +739,16 @@ def _invoke_common_generation_params(prompt: object) -> None:
             id="layer-decomposition-type",
         ),
         pytest.param(
-            lambda: validate_background(123, _PRO_MODEL_ID), "background", id="background-type"
+            lambda: validate_background(
+                123, _PRO_MODEL_ID, layer_decomposition=False, image_count=1
+            ),
+            "background",
+            id="background-type",
         ),
         pytest.param(
-            lambda: validate_background("   ", _PRO_MODEL_ID),
+            lambda: validate_background(
+                "   ", _PRO_MODEL_ID, layer_decomposition=False, image_count=1
+            ),
             "background",
             id="background-whitespace",
         ),

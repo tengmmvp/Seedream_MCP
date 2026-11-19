@@ -1,7 +1,7 @@
 """Seedream MCP 参数校验模块。
 
 集中处理图像生成各工具的入参校验，覆盖尺寸、水印、像素维度、参考图数量、
-宽高比、输出格式、提示词长度、组图总数与并行参数等。
+宽高比、输出格式、提示词长度、图层拆分配置、组图总数与并行参数等。
 
 设计要点：
 - 模型能力数据驱动校验：与模型相关的规则，含尺寸档位、像素区间、输出格式、联网
@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from .errors import (
     SeedreamConfigError,
@@ -29,6 +29,9 @@ from .errors import (
 )
 from .logs import get_logger
 from ..model.capabilities import (
+    BACKGROUND_FORM_SCENES,
+    BackgroundForm,
+    all_background_modes,
     capability_param_label,
     get_max_reference_images,
     get_model_capabilities,
@@ -36,7 +39,13 @@ from ..model.capabilities import (
     supported_family_display_names,
 )
 
-from ...definitions.conventions import MAX_PARALLEL_REQUEST_COUNT, MAX_SEQUENTIAL_TOTAL_IMAGES
+from ...definitions.conventions import (
+    LAYER_DECOMPOSITION_MAX_IMAGES,
+    LAYER_DECOMPOSITION_MIN_IMAGES,
+    MAX_IMAGES_MIN,
+    MAX_PARALLEL_REQUEST_COUNT,
+    MAX_SEQUENTIAL_TOTAL_IMAGES,
+)
 
 logger = get_logger()
 
@@ -45,11 +54,18 @@ logger = get_logger()
 
 # optimize_prompt_options.mode 的合法取值白名单。
 VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
+# layer_decomposition_options 允许键集：schemas.LayerDecompositionOptions 字段集的
+# 镜像（utils.core 禁止依赖 tools，无法运行时派生），test_consistency_guards 守护两侧同步。
+LAYER_DECOMPOSITION_OPTION_FIELDS = frozenset({"max_images", "text_recognition"})
+# sequential_image_generation_options 允许键集：schemas.SequentialImageGenerationOptions
+# 字段集的镜像，守护同上。
+SEQUENTIAL_OPTION_FIELDS = frozenset({"max_images"})
 # 尺寸预设档位与输出格式白名单。
 VALID_SIZE_PRESETS = frozenset({"1K", "1.5K", "2K", "3K", "4K"})
 VALID_OUTPUT_FORMATS = frozenset({"jpeg", "png"})
-# 图片透明通道参数 background 的合法取值白名单，支持的家族由能力表统一判定。
-VALID_BACKGROUND_MODES = frozenset({"transparent", "opaque"})
+# 图片透明通道参数 background 的全局取值并集，自能力表白名单派生；
+# 各模型实际可用的取值子集由能力表按家族判定。
+VALID_BACKGROUND_MODES = all_background_modes()
 # 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值。
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
@@ -89,7 +105,7 @@ def _parse_pixel_size(size: str) -> tuple[int, int] | None:
 
 
 # 整数要求拒绝文案的模板：字段名以分类参数进入。
-_INTEGER_REQUIRED_TEMPLATE = "{field} 必须是整数"
+INTEGER_REQUIRED_TEMPLATE = "{field} 必须是整数"
 
 
 def _coerce_int_in_range(value: Any, field: str, min_value: int, max_value: int) -> int:
@@ -99,7 +115,7 @@ def _coerce_int_in_range(value: Any, field: str, min_value: int, max_value: int)
     """
     if isinstance(value, bool):
         raise SeedreamValidationError(
-            error_text(_INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
+            error_text(INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
             field=field,
             value=value,
         )
@@ -107,7 +123,7 @@ def _coerce_int_in_range(value: Any, field: str, min_value: int, max_value: int)
         # 拒绝非整数浮点，避免静默截断造成语义偏差；整数浮点允许转换。
         if not value.is_integer():
             raise SeedreamValidationError(
-                error_text(_INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
+                error_text(INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
                 field=field,
                 value=value,
             )
@@ -120,7 +136,7 @@ def _coerce_int_in_range(value: Any, field: str, min_value: int, max_value: int)
             validated_value = int(value)
         except (ValueError, TypeError, OverflowError):
             raise SeedreamValidationError(
-                error_text(_INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
+                error_text(INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
                 field=field,
                 value=value,
             )
@@ -128,7 +144,7 @@ def _coerce_int_in_range(value: Any, field: str, min_value: int, max_value: int)
         # 字符串经 int() 解析已保证无损转换，不参与等值比较。
         if not isinstance(value, str) and value != validated_value:
             raise SeedreamValidationError(
-                error_text(_INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
+                error_text(INTEGER_REQUIRED_TEMPLATE, field=as_plain(field)),
                 field=field,
                 value=value,
             )
@@ -145,6 +161,47 @@ def _coerce_int_in_range(value: Any, field: str, min_value: int, max_value: int)
             value=validated_value,
         )
     return validated_value
+
+
+# extra-keys 拒绝文案的模板：字段名与键清单以分类参数进入。
+_UNSUPPORTED_KEYS_TEMPLATE = "{field} 包含不支持的字段: {keys}"
+
+
+def _reject_unsupported_keys(
+    options: dict[str, Any], field: str, allowed_keys: frozenset[str] | set[str]
+) -> None:
+    """options 含允许键集以外的字段时显式拒绝而非静默丢弃。
+
+    schemas 的 extra="forbid" 已覆盖工具层，此路径补齐公共 client 直调。
+    """
+    extra_keys = set(options.keys()) - allowed_keys
+    if extra_keys:
+        raise SeedreamValidationError(
+            error_text(
+                _UNSUPPORTED_KEYS_TEMPLATE,
+                field=as_plain(field),
+                keys=as_text_list(sorted(extra_keys, key=repr)),
+            ),
+            field=field,
+            value=options,
+        )
+
+
+# options 非对象拒绝文案的模板：字段名以分类参数进入。
+_OPTIONS_DICT_TEMPLATE = "{field} 必须为对象"
+
+
+def _require_options_dict(options: Any, field: str) -> None:
+    """options 非对象时显式拒绝而非静默当作未指定。
+
+    schemas 的对象形态校验已覆盖工具层，此路径补齐公共 client 直调。
+    """
+    if not isinstance(options, dict):
+        raise SeedreamValidationError(
+            error_text(_OPTIONS_DICT_TEMPLATE, field=as_plain(field)),
+            field=field,
+            value=options,
+        )
 
 
 # ==================== 基础公共验证函数 ====================
@@ -384,17 +441,7 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
                 value=tool,
             )
 
-        extra_keys = set(tool.keys()) - {"type"}
-        if extra_keys:
-            raise SeedreamValidationError(
-                error_text(
-                    "tools[{index}] 包含不支持的字段: {keys}",
-                    index=as_plain(index),
-                    keys=as_text_list(sorted(extra_keys, key=repr)),
-                ),
-                field=f"tools[{index}]",
-                value=tool,
-            )
+        _reject_unsupported_keys(tool, f"tools[{index}]", {"type"})
 
         tool_type = tool.get("type")
         if not isinstance(tool_type, str):
@@ -454,7 +501,9 @@ def validate_max_images(max_images: Any) -> int:
 
     委托 _coerce_int_in_range 完成校验。
     """
-    return _coerce_int_in_range(max_images, "max_images", 1, MAX_SEQUENTIAL_TOTAL_IMAGES)
+    return _coerce_int_in_range(
+        max_images, "max_images", MAX_IMAGES_MIN, MAX_SEQUENTIAL_TOTAL_IMAGES
+    )
 
 
 # ==================== 尺寸验证函数 ====================
@@ -648,10 +697,10 @@ def capability_gate_error(
 def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> bool:
     """验证图层拆分开关与模型的兼容性。
 
-    图层拆分将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，
-    支持与否与未知模型放行均由能力表统一判定；单张参考图输入的前提由
-    image_to_image 工具的输入形态保证。输入图的格式与像素下限约束由上游
-    校验，本地不做前置检查。None 视为未启用返回 False。
+    图层拆分将单张输入图拆解为 1 张底图与多个带透明通道的 PNG 图层，图层数
+    上限按模型为 16 或 99 个，由能力表统一判定；单张参考图输入的前提由
+    layer_decompose 工具的输入形态（LayerDecomposeInput）保证。输入图的格式
+    与像素下限约束由上游校验，本地不做前置检查。None 视为未启用返回 False。
 
     Raises:
         SeedreamValidationError: layer_decomposition 非布尔，或为真而模型不支持
@@ -677,20 +726,104 @@ def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> boo
     return layer_decomposition
 
 
-def validate_background(
-    background: Any, model_id: str, output_format: str | None = None
-) -> str | None:
-    """验证图片透明通道参数与模型的兼容性。
+def validate_layer_decomposition_options(
+    options: Any, model_id: str, *, layer_decomposition: bool
+) -> dict[str, Any] | None:
+    """验证图层拆分配置与模型及场景的兼容性。
 
-    background 控制是否生成带透明通道的图片，支持与否与未知模型放行均由能力表统一
-    判定。输入图的格式约束由上游校验，此处做值域、模型门控与
-    output_format 互斥校验；透明背景输出为带 alpha 的 png，与 jpeg 互斥同时
-    指定时报错。
+    可配置字段仅 max_images（2-100，含底图的产出总数上限）与 text_recognition
+    （富文本 OCR 开关）；整体仅 5.5 家族支持且仅在图层拆分开启时生效。返回仅含
+    显式给定字段的归一字典，显式 null 的子字段视同未指定，未给定的子字段
+    不进入请求体，由 API 按官方默认取值。
 
     Raises:
-        SeedreamValidationError: background 非字符串或取值不在 transparent/opaque
-            白名单、模型不支持透明通道、output_format 非字符串，或 transparent
-            与 output_format=jpeg 同时指定时抛出。
+        SeedreamValidationError: options 非对象、含支持字段以外的键、图层拆分未
+            开启、模型不支持该配置、max_images 非法，或 text_recognition 非布尔
+            时抛出。
+    """
+    if options is None:
+        return None
+
+    _require_options_dict(options, "layer_decomposition_options")
+
+    # 未知字段先于能力门控拒绝（入参错误优先于模型支持判定，与 optimize 兄弟同序）。
+    _reject_unsupported_keys(
+        options, "layer_decomposition_options", LAYER_DECOMPOSITION_OPTION_FIELDS
+    )
+
+    if not layer_decomposition:
+        raise SeedreamValidationError(
+            error_text(
+                "layer_decomposition_options 仅在图层拆分开启时可用："
+                "MCP 调用请改用图层拆分工具，API 直调请设置 layer_decomposition=true"
+            ),
+            field="layer_decomposition_options",
+            value=options,
+        )
+
+    normalized_model_id = model_id or ""
+    if not get_model_capabilities(normalized_model_id).supports_layer_decomposition_options:
+        raise capability_gate_error(
+            field="layer_decomposition_options",
+            model_id=normalized_model_id,
+            capability="supports_layer_decomposition_options",
+            value=options,
+        )
+
+    normalized: dict[str, Any] = {}
+    if "max_images" in options and options["max_images"] is not None:
+        normalized["max_images"] = _coerce_int_in_range(
+            options["max_images"],
+            "layer_decomposition_options.max_images",
+            LAYER_DECOMPOSITION_MIN_IMAGES,
+            LAYER_DECOMPOSITION_MAX_IMAGES,
+        )
+    if "text_recognition" in options and options["text_recognition"] is not None:
+        text_recognition = options["text_recognition"]
+        if not isinstance(text_recognition, bool):
+            raise SeedreamValidationError(
+                "layer_decomposition_options.text_recognition 必须为布尔值",
+                field="layer_decomposition_options.text_recognition",
+                value=text_recognition,
+            )
+        normalized["text_recognition"] = text_recognition
+    return normalized or None
+
+
+def classify_background_form(image_count: int) -> BackgroundForm:
+    """按参考图数量判定 background 调用形态：0 张文生、1 张单图、多张多图。
+
+    形态的唯一派生点：validate_background 经本函数取形态，单字符串与单元素
+    列表按 1 张计数同判单图。
+    """
+    if image_count <= 0:
+        return "text"
+    return "single" if image_count == 1 else "multi"
+
+
+def validate_background(
+    background: Any,
+    model_id: str,
+    output_format: str | None = None,
+    *,
+    layer_decomposition: bool,
+    image_count: int,
+) -> str | None:
+    """验证图片透明通道参数与模型及调用形态的兼容性。
+
+    background 控制是否生成带透明通道的图片，支持与否与各取值可用性由能力表的
+    allowed_background_modes 白名单统一判定；各取值的调用形态可用性由
+    background_forms_by_mode 绑定表按参考图数量经 classify_background_form 单点
+    派生的形态查表判定，不限形态的取值在能力表声明全形态集合。输入图的
+    格式约束由上游校验，此处做值域、模型与形态门控及互斥校验；透明背景输出为
+    带 alpha 的 png，与 jpeg 互斥同时指定时报错；图层拆分场景不支持该参数
+    （官方口径传入即报错），拆分图层本身即带透明通道。
+
+    Raises:
+        SeedreamValidationError: background 非字符串或取值不在全局并集、模型不支持
+            透明通道或该取值、取值的调用形态不在模型绑定表、图层拆分
+            场景传入、output_format 非字符串，或 transparent 与 output_format=jpeg
+            同时指定时抛出。
     """
     if background is None:
         return None
@@ -708,13 +841,47 @@ def validate_background(
             field="background",
             value=background,
         )
+    if layer_decomposition:
+        raise SeedreamValidationError(
+            "图层拆分场景不支持 background 参数，拆分产出的图层本身即带透明通道",
+            field="background",
+            value=normalized,
+        )
     normalized_model_id = model_id or ""
     caps = get_model_capabilities(normalized_model_id)
-    if not caps.supports_background:
+    if not caps.allowed_background_modes:
         raise capability_gate_error(
             field="background",
             model_id=normalized_model_id,
-            capability="supports_background",
+            capability="allowed_background_modes",
+            value=normalized,
+        )
+    if normalized not in caps.allowed_background_modes:
+        modes_text = "/".join(sorted(caps.allowed_background_modes))
+        raise SeedreamValidationError(
+            error_text(
+                "在 {model} 模型下 background 仅支持 {modes}，"
+                "请调整取值或更换为支持该取值的模型",
+                model=as_plain(caps.display_name),
+                modes=as_plain(modes_text),
+            ),
+            field="background",
+            value=normalized,
+        )
+    # 形态绑定键集与取值白名单一致（表级不变量守护），取值门控放行后可直接下标。
+    form = classify_background_form(image_count)
+    allowed_forms = caps.background_forms_by_mode[normalized]
+    if form not in allowed_forms:
+        allowed_scenes = "、".join(BACKGROUND_FORM_SCENES[entry] for entry in sorted(allowed_forms))
+        raise SeedreamValidationError(
+            error_text(
+                "在 {model} 模型下透明通道仅在{allowed_scenes}场景可用，"
+                "{scene}场景请更换为全形态支持的模型",
+                model=as_plain(caps.display_name),
+                allowed_scenes=as_plain(allowed_scenes),
+                scene=as_plain(BACKGROUND_FORM_SCENES[form]),
+            ),
+            field="background",
             value=normalized,
         )
     if output_format is not None:
@@ -741,23 +908,9 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict[str, A
     if options is None:
         return None
 
-    if not isinstance(options, dict):
-        raise SeedreamValidationError(
-            "optimize_prompt_options 必须为对象", field="optimize_prompt_options", value=options
-        )
+    _require_options_dict(options, "optimize_prompt_options")
 
-    # 未知字段显式拒绝而非静默丢弃；schemas 的 extra="forbid" 已覆盖工具层，
-    # 此处补齐公共 client 直调路径。
-    extra_keys = set(options.keys()) - {"mode"}
-    if extra_keys:
-        raise SeedreamValidationError(
-            error_text(
-                "optimize_prompt_options 包含不支持的字段: {keys}",
-                keys=as_text_list(sorted(extra_keys, key=repr)),
-            ),
-            field="optimize_prompt_options",
-            value=options,
-        )
+    _reject_unsupported_keys(options, "optimize_prompt_options", {"mode"})
 
     mode = options.get("mode", "standard")
     if not isinstance(mode, str):
@@ -840,20 +993,20 @@ def resolve_effective_generation_defaults(
 
 def validate_parallel_generation_options(
     *,
+    stream: bool,
     request_count: Any,
     parallelism: Any,
-    stream: bool,
     max_request_count: int = MAX_PARALLEL_REQUEST_COUNT,
 ) -> tuple[int, int]:
     """校验并行生成参数组合，返回规范化后的 (request_count, parallelism)。
 
-    未指定 parallelism 时取 min(request_count, max_request_count)；parallelism
-    不得超过 request_count；stream 为真时 request_count 必须为 1。
+    未指定 parallelism 时取 min(request_count, max_request_count)；request_count
+    不得小于 parallelism；stream 为真时 request_count 必须为 1。
     max_request_count 为两者公共上界。
 
     Raises:
         SeedreamValidationError: request_count 或 parallelism 非整数、越出公共上界
-            区间、parallelism 大于 request_count，或 stream 为真而 request_count
+            区间、request_count 小于 parallelism，或 stream 为真而 request_count
             大于 1 时抛出。
     """
     validated_request_count = _coerce_int_in_range(
@@ -871,7 +1024,7 @@ def validate_parallel_generation_options(
 
     if validated_parallelism > validated_request_count:
         raise SeedreamValidationError(
-            "parallelism 不能大于 request_count",
+            "request_count 不能小于 parallelism",
             field="parallelism",
             value=validated_parallelism,
         )
@@ -933,7 +1086,7 @@ def validate_sequential_generation_support(model_id: str) -> None:
 
 
 def validate_sequential_image_limit(
-    max_images: int, reference_images: list[str] | None, model_id: str = ""
+    reference_images: list[str] | None, max_images: int, model_id: str = ""
 ) -> None:
     """验证组图输出的总图片数量限制。
 
@@ -961,13 +1114,34 @@ def validate_sequential_image_limit(
         )
 
 
-def resolve_sequential_max_images(
-    max_images: int | None,
-    reference_count: int | None = None,
-) -> int:
-    """根据参考图张数推导组图最大生成数量。
+def validate_sequential_image_generation_options(options: Any) -> int | None:
+    """验证组图配置形态并返回显式给定的 max_images。
 
-    未显式指定 max_images 时默认为 15 减参考图张数，保证参考图张数与生成数量之和不超过 15；
+    可配置字段仅 max_images，其值校验由 validate_max_images 链路承担，此处
+    不重复；显式 null 视同未指定返回 None，由调用方按参考图数量推导默认值。
+
+    Raises:
+        SeedreamValidationError: options 非对象或含支持字段以外的键时抛出。
+    """
+    if options is None:
+        return None
+
+    _require_options_dict(options, "sequential_image_generation_options")
+
+    _reject_unsupported_keys(
+        options, "sequential_image_generation_options", SEQUENTIAL_OPTION_FIELDS
+    )
+
+    return cast(int | None, options.get("max_images"))
+
+
+def resolve_sequential_max_images(
+    reference_count: int | None,
+    max_images: int | None = None,
+) -> int:
+    """根据参考图数量推导组图最大生成数量。
+
+    未显式指定 max_images 时默认为 15 减参考图数量，保证参考图数量与生成数量之和不超过 15；
     reference_count 为 None 时按 0 张推导。
     """
     if max_images is not None:
@@ -983,20 +1157,20 @@ class ValidatedCommonParams(NamedTuple):
         optimize_prompt_options: 校验后的提示词优化选项，未指定时为 None。
         size: 校验后的尺寸规格。
         watermark: 归一后的水印开关。
-        response_format: 小写归一后的响应格式。
-        output_format: 小写归一后的输出格式，未指定时为 None。
-        stream: 校验通过后的流式输出开关。
         tools: 校验后的生成工具数组，未指定时为 None。
+        output_format: 小写归一后的输出格式，未指定时为 None。
+        response_format: 小写归一后的响应格式。
+        stream: 校验通过后的流式输出开关。
     """
 
     prompt: str | None
     optimize_prompt_options: dict[str, Any] | None
     size: str
     watermark: bool
-    response_format: str
-    output_format: str | None
-    stream: bool
     tools: list[dict[str, Any]] | None
+    output_format: str | None
+    response_format: str
+    stream: bool
 
 
 def validate_common_generation_params(
@@ -1005,10 +1179,10 @@ def validate_common_generation_params(
     optimize_prompt_options: dict[str, Any] | None,
     size: str,
     watermark: bool,
-    response_format: str,
-    output_format: str | None,
-    stream: bool,
     tools: list[dict[str, Any]] | None,
+    output_format: str | None,
+    response_format: str,
+    stream: bool,
     model_id: str,
     layer_decomposition: bool = False,
 ) -> ValidatedCommonParams:
@@ -1029,8 +1203,8 @@ def validate_common_generation_params(
         optimize_prompt_options=validate_optimize_prompt_options(optimize_prompt_options, model_id),
         size=validate_size_for_model(size, model_id, layer_decomposition=layer_decomposition),
         watermark=validate_watermark(watermark),
-        response_format=validate_response_format(response_format),
-        output_format=validate_output_format(output_format, model_id),
-        stream=validate_stream(stream, model_id),
         tools=validate_generation_tools(tools, model_id),
+        output_format=validate_output_format(output_format, model_id),
+        response_format=validate_response_format(response_format),
+        stream=validate_stream(stream, model_id),
     )
