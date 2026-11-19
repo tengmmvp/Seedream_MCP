@@ -67,7 +67,13 @@ function showGalleryError(message) {
 // null 态更多未知，不宣称没有更多也不误报总数；永久停滞与截断徒劳均为
 // 终态（下一页已禁用），不追加「可能还有更多」，截断徒劳改述服务端截断
 // 口径；空页的 null 态由空页文案细化，计数行统一称扫描未完成。
-function galleryCountText(hasMore, totalCount, shownCount, stallPermanent, rescanFutile) {
+function galleryCountText(
+  hasMore,
+  totalCount,
+  shownCount,
+  stallPermanent,
+  rescanFutile,
+) {
   if (hasMore === null) {
     if (!shownCount || stallPermanent) return "（扫描未完成）";
     if (rescanFutile) return "（目录条目过多，结果可能不完整）";
@@ -83,7 +89,8 @@ function galleryCountText(hasMore, totalCount, shownCount, stallPermanent, resca
 function galleryEmptyText(gallery, skippedCount, format) {
   if (gallery.hasMore === null && gallery.items.length === 0) {
     if (gallery.stallPermanent) return "目录持续无法访问，请稍后重试。";
-    if (gallery.rescanFutile) return "扫描未完成，本页暂无图片；目录条目过多已截断。";
+    if (gallery.rescanFutile)
+      return "扫描未完成，本页暂无图片；目录条目过多已截断。";
     return "扫描未完成，本页暂无图片；点击「下一页」重试扫描。";
   }
   if (skippedCount)
@@ -172,9 +179,9 @@ async function refreshGalleryForSeq(seq) {
   const body = {
     limit: GALLERY_PAGE_SIZE,
     offset: state.gallery.offset,
+    ...(format ? { format_filter: [format] } : {}),
     show_details: true,
   };
-  if (format) body.format_filter = [format];
   const payload = await fetchGalleryPage(body, seq);
   if (!payload) return;
   if (seq !== requestSeq) return;
@@ -259,39 +266,43 @@ async function refreshGalleryForSeq(seq) {
 
   let authStopped = false;
   // 固定 worker 消费队列，序号逐项守卫，过期请求的 blob URL 就地释放。
-  const unconsumed = await runBoundedPool(pending, THUMBNAIL_BATCH_SIZE, async (entry) => {
-    if (seq !== requestSeq) return false;
-    try {
-      // 超时由 fetchBlobUrl 的内建超时档承担。
-      const blobUrl = await fetchBlobUrl(
-        `/web/api/thumbnail?path=${encodeURIComponent(entry.path)}`,
-        "gallery",
-      );
-      if (seq !== requestSeq) {
-        if (blobUrl) URL.revokeObjectURL(blobUrl);
-        return false;
-      }
-      if (blobUrl) entry.img.src = blobUrl;
-      else markUnavailable(entry);
-      return true;
-    } catch (error) {
-      // 401 已弹令牌门，当前条目落过期终态并停止消费，免逐张重复弹门；
-      // 被取代请求的 401 不盖终态。
-      if (isUnauthorizedError(error)) {
-        if (seq === requestSeq) {
-          markAuthExpired(entry);
-          authStopped = true;
+  const unconsumed = await runBoundedPool(
+    pending,
+    THUMBNAIL_BATCH_SIZE,
+    async (entry) => {
+      if (seq !== requestSeq) return false;
+      try {
+        // 超时由 fetchBlobUrl 的内建超时档承担。
+        const blobUrl = await fetchBlobUrl(
+          `/web/api/thumbnail?path=${encodeURIComponent(entry.path)}`,
+          "gallery",
+        );
+        if (seq !== requestSeq) {
+          if (blobUrl) URL.revokeObjectURL(blobUrl);
+          return false;
         }
-        return false;
+        if (blobUrl) entry.img.src = blobUrl;
+        else markUnavailable(entry);
+        return true;
+      } catch (error) {
+        // 401 已弹令牌门，当前条目落过期终态并停止消费，免逐张重复弹门；
+        // 被取代请求的 401 不盖终态。
+        if (isUnauthorizedError(error)) {
+          if (seq === requestSeq) {
+            markAuthExpired(entry);
+            authStopped = true;
+          }
+          return false;
+        }
+        // 超时为瞬态：不误称不可用，其余条目继续消费；被取代请求不盖占位。
+        if (isAbortError(error)) {
+          if (seq === requestSeq) markThumbTimeout(entry);
+          return;
+        }
+        markUnavailable(entry);
       }
-      // 超时为瞬态：不误称不可用，其余条目继续消费；被取代请求不盖占位。
-      if (isAbortError(error)) {
-        if (seq === requestSeq) markThumbTimeout(entry);
-        return;
-      }
-      markUnavailable(entry);
-    }
-  });
+    },
+  );
   // 善后仅限仍为最新请求的 401 停止：未消费条目统一落过期终态；
   // 被新请求取代的停止不盖终态，旧页未决占位留待新请求重渲染定夺。
   if (authStopped && seq === requestSeq) {

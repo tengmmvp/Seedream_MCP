@@ -1,4 +1,4 @@
-"""Web 操作台生成端点：四个工具经 runners 层复用完整 MCP 流水线。
+"""Web 操作台生成端点：五个生成工具经 runners 层复用完整 MCP 流水线。
 
 请求体由 schemas.py 的 *Input 模型校验，字段与 MCP 工具同源，响应为工具的
 structured_content 字典；生成链路不伪造会话 Roots，文件边界由 runner 内的
@@ -30,6 +30,10 @@ from starlette.responses import JSONResponse, Response
 from ..config import SeedreamConfig, get_active_config
 from ..definitions.conventions import (
     IMAGE_TO_IMAGE_TOOL_NAME,
+    LAYER_DECOMPOSITION_MAX_IMAGES,
+    LAYER_DECOMPOSITION_MIN_IMAGES,
+    LAYER_DECOMPOSE_TOOL_NAME,
+    MAX_IMAGES_MIN,
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
     MULTI_IMAGE_FUSION_TOOL_NAME,
@@ -39,13 +43,16 @@ from ..definitions.conventions import (
 from ..tools.outputs.channels import output_channels_scope
 from ..tools.schemas import (
     BaseGenerationInput,
+    GENERATION_INPUT_MODELS,
     ImageToImageInput,
+    LayerDecomposeInput,
     MultiImageFusionInput,
     SequentialGenerationInput,
     TextToImageInput,
 )
 from ..tools.runners import (
     run_image_to_image,
+    run_layer_decompose,
     run_multi_image_fusion,
     run_sequential_generation,
     run_text_to_image,
@@ -169,17 +176,21 @@ def _wait_budget_ms(
 
 
 def generate_fallback_timeout_ms(config: SeedreamConfig) -> int:
-    """满档等待预算：表单上限请求数加图层拆分满额产图的最坏推导。
+    """满档等待预算：表单上限请求数加当前模型可用工具集内最坏单请求产图数。
 
-    config-info 下发此值作前端 preflight 失败的等待兜底，随部署配置走；预算
-    本体仍由生成端点 preflight 按输入单源推导。
+    最坏候选经各输入模型的 worst_case_projection 单点声明（拆分与组图投影均
+    自门控，不支持家族产 0，在 max 与基线 1 下无害），满档取
+    GENERATION_INPUT_MODELS 全量候选的最大值，任一家族的合法批次都不遗漏下载尾巴。
+    config-info 下发此值作前端 preflight 失败的等待兜底，随部署配置走；预算本体
+    仍由生成端点 preflight 按输入单源推导。
     """
+    candidates = [
+        model.worst_case_projection(model_id=config.model_id) for model in GENERATION_INPUT_MODELS
+    ]
     return _wait_budget_ms(
         config,
         request_count=MAX_PARALLEL_REQUEST_COUNT,
-        per_request_images=ImageToImageInput.per_request_image_count(
-            layer_decomposition=True, max_images=None, image_count=0
-        ),
+        per_request_images=max(candidates),
     )
 
 
@@ -224,12 +235,17 @@ def _preflight_timeout_ms(
         config,
         request_count=request_count,
         per_request_images=model_cls.per_request_image_count(
-            layer_decomposition=query.get("layer_decomposition") == "1",
             max_images=_parse_clamped_query_int(
-                query.get("max_images"), 1, MAX_SEQUENTIAL_TOTAL_IMAGES
+                query.get("max_images"), MAX_IMAGES_MIN, MAX_SEQUENTIAL_TOTAL_IMAGES
             ),
             image_count=_parse_clamped_query_int(
                 query.get("image_count"), 0, SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES, default=0
+            ),
+            model_id=config.model_id,
+            layer_max_images=_parse_clamped_query_int(
+                query.get("layer_max_images"),
+                LAYER_DECOMPOSITION_MIN_IMAGES,
+                LAYER_DECOMPOSITION_MAX_IMAGES,
             ),
         ),
         parallelism=_parse_clamped_query_int(
@@ -318,4 +334,11 @@ async def web_generate_sequential_generation(request: Request) -> Response:
         SEQUENTIAL_GENERATION_TOOL_NAME,
         SequentialGenerationInput,
         run_sequential_generation,
+    )
+
+
+async def web_generate_layer_decompose(request: Request) -> Response:
+    """图层拆分端点。"""
+    return await _run_web_generation(
+        request, LAYER_DECOMPOSE_TOOL_NAME, LayerDecomposeInput, run_layer_decompose
     )

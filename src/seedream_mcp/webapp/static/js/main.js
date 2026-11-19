@@ -19,7 +19,6 @@ import {
   prefetchConfigInfo,
   submitGenerate,
   syncCustomSizeField,
-  syncLayerDecompositionSize,
 } from "./generate.js";
 import {
   advanceGalleryOffset,
@@ -99,14 +98,11 @@ function bindEvents() {
     }
   });
   $("size").addEventListener("change", syncCustomSizeField);
-  // 图层拆分勾选态切换尺寸选项集：拆分仅档位与 auto，取消勾选恢复进入前选择。
-  $("layer-decomposition").addEventListener(
-    "change",
-    syncLayerDecompositionSize,
-  );
   // 兜底 catch：处理器内部兜底后仍外溢的异常（如 DOM 结构漂移）不落未处理拒绝。
   $("generate-form").addEventListener("submit", (event) => {
-    submitGenerate(event).catch((error) => console.error("生成提交异常:", error));
+    submitGenerate(event).catch((error) =>
+      console.error("生成提交异常:", error),
+    );
   });
 
   $("gallery-refresh").addEventListener("click", () => {

@@ -7,6 +7,7 @@
 
 import {
   $,
+  capabilityList,
   currentModel,
   fetchBlobUrl,
   fetchExternalBlobUrl,
@@ -22,11 +23,12 @@ import {
   showInlineError,
   state,
   TOOL_IMAGE_TO_IMAGE,
+  TOOL_LAYER_DECOMPOSE,
   TOOL_SEQUENTIAL_GENERATION,
   TOOL_TEXT_TO_IMAGE,
   withTimeoutSignal,
 } from "./api.js";
-import { convergeRefsToTool, toolConfig } from "./refs.js";
+import { convergeRefsToTool, setOnRefsChanged, toolConfig } from "./refs.js";
 import { openLightbox, resetGalleryPaging } from "./gallery.js";
 
 /**
@@ -109,6 +111,10 @@ function renderConfigInfo() {
       current ? !current.supports_output_format : false,
     );
 
+  // 背景字段同随模型能力显隐，选项集按能力白名单重建。
+  syncBackgroundFieldVisibility();
+  renderBackgroundOptions();
+
   // 勾选框初始态反映服务器默认，此后保留用户选择：令牌重输会再次加载配置，
   // 重置勾选态会使静默回退变为显式传值的实际生效。
   const watermarkBox = $("watermark");
@@ -131,12 +137,14 @@ function renderConfigInfo() {
   updateToolAvailability();
 }
 
-/** 图层拆分开关可见且勾选时生效。 */
 function layerDecompositionActive() {
-  return (
-    !$("layer-field").classList.contains("collapsed") &&
-    $("layer-decomposition").checked
-  );
+  return state.tool === TOOL_LAYER_DECOMPOSE;
+}
+
+/** 拆分配置能力判定：未知模型（Endpoint ID 部署）默认放行，展示折叠与提交读值共用。 */
+function layerOptionsAllowed() {
+  const model = currentModel();
+  return model ? model.supports_layer_decomposition_options : true;
 }
 
 /** 自定义尺寸输入区随尺寸选择折叠。 */
@@ -148,24 +156,25 @@ export function syncCustomSizeField() {
 }
 
 /**
- * 重建尺寸下拉：图层拆分勾选时仅档位与 auto，其余为档位与自定义像素；先前
- * 选择在新列表中仍存在则保留。preferred 为离开图层态时的记忆值，免去默认
- * 预填对自定义宽高的覆写。
+ * 重建尺寸下拉：图层拆分工具仅档位与 auto，其余为档位与自定义像素；先前
+ * 选择在新列表中仍存在则保留。进入拆分工具时记忆非 auto 选择、离开时恢复，
+ * 自定义宽高不被默认预填覆写。
  */
-function renderSizeOptions(preferred) {
+function renderSizeOptions() {
   const info = state.configInfo;
   if (!info) return;
   const sizeSelect = $("size");
-  const previous = preferred ?? sizeSelect.value;
+  const previous = sizeSelect.value;
   const layerMode = layerDecompositionActive();
+  let preferred = previous;
+  if (layerMode && !state.sizePreLayer && previous && previous !== "auto") {
+    state.sizePreLayer = previous;
+  } else if (!layerMode && state.sizePreLayer) {
+    preferred = state.sizePreLayer;
+    state.sizePreLayer = null;
+  }
   sizeSelect.innerHTML = "";
-  // 未知模型（Endpoint ID 部署）回退档位取 unknown 家族声明，与后端放行同源。
-  const current = currentModel();
-  const presets = current
-    ? current.allowed_presets
-    : Array.isArray(info.fallback_presets)
-      ? info.fallback_presets
-      : [];
+  const presets = capabilityList("allowed_presets", "fallback_presets");
   for (const preset of presets) {
     const option = document.createElement("option");
     option.value = preset;
@@ -184,8 +193,8 @@ function renderSizeOptions(preferred) {
     custom.value = "custom";
     custom.textContent = "自定义";
     sizeSelect.appendChild(custom);
-    if (previous === "custom" || presets.includes(previous)) {
-      sizeSelect.value = previous;
+    if (preferred === "custom" || presets.includes(preferred)) {
+      sizeSelect.value = preferred;
     } else {
       const match = /^(\d+)[xX](\d+)$/.exec(info.default_size || "");
       if (presets.includes(info.default_size)) {
@@ -200,54 +209,126 @@ function renderSizeOptions(preferred) {
   syncCustomSizeField();
 }
 
-/**
- * 图层拆分勾选态变化时同步尺寸选择：勾选瞬间记住当前值，取消勾选时以记忆值
- * 渲染并清除；渲染与记忆都由勾选翻转的确定时机驱动，图层态内的中间选择不污染。
- */
-export function syncLayerDecompositionSize() {
-  if ($("layer-decomposition").checked) {
-    state.sizePreLayer = $("size").value;
-    renderSizeOptions();
-    return;
-  }
-  renderSizeOptions(state.sizePreLayer);
-  state.sizePreLayer = null;
+// background 取值项的展示序与文案，键序即选项序，transparent 居首对齐主用取值。
+const BACKGROUND_MODE_LABELS = new Map([
+  ["transparent", "透明"],
+  ["opaque", "不透明"],
+  ["auto", "自动"],
+]);
+
+/** 当前模型的 background 白名单，未知模型回退取 config-info 下发的 unknown 家族声明。 */
+function backgroundCapabilities() {
+  return {
+    modes: capabilityList(
+      "allowed_background_modes",
+      "fallback_background_modes",
+    ),
+    forms: capabilityList(
+      "allowed_background_forms",
+      "fallback_background_forms",
+    ),
+  };
 }
 
 /**
- * 当前模型能力下各表单区的显隐与提示词必填态；提示词可留空的说明只在对应
- * 能力真实可用时提及，避免误导用户寻找不存在的开关。
+ * 按参考图数量判 background 调用形态：查 config-info 下发的形态→张数上界表
+ * （服务端经 classify_background_form 单源派生），取覆盖该数量的最小上界形态，
+ * 无界形态兜底；表缺失返回 null，transparent 随之判不可用。
+ */
+function classifyBackgroundForm(imageCount) {
+  const limits =
+    state.configInfo && state.configInfo.background_form_image_limits;
+  if (!limits) return null;
+  let boundedForm = null;
+  let boundedLimit = Infinity;
+  let unboundedForm = null;
+  for (const form in limits) {
+    const limit = limits[form];
+    if (limit === null) {
+      unboundedForm = form;
+    } else if (imageCount <= limit && limit < boundedLimit) {
+      boundedForm = form;
+      boundedLimit = limit;
+    }
+  }
+  return boundedForm || unboundedForm;
+}
+
+/** 背景字段可用性：图层拆分无该参数，模型不支持时不可用，未知模型放行。 */
+function backgroundFieldAvailable() {
+  if (layerDecompositionActive()) return false;
+  return backgroundCapabilities().modes.length > 0;
+}
+
+/** 背景字段随可用性折叠，提交读值同判定（折叠旧值不随请求）。 */
+function syncBackgroundFieldVisibility() {
+  $("background")
+    .closest(".field")
+    .classList.toggle("collapsed", !backgroundFieldAvailable());
+}
+
+/**
+ * 重建背景下拉：取值项按模型白名单过滤，transparent 另按当前调用形态与
+ * 形态白名单求交去留；先前选择在新选项集中不存在（如形态变化后 transparent
+ * 不可用）时回落空值。
+ */
+function renderBackgroundOptions() {
+  const select = $("background");
+  const previous = select.value;
+  const { modes, forms } = backgroundCapabilities();
+  const transparentAllowed =
+    modes.includes("transparent") &&
+    forms.includes(classifyBackgroundForm(state.refs.length));
+  select.innerHTML = "";
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "跟随服务器";
+  select.appendChild(empty);
+  const available = [""];
+  for (const [mode, label] of BACKGROUND_MODE_LABELS) {
+    const allowed =
+      mode === "transparent" ? transparentAllowed : modes.includes(mode);
+    if (!allowed) continue;
+    const option = document.createElement("option");
+    option.value = mode;
+    option.textContent = label;
+    select.appendChild(option);
+    available.push(mode);
+  }
+  if (available.includes(previous)) select.value = previous;
+}
+
+// 参考图增删与工具切换改变调用形态：占 refs 域渲染咽喉的唯一回调槽触发选项复核。
+setOnRefsChanged(renderBackgroundOptions);
+
+/**
+ * 当前模型能力下各表单区的显隐与提示词必填态；提示词可留空的说明仅图层
+ * 拆分工具提及。
  */
 export function applyToolUI() {
   const config = toolConfig(state.tool);
-  const current = currentModel();
-  // 未知模型（Endpoint ID 部署）无能力条目时回退为允许，与 unknown 家族放行一致。
-  const layerAllowed =
-    state.tool === TOOL_IMAGE_TO_IMAGE &&
-    (current ? current.supports_layer_decomposition : true);
-
+  renderSizeOptions();
   $("reference-section").classList.toggle("collapsed", !config.refs);
-  // 提示词留空仅图层拆分场景被后端接受，说明只在开关真实可用时提及。
-  $("prompt-hint").textContent =
-    config.promptOptional && layerAllowed
-      ? "启用图层拆分时可留空；建议不超过 300 字。"
-      : "建议不超过 300 字。";
+  $("prompt-hint").textContent = config.promptOptional
+    ? "图层拆分意图可留空，由模型自动识别；建议不超过 300 字。"
+    : "建议不超过 300 字。";
   $("max-images-field").classList.toggle(
     "collapsed",
     state.tool !== TOOL_SEQUENTIAL_GENERATION,
   );
-  const layerField = $("layer-field");
-  layerField.classList.toggle("collapsed", !layerAllowed);
-  if (!layerAllowed && $("layer-decomposition").checked) {
-    $("layer-decomposition").checked = false;
-    syncLayerDecompositionSize();
-  }
+  // 拆分配置仅 5.5 家族支持，其余拆分家族（5.0 Pro / 5.0 Flash）折叠；折叠时
+  // 旧值保留表单（切回支持模型恢复生效），提交同判定不携带，免遭能力门控拒绝。
+  $("layer-options-field").classList.toggle(
+    "collapsed",
+    state.tool !== TOOL_LAYER_DECOMPOSE || !layerOptionsAllowed(),
+  );
+  syncBackgroundFieldVisibility();
   convergeRefsToTool();
 }
 
 /**
- * 按模型能力启停工具 tab：不支持组图的模型禁用组图入口，当前工具被禁时
- * 回落文生图。
+ * 按模型能力启停工具 tab：不支持组图或图层拆分的模型禁用对应入口，当前工具
+ * 被禁时回落文生图。
  */
 export function updateToolAvailability() {
   const current = currentModel();
@@ -257,12 +338,32 @@ export function updateToolAvailability() {
   const sequentialTab = document.querySelector(
     `[data-tool="${TOOL_SEQUENTIAL_GENERATION}"]`,
   );
-  sequentialTab.disabled = !sequentialAllowed;
-  sequentialTab.title = sequentialAllowed ? "" : "当前模型不支持组图生成";
-  if (state.tool === TOOL_SEQUENTIAL_GENERATION && !sequentialAllowed) {
+  if (sequentialTab) {
+    sequentialTab.disabled = !sequentialAllowed;
+    sequentialTab.title = sequentialAllowed ? "" : "当前模型不支持组图生成";
+  }
+  const layerAllowed = current ? current.supports_layer_decomposition : true;
+  const layerTab = document.querySelector(
+    `[data-tool="${TOOL_LAYER_DECOMPOSE}"]`,
+  );
+  if (layerTab) {
+    layerTab.disabled = !layerAllowed;
+    layerTab.title = layerAllowed ? "" : "当前模型不支持图层拆分";
+  }
+  if (
+    (state.tool === TOOL_SEQUENTIAL_GENERATION && !sequentialAllowed) ||
+    (state.tool === TOOL_LAYER_DECOMPOSE && !layerAllowed)
+  ) {
     setActiveTool(TOOL_TEXT_TO_IMAGE);
     applyToolUI();
   }
+}
+
+/** 数字输入框取值：留空与非有限值返回 undefined（垃圾值静默省略）。 */
+function parseOptionalNumber(selector) {
+  const text = $(selector).value.trim();
+  const value = Number(text);
+  return text === "" || !Number.isFinite(value) ? undefined : value;
 }
 
 /**
@@ -278,7 +379,27 @@ export function buildRequestBody() {
 
   if (config.refs && state.refs.length > 0) {
     const values = state.refs.map((ref) => ref.value);
-    body.image = state.tool === TOOL_IMAGE_TO_IMAGE ? values[0] : values;
+    // 图生图与图层拆分均为单参考图，表单态列表在此解包为标量。
+    const singleRefTool =
+      state.tool === TOOL_IMAGE_TO_IMAGE || state.tool === TOOL_LAYER_DECOMPOSE;
+    body.image = singleRefTool ? values[0] : values;
+  }
+
+  if (state.tool === TOOL_SEQUENTIAL_GENERATION) {
+    // 省略键由后端按参考图数量推导；显式 0 原样透传，交后端 ge=1 拒绝。
+    const maxImages = parseOptionalNumber("max-images");
+    body.sequential_image_generation_options =
+      maxImages === undefined ? undefined : { max_images: maxImages };
+  }
+  if (layerDecompositionActive() && layerOptionsAllowed()) {
+    // max_images 仅显式给定进请求体；text_recognition 随勾选态显式携带，
+    // 未勾选以显式 false 表达，不退化为键缺省。
+    const options = { text_recognition: $("text-recognition").checked };
+    const layerMax = parseOptionalNumber("layer-max-images");
+    if (layerMax !== undefined) {
+      options.max_images = layerMax;
+    }
+    body.layer_decomposition_options = options;
   }
 
   const sizeValue = $("size").value;
@@ -290,25 +411,21 @@ export function buildRequestBody() {
     body.size = sizeValue;
   }
 
-  // 调用数取 generateApiCalls 单一来源，值为 1 即后端缺省，省略键。
-  const requestCount = generateApiCalls();
-  if (requestCount > 1) body.request_count = requestCount;
-  body.watermark = $("watermark").checked;
+  // 折叠态（图层拆分、不支持模型）旧值不随请求，判定与展示折叠共用。
+  if (backgroundFieldAvailable()) {
+    const backgroundMode = $("background").value;
+    if (backgroundMode) body.background = backgroundMode;
+  }
 
-  if (state.tool === TOOL_SEQUENTIAL_GENERATION) {
-    // 留空与非有限值省略键，由后端按参考图数量推导（Infinity 经 JSON 折成 null
-    // 同未传，垃圾值静默放行）；显式 0 原样透传，交后端 ge=1 拒绝。
-    const maxImagesInput = $("max-images").value.trim();
-    const maxImages = Number(maxImagesInput);
-    body.max_images =
-      maxImagesInput === "" || !Number.isFinite(maxImages) ? undefined : maxImages;
-  }
-  if (layerDecompositionActive()) {
-    body.layer_decomposition = true;
-  }
+  body.watermark = $("watermark").checked;
 
   const outputFormat = $("output-format").value;
   if (outputFormat) body.output_format = outputFormat;
+
+  // 调用数取 generateApiCalls 单一来源，值为 1 即后端缺省，省略键。
+  const requestCount = generateApiCalls();
+  if (requestCount > 1) body.request_count = requestCount;
+
   if (!$("auto-save").checked) body.auto_save = false;
   const savePath = $("save-path").value.trim();
   if (savePath) body.save_path = savePath;
@@ -392,7 +509,7 @@ function buildRenderDots() {
 // config 不可得时 preflight 失败回退的等待预算缺省：按服务端默认配置的满档
 // 推导×1.5 取整到百万圆整档（守护测试锁定下限）；超时消息已提示服务端可能
 // 仍在执行。
-const GENERATE_FALLBACK_TIMEOUT_MS = 41000000;
+const GENERATE_FALLBACK_TIMEOUT_MS = 202000000;
 
 // preflight 失败的等待兜底：优先 config-info 下发的满档推导（随部署配置走），
 // 不可得才落缺省常量。
@@ -418,7 +535,7 @@ const CONFIG_REFETCH_TIMEOUT_MS = 10000;
 // 启动重载在途 Promise：重载已在途时不叠加第二次，随重载自身落定清空。
 let bootstrapReloadInFlight = null;
 
-/** 本次请求触发的生成 API 调用数：request_count 对四工具一律生效。 */
+/** 本次请求触发的生成 API 调用数：request_count 对五个生成工具一律生效。 */
 function generateApiCalls() {
   // 留空与非法输入按后端缺省 1 对齐。
   const count = Number($("request-count").value);
@@ -468,13 +585,19 @@ async function preflightTimeoutMs(tool, body, signal) {
   if (Number.isFinite(body.request_count) && body.request_count > 0) {
     params.set("request_count", String(body.request_count));
   }
-  if (body.layer_decomposition === true) params.set("layer_decomposition", "1");
   const imageCount = Array.isArray(body.image) ? body.image.length : null;
   if (Number.isFinite(imageCount) && imageCount > 0) {
     params.set("image_count", String(imageCount));
   }
-  if (Number.isFinite(body.max_images) && body.max_images > 0) {
-    params.set("max_images", String(body.max_images));
+  const sequentialOptions = body.sequential_image_generation_options;
+  const maxImages = sequentialOptions && sequentialOptions.max_images;
+  if (Number.isFinite(maxImages) && maxImages > 0) {
+    params.set("max_images", String(maxImages));
+  }
+  const layerOptions = body.layer_decomposition_options;
+  const layerMax = layerOptions && layerOptions.max_images;
+  if (Number.isFinite(layerMax) && layerMax > 0) {
+    params.set("layer_max_images", String(layerMax));
   }
   if (body.auto_save === true) params.set("download_tail", "1");
   else if (body.auto_save === false) params.set("download_tail", "0");
@@ -527,9 +650,8 @@ export async function submitGenerate(event) {
   }
   const config = toolConfig(state.tool);
   const prompt = $("prompt").value.trim();
-  // 空提示词仅图生图勾选图层拆分时被后端接受，判定与提示文案口径一致。
-  const layerChecked = layerDecompositionActive();
-  if (!prompt && !(config.promptOptional && layerChecked)) {
+  // 空提示词仅图层拆分工具被后端接受，判定与提示文案口径一致。
+  if (!prompt && !config.promptOptional) {
     setStatus("failed", "请填写提示词。");
     return;
   }
@@ -561,7 +683,11 @@ export async function submitGenerate(event) {
     // 预算推导与真实请求共用同一快照，不随窗口内的编辑漂移。
     const tool = state.tool;
     const body = buildRequestBody();
-    const timeoutMs = await preflightTimeoutMs(tool, body, cancelController.signal);
+    const timeoutMs = await preflightTimeoutMs(
+      tool,
+      body,
+      cancelController.signal,
+    );
     try {
       // 非 ok 与载荷缺陷经共享骨架就地展示，体读取失败上抛走网络档
       // ——2xx 意味着服务端已生成，断连误劝重试会重复生成。

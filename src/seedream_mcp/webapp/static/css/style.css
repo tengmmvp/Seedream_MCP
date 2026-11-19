@@ -362,30 +362,22 @@ select:focus {
   padding: 8px 0;
 }
 
+.layer-options-row {
+  align-items: center;
+  gap: 12px;
+}
+
+.layer-options-label {
+  margin: 0;
+}
+
+.layer-options-row input[type="number"] {
+  width: 110px;
+}
+
 .checkbox-row {
   display: flex;
   align-items: flex-end;
-}
-
-.collapse.collapse-x {
-  grid-template-columns: 1fr;
-}
-
-.collapse.collapse-x:not(.collapsed) {
-  margin-right: 24px;
-}
-
-.collapse.collapse-x.collapsed {
-  grid-template-rows: 1fr;
-  grid-template-columns: 0fr;
-}
-
-.collapse-x .collapse-inner {
-  min-width: 0;
-}
-
-.collapse-x .checkbox-label {
-  white-space: nowrap;
 }
 
 .custom-size-row {
@@ -849,11 +841,6 @@ img.developing.thumb-error {
 
   .collapse {
     transition: grid-template-rows 200ms var(--motion-enter);
-  }
-
-  .collapse-x {
-    transition: grid-template-columns 200ms var(--motion-enter),
-      margin-right 200ms var(--motion-enter);
   }
 
   .collapse-inner {

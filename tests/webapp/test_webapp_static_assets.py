@@ -29,17 +29,27 @@ from seedream_mcp.tools.outputs.sanitize import _REQUEST_FAILED_TYPE
 from seedream_mcp.tools.schemas import (
     MULTI_IMAGE_MIN_ITEMS,
     ImageToImageInput,
+    LayerDecomposeInput,
     MultiImageFusionInput,
     SequentialGenerationInput,
     _SingleImageInput,
 )
+from seedream_mcp.definitions.conventions import (
+    LAYER_DECOMPOSITION_MAX_IMAGES,
+    LAYER_DECOMPOSITION_MIN_IMAGES,
+)
 from seedream_mcp.utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS_ORDERED
-from seedream_mcp.utils.model.capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+from seedream_mcp.utils.core.validators import classify_background_form
+from seedream_mcp.utils.model.capabilities import (
+    MODEL_CAPABILITIES,
+    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+)
 from seedream_mcp.webapp.constants import (
     STATIC_DIR,
     WEB_API_BROWSE,
     WEB_API_CONFIG_INFO,
     WEB_API_GENERATE_IMAGE_TO_IMAGE,
+    WEB_API_GENERATE_LAYER_DECOMPOSE,
     WEB_API_GENERATE_MULTI_IMAGE_FUSION,
     WEB_API_GENERATE_SEQUENTIAL_GENERATION,
     WEB_API_GENERATE_TEXT_TO_IMAGE,
@@ -127,6 +137,7 @@ def test_frontend_api_literals_stay_within_registered_routes() -> None:
         WEB_API_GENERATE_IMAGE_TO_IMAGE,
         WEB_API_GENERATE_MULTI_IMAGE_FUSION,
         WEB_API_GENERATE_SEQUENTIAL_GENERATION,
+        WEB_API_GENERATE_LAYER_DECOMPOSE,
     }
     api_pattern = re.compile(r"/web/api/[a-z-]+")
     sources = [STATIC_DIR / "index.html", *(STATIC_DIR / _JS_DIR / name for name in _JS_MODULES)]
@@ -338,20 +349,60 @@ def test_generate_max_images_explicit_zero_survives_assembly() -> None:
     Number 结果为 ±Infinity（如输入 1e999）时键照传会被 JSON.stringify 折成
     null，后端 int|None 把 null 当未传按参考数派生批次，垃圾值被静默接受
     （显式 0 与 16 会被拒，Infinity 不会）；Number(...) || undefined 的真值
-    兜底则把用户显式输入的 0 折成缺省，交后端 ge=1 拒绝的通道消失。
+    兜底则把用户显式输入的 0 折成缺省，交后端 ge=1 拒绝的通道消失。判别
+    收敛于 parseOptionalNumber 助手，组图与拆分两分支共用。
     """
     generate_js = read_js_module_source("generate.js")
-    build = function_body(generate_js, r"function buildRequestBody\(.*?^}")
-    code = _js_code_without_comments(build)
-    branch_at = code.index("if (state.tool === TOOL_SEQUENTIAL_GENERATION) {")
-    branch, _ = _balanced_brace_block(
-        code, branch_at + len("if (state.tool === TOOL_SEQUENTIAL_GENERATION) ")
+    helper = _js_code_without_comments(
+        function_body(generate_js, r"function parseOptionalNumber\(.*?^}")
     )
-    assert '=== ""' in branch, "组图数量缺空串判别，留空不再省略键"
-    assert "Number.isFinite(" in branch, "组图数量缺非有限判别，±Infinity 漏拦"
-    assert "Number.isNaN(" not in branch, "组图数量回退 NaN-only 判别，±Infinity 漏拦"
-    assert "body.max_images" in branch, "组图分支未装配 max_images"
-    assert not re.search(r"\|\|\s*undefined", branch), "组图数量真值兜底回归，显式 0 被折成缺省"
+    assert '=== ""' in helper, "可选数量缺空串判别，留空不再省略键"
+    assert "Number.isFinite(" in helper, "可选数量缺非有限判别，±Infinity 漏拦"
+    assert "Number.isNaN(" not in helper, "可选数量回退 NaN-only 判别，±Infinity 漏拦"
+    assert not re.search(r"\|\|\s*undefined", helper), "可选数量真值兜底回归，显式 0 被折成缺省"
+    build = _js_code_without_comments(
+        function_body(generate_js, r"function buildRequestBody\(.*?^}")
+    )
+    branch_at = build.index("if (state.tool === TOOL_SEQUENTIAL_GENERATION) {")
+    branch, _ = _balanced_brace_block(
+        build, branch_at + len("if (state.tool === TOOL_SEQUENTIAL_GENERATION) ")
+    )
+    assert 'parseOptionalNumber("max-images")' in branch, "组图分支未复用可选数量判别"
+    assert "maxImages === undefined" in branch, "组图分支缺省判定漂移，留空不再省略键"
+    assert "body.sequential_image_generation_options" in branch, "组图分支未装配组图配置"
+    assert "{ max_images: maxImages }" in branch, "组图配置未嵌套装配 max_images"
+    layer_at = build.index("if (layerDecompositionActive() && layerOptionsAllowed()) {")
+    layer_branch, _ = _balanced_brace_block(
+        build, layer_at + len("if (layerDecompositionActive() && layerOptionsAllowed()) ")
+    )
+    assert 'parseOptionalNumber("layer-max-images")' in layer_branch, "拆分分支未复用可选数量判别"
+
+
+def test_layer_options_submission_shares_display_gate() -> None:
+    """拆分配置提交读值与展示折叠同判定：折叠残留旧值不随请求携带。
+
+    原地配置重载（令牌轮换重入）切到不支持拆分配置的模型时字段折叠而旧值
+    仍在表单，提交照读会携带用户不可见也无法清除的 layer_decomposition_options
+    遭能力门控拒绝。判定收敛于 layerOptionsAllowed 单一助手，展示折叠与提交
+    读值共用；模型信息缺失（unknown 家族）默认放行，与后端放行同源。
+    """
+    generate_js = read_js_module_source("generate.js")
+    helper = _js_code_without_comments(
+        function_body(generate_js, r"function layerOptionsAllowed\(.*?^}")
+    )
+    assert "currentModel()" in helper, "拆分配置判定未取当前模型"
+    assert "supports_layer_decomposition_options" in helper, "拆分配置能力键漂移"
+    assert ": true;" in helper, "模型信息缺失未默认放行（unknown 家族）"
+    apply = function_body(generate_js, r"export function applyToolUI\(.*?^}")
+    assert re.search(
+        r"state\.tool !== TOOL_LAYER_DECOMPOSE \|\| !layerOptionsAllowed\(\)", apply
+    ), "展示折叠未消费共享判定"
+    build = _js_code_without_comments(
+        function_body(generate_js, r"function buildRequestBody\(.*?^}")
+    )
+    assert re.search(
+        r"layerDecompositionActive\(\) && layerOptionsAllowed\(\)", build
+    ), "提交读值未与展示折叠同判定，折叠旧值仍随请求携带"
 
 
 def test_generate_config_rerender_resets_paging_via_gallery_domain() -> None:
@@ -364,6 +415,180 @@ def test_generate_config_rerender_resets_paging_via_gallery_domain() -> None:
     _assert_imported_from(source, "gallery.js", "resetGalleryPaging")
     render = function_body(source, r"function renderConfigInfo\(.*?^}")
     assert "resetGalleryPaging()" in render, "配置渲染路径未复位分页（清回退栈）"
+
+
+def test_size_select_restores_pre_layer_choice_on_exit() -> None:
+    """尺寸下拉离开拆分工具恢复进入前记忆：非拆分分支消费 preferred。
+
+    无 JS 运行时测试基建，以稳定结构锚点为契约（局限：锁源码形态不执行
+    行为）。离开拆分时 preferred 接管记忆值，非拆分分支的条件与赋值若回退
+    消费 previous，拆分期被替换为 auto 的选择丢失，默认档覆写用户选择。
+    """
+    render = function_body(
+        read_js_module_source("generate.js"), r"function renderSizeOptions\(.*?^}"
+    )
+    code = _js_code_without_comments(render)
+    assert "state.sizePreLayer = previous;" in code, "进入拆分未记忆进入前选择"
+    assert re.search(
+        r"preferred = state\.sizePreLayer;\s*state\.sizePreLayer = null;", code
+    ), "离开拆分未恢复并清空记忆选择"
+    layer_block, layer_end = _balanced_brace_block(
+        code, code.index("if (layerMode) {") + len("if (layerMode) ")
+    )
+    assert (
+        'sizeSelect.value = presets.includes(previous) ? previous : "auto";' in layer_block
+    ), "拆分分支形态漂移，进入时的保持语义需同步守护"
+    else_head = re.compile(r"\s*else\s*\{").match(code, layer_end + 1)
+    assert else_head is not None, "缺非拆分分支"
+    else_block, _ = _balanced_brace_block(code, else_head.end() - 1)
+    assert (
+        'if (preferred === "custom" || presets.includes(preferred))' in else_block
+    ), "非拆分分支条件回退 previous，拆分前选择恢复失效"
+    assert "sizeSelect.value = preferred;" in else_block, "非拆分分支赋值回退 previous"
+    assert "sizeSelect.value = previous;" not in else_block, "非拆分分支残留 previous 赋值"
+
+
+async def test_background_control_mirrors_backend_capability_gates(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """背景控件镜像后端 background 门控：取值白名单过滤与调用形态三态判定。
+
+    无 JS 运行时测试基建，以稳定结构锚点为契约：取值项按 config-info 当前模型声明的
+    allowed_background_modes 过滤，transparent 的调用形态查 config-info 下发的
+    background_form_image_limits 界限表判定（服务端由 classify_background_form
+    逐点求值单源派生，表与分类器逐输入一致经数据通道断言，前端不再手工镜像）；
+    先前选择不在重建后的选项集时回落空值，空值整体省略 body.background 键。
+    图层拆分无该参数、字段随工具与模型能力折叠，提交读值与展示折叠共用可用性
+    判定（折叠旧值不随请求）；参考图增删与工具切换经 refs 域渲染咽喉的唯一
+    回调槽触发选项复核；未知模型回退白名单经 config-info 下发（与后端 unknown
+    家族同源），前端不再私有镜像；静态直出项与标签表等值。
+    """
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    select = re.search(r'<select id="background">(.*?)</select>', html, re.DOTALL)
+    assert select, "入口页缺失背景下拉"
+    assert '<option value="">跟随服务器</option>' in select.group(1)
+
+    generate_js = read_js_module_source("generate.js")
+    build = _js_code_without_comments(
+        function_body(generate_js, r"function buildRequestBody\(.*?^}")
+    )
+    assert 'const backgroundMode = $("background").value;' in build, "请求组装未读背景下拉"
+    assert (
+        "if (backgroundMode) body.background = backgroundMode;" in build
+    ), "空值未整体省略 background 键"
+    # 提交读值与展示折叠同判定：图层拆分折叠残留旧值不随请求携带，免遭门控拒绝。
+    gate = "if (backgroundFieldAvailable()) {"
+    assert gate in build, "提交读值未与展示折叠共用可用性判定"
+    assert build.index(gate) < build.index(
+        'const backgroundMode = $("background").value;'
+    ), "可用性判定未罩住背景下拉读值"
+
+    # 形态判定数据化：界限表经 config-info 单源下发，按「覆盖张数的最小上界、
+    # 无界兜底」解释须与后端分类器逐输入一致；扫描域越前端可达上限两张，覆盖
+    # 无界尾形态的判定。
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+    response = await web_get(app, WEB_API_CONFIG_INFO)
+    assert response.status_code == 200
+    info = response.json()
+    assert "background_form_image_limits" in info, "config-info 缺形态界限表键"
+    limits: dict[str, int | None] = info["background_form_image_limits"]
+
+    def table_form(image_count: int) -> str | None:
+        bounded = [
+            (limit, form)
+            for form, limit in limits.items()
+            if limit is not None and image_count <= limit
+        ]
+        if bounded:
+            return min(bounded)[1]
+        return next((form for form, limit in limits.items() if limit is None), None)
+
+    scan_domain = max(caps.max_reference_images for caps in MODEL_CAPABILITIES.values()) + 2
+    for image_count in range(scan_domain):
+        assert table_form(image_count) == classify_background_form(
+            image_count
+        ), f"形态界限表在 {image_count} 张参考图处与后端分类器不一致"
+
+    classify = _js_code_without_comments(
+        function_body(generate_js, r"function classifyBackgroundForm\(.*?^}")
+    )
+    assert "background_form_image_limits" in classify, "形态判定未消费 config-info 下发的界限表"
+    for literal in ('"text"', '"single"', '"multi"'):
+        assert literal not in classify, f"形态判定回归手写形态字面量: {literal}"
+
+    render = _js_code_without_comments(
+        function_body(generate_js, r"function renderBackgroundOptions\(.*?^}")
+    )
+    for literal in (
+        "modes.includes",
+        "forms.includes(classifyBackgroundForm(state.refs.length))",
+        'empty.textContent = "跟随服务器";',
+        "if (available.includes(previous)) select.value = previous;",
+    ):
+        assert literal in render, f"背景下拉重建缺要素: {literal}"
+    assert render.index("available.push(mode);") < render.index(
+        "if (available.includes(previous))"
+    ), "保留判定未以重建后的选项集为准"
+
+    availability = _js_code_without_comments(
+        function_body(generate_js, r"function backgroundFieldAvailable\(.*?^}")
+    )
+    assert (
+        "if (layerDecompositionActive()) return false;" in availability
+    ), "图层拆分未判背景字段不可用"
+    assert "modes.length > 0" in availability, "模型不支持未判背景字段不可用"
+    visibility = _js_code_without_comments(
+        function_body(generate_js, r"function syncBackgroundFieldVisibility\(.*?^}")
+    )
+    assert (
+        'classList.toggle("collapsed", !backgroundFieldAvailable())' in visibility
+    ), "展示折叠未消费共享可用性判定"
+
+    # 工具切换的选项重建经 convergeRefsToTool 的渲染咽喉回调触发，不直呼。
+    for pattern, meaning, anchors in (
+        (
+            r"export function applyToolUI\(.*?^}",
+            "工具切换未联动背景字段",
+            ("syncBackgroundFieldVisibility();", "convergeRefsToTool();"),
+        ),
+        (
+            r"function renderConfigInfo\(.*?^}",
+            "模型刷新未联动背景字段",
+            ("syncBackgroundFieldVisibility();", "renderBackgroundOptions();"),
+        ),
+    ):
+        context = function_body(generate_js, pattern)
+        for anchor in anchors:
+            assert anchor in context, f"{meaning}: {anchor}"
+    assert (
+        "setOnRefsChanged(renderBackgroundOptions);" in generate_js
+    ), "参考图增删未登记背景选项复核回调"
+    refs_js = read_js_module_source("refs.js")
+    render_refs = function_body(refs_js, r"function renderReferences\(.*?^}")
+    assert "refsChangedCallback();" in render_refs, "参考图渲染咽喉未触发回调槽"
+    assert "onRefsChanged" not in refs_js, "参考图变更回归多订阅 pub-sub"
+
+    # 回退白名单经 config-info 单点下发：前端不再私有镜像，消费锚定 info.fallback_*。
+    assert "FALLBACK_BACKGROUND_MODES" not in generate_js, "背景回退取值回归 JS 私有镜像"
+    assert "FALLBACK_BACKGROUND_FORMS" not in generate_js, "背景回退形态回归 JS 私有镜像"
+    capabilities_body = _js_code_without_comments(
+        function_body(generate_js, r"function backgroundCapabilities\(.*?^}")
+    )
+    for anchor in (
+        'capabilityList("allowed_background_modes", "fallback_background_modes")',
+        'capabilityList("allowed_background_forms", "fallback_background_forms")',
+    ):
+        assert anchor in capabilities_body, f"背景回退白名单未消费 {anchor}"
+
+    # 静态直出项与标签表等值：config-info 未就绪时静态项即生效选项集。
+    static_entries = dict(re.findall(r'<option value="([a-z]+)">([^<]*)</option>', select.group(1)))
+    labels = re.search(r"BACKGROUND_MODE_LABELS = new Map\(\[(.*?)\]\);", generate_js, re.DOTALL)
+    assert labels, "标签表常量形态改变，守护需同步"
+    label_entries = dict(re.findall(r'\["([a-z]+)", "([^"]*)"\]', labels.group(1)))
+    assert static_entries == label_entries, "静态直出项与重建标签表分叉"
 
 
 def test_gallery_js_parse_contract() -> None:
@@ -1131,7 +1356,7 @@ def test_refs_tool_config_mirrors_backend_generation_rules() -> None:
     assert int(single.group(1)) == 1, "前端单图基数与后端 _SingleImageInput 基数失配"
     assert (
         "min: SINGLE_REF_LIMIT," in config and "max: SINGLE_REF_LIMIT," in config
-    ), "图生图分支未以单图基数常量约束参考图区间"
+    ), "单参考图分支未以单图基数常量约束参考图区间"
 
     fusion = re.search(r"const FUSION_REF_MIN = (\d+);", refs_js)
     assert fusion, "refs.js 融合最少张数常量形态改变，守护需同步"
@@ -1140,9 +1365,8 @@ def test_refs_tool_config_mirrors_backend_generation_rules() -> None:
     ), "前端融合最少张数与后端 MULTI_IMAGE_MIN_ITEMS 失配"
     assert "min: FUSION_REF_MIN," in config, "融合分支未消费融合下限常量"
 
-    # promptOptional 与后端 prompt 可缺省性同向：图生图分层场景可缺省，其余必填。
+    # promptOptional 与后端 prompt 可缺省性同向：图层拆分工具可缺省，其余必填。
     for tool_const, model in (
-        ("TOOL_IMAGE_TO_IMAGE", ImageToImageInput),
         ("TOOL_MULTI_IMAGE_FUSION", MultiImageFusionInput),
         ("TOOL_SEQUENTIAL_GENERATION", SequentialGenerationInput),
     ):
@@ -1155,12 +1379,45 @@ def test_refs_tool_config_mirrors_backend_generation_rules() -> None:
             flag.group(1) == "true"
         ) == backend_optional, f"{tool_const} 的 promptOptional 与后端 prompt 可缺省性失配"
 
+    # 图生图与图层拆分合为单参考图单分支：promptOptional 按
+    # tool === TOOL_LAYER_DECOMPOSE 取值，与后端仅拆分可缺省同向。
+    single_ref_branch = re.search(
+        r"tool === TOOL_IMAGE_TO_IMAGE \|\| tool === TOOL_LAYER_DECOMPOSE\)\s*"
+        r"return \{(.*?)\};",
+        config,
+        re.DOTALL,
+    )
+    assert single_ref_branch is not None, "toolConfig 单参考图分支形态改变，守护需同步"
+    assert "promptOptional: tool === TOOL_LAYER_DECOMPOSE" in single_ref_branch.group(
+        1
+    ), "单参考图分支的 promptOptional 未按拆分工具取值"
+    single_ref_optional = {
+        type(None) in get_args(model.model_fields["prompt"].annotation)
+        for model in (ImageToImageInput, LayerDecomposeInput)
+    }
+    assert single_ref_optional == {
+        False,
+        True,
+    }, "后端单参考图两工具的可缺省性不再是仅拆分可选，守护需同步"
+
     # 镜像值经提交前强制消费才生效，锁定两个消费点。
     submit = function_body(
         read_js_module_source("generate.js"), r"export async function submitGenerate\(.*?^}"
     )
-    assert "config.promptOptional && layerChecked" in submit, "提示词前置校验未消费 promptOptional"
+    assert "!prompt && !config.promptOptional" in submit, "提示词前置校验未消费 promptOptional"
     assert "state.refs.length < config.min" in submit, "提交校验未消费参考图下限"
+
+
+def test_layer_options_bounds_match_backend_constants() -> None:
+    """拆分数量输入的 HTML 值域与后端官方值域常量一致，双侧任一漂移即红。"""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    tag = re.search(r'<input[^>]*id="layer-max-images"[^>]*>', html)
+    assert tag, "入口页缺失 layer-max-images 输入"
+    lower = re.search(r'min="(\d+)"', tag.group(0))
+    upper = re.search(r'max="(\d+)"', tag.group(0))
+    assert lower and upper, "拆分数量输入缺失 min/max 声明"
+    assert int(lower.group(1)) == LAYER_DECOMPOSITION_MIN_IMAGES, "HTML 值域下限与常量漂移"
+    assert int(upper.group(1)) == LAYER_DECOMPOSITION_MAX_IMAGES, "HTML 值域上限与常量漂移"
 
 
 def test_request_failed_sentinel_matches_backend_constant() -> None:

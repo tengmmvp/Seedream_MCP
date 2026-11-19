@@ -26,7 +26,7 @@ from pydantic import ValidationError
 from _lib.generation_payloads import GENERATION_BASE_PAYLOADS
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.definitions.conventions import (
-    MAX_LAYER_DECOMPOSITION_IMAGES,
+    DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES,
     MAX_PARALLEL_REQUEST_COUNT,
 )
 from seedream_mcp.tools.pipeline.auto_save import _build_auto_save_manager
@@ -34,8 +34,9 @@ from seedream_mcp.tools.pipeline.context import build_generation_context
 from seedream_mcp.tools.schemas import (
     BaseGenerationInput,
     GenerationInputParams,
-    ImageToImageInput,
+    LayerDecomposeInput,
     SequentialGenerationInput,
+    SequentialImageGenerationOptions,
     TextToImageInput,
 )
 from seedream_mcp.utils.core import loop_bound
@@ -45,6 +46,10 @@ from seedream_mcp.utils.core.validators import (
     resolve_wave_divisor,
 )
 from seedream_mcp.utils.io.download import worst_case_download_budget_ms
+from seedream_mcp.utils.model.capabilities import (
+    get_model_capabilities,
+    max_per_request_image_count,
+)
 from seedream_mcp.webapp.generate import (
     GENERATE_OVERHEAD_MS,
     _generate_scheduling_budget_ms,
@@ -61,6 +66,10 @@ _REPRESENTATIVE_CONCURRENCY_LEVELS = (
     MAX_PARALLEL_REQUEST_COUNT + 6,
 )
 
+# 载荷表含组图与图层拆分输入，无单一已识别家族同时放行两类能力（组图放行家族
+# 均不支持拆分），循环遍历取未识别端点按全放行兜底构造 context。
+_PARITY_MODEL_ID = "ep-parity-guard"
+
 
 def test_scheduling_budget_matches_server_scheduling() -> None:
     """代表性准入档位下调度预算逐档等于真实调度的波次完成预算加余量。
@@ -70,7 +79,9 @@ def test_scheduling_budget_matches_server_scheduling() -> None:
     预算 + 固定余量，锁定推导不欠计真实波次。
     """
     for concurrency in _REPRESENTATIVE_CONCURRENCY_LEVELS:
-        config = SeedreamConfig(api_key="guard-key", generate_concurrency=concurrency)
+        config = SeedreamConfig(
+            api_key="guard-key", model_id=_PARITY_MODEL_ID, generate_concurrency=concurrency
+        )
         budget_ms = int(api_retry_budget_seconds(config.api_timeout) * 1000)
         for model, payload in GENERATION_BASE_PAYLOADS.items():
             for request_count in range(1, MAX_PARALLEL_REQUEST_COUNT + 1):
@@ -99,7 +110,9 @@ def test_scheduling_budget_matches_server_scheduling() -> None:
 def test_scheduling_budget_explicit_parallelism_matches_context() -> None:
     """显式 parallelism 并入波次除数，波次按经 context.parallelism 消费的真实调度对账。"""
     for concurrency in _REPRESENTATIVE_CONCURRENCY_LEVELS:
-        config = SeedreamConfig(api_key="guard-key", generate_concurrency=concurrency)
+        config = SeedreamConfig(
+            api_key="guard-key", model_id=_PARITY_MODEL_ID, generate_concurrency=concurrency
+        )
         budget_ms = int(api_retry_budget_seconds(config.api_timeout) * 1000)
         request_count = MAX_PARALLEL_REQUEST_COUNT
         parallelism = 2
@@ -132,47 +145,85 @@ def test_request_count_domain_capped_at_batch_limit() -> None:
 
 
 def test_per_request_image_count_metadata_matches_pipeline_shape() -> None:
-    """输入模型的单请求产图数元数据与流水线真实产图形态对账。
+    """输入模型的单请求产图数元数据与独立推导的产图形态基准对账。
 
-    组图生效值经 context.max_images 消费，图层拆分为上游固定满额形态，其余恒产一图。
-    元数据偏离真实形态会使下载尾巴欠计总图数。
+    组图生效值经 context.sequential_image_generation_options 消费；图层拆分恒为
+    拆分场景（意图经独立工具表达），期望按能力表字段与官方默认常量内联推导，
+    不经被断言的同名元数据自证；其余恒产一图。元数据偏离会使下载尾巴欠计总图数。
     """
-    config = SeedreamConfig(api_key="guard-key")
+    config = SeedreamConfig(api_key="guard-key", model_id=_PARITY_MODEL_ID)
     for model, payload in GENERATION_BASE_PAYLOADS.items():
         context = build_generation_context(cast(GenerationInputParams, model(**payload)), config)
         # 载荷表按 BaseModel 收纳生成模型，元数据经生成输入基类收窄访问。
         input_cls = cast("type[BaseGenerationInput]", model)
         if model is SequentialGenerationInput:
-            expected = context.max_images
+            expected = (context.sequential_image_generation_options or {}).get("max_images")
+        elif model is LayerDecomposeInput:
+            caps = get_model_capabilities(config.model_id)
+            expected = (
+                DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
+                if caps.supports_layer_decomposition_options
+                else caps.max_layer_decomposition_images
+            )
+            assert expected > 1, "拆分场景产图数元数据退化为单图"
         else:
             expected = 1
-            assert context.max_images is None, f"{model.__name__} 不应有组图生效上限"
+            assert (
+                context.sequential_image_generation_options is None
+            ), f"{model.__name__} 不应有组图生效上限"
         assert (
             input_cls.per_request_image_count(
-                layer_decomposition=False, max_images=None, image_count=0
+                max_images=None,
+                image_count=0,
+                model_id=config.model_id,
             )
             == expected
-        ), f"{model.__name__} 缺省产图数元数据 != 流水线真实形态 {expected}"
+        ), f"{model.__name__} 缺省产图数元数据 != 产图形态基准 {expected}"
+    # 拆分投影键（layer_max_images）缺省按官方默认、显式按投影值，与能力表满额对账。
     assert (
-        ImageToImageInput.per_request_image_count(
-            layer_decomposition=True, max_images=None, image_count=0
+        LayerDecomposeInput.per_request_image_count(
+            max_images=None,
+            image_count=0,
+            model_id="doubao-seedream-5-5-261028",
         )
-        == MAX_LAYER_DECOMPOSITION_IMAGES
-    ), "图层拆分产图数元数据偏离满额常量"
+        == 30
+    ), "5.5 拆分缺省产图数元数据偏离官方默认 30"
+    assert (
+        LayerDecomposeInput.per_request_image_count(
+            max_images=None,
+            image_count=0,
+            model_id="doubao-seedream-5-5-261028",
+            layer_max_images=100,
+        )
+        == 100
+    ), "5.5 拆分显式产图数元数据偏离投影值"
+    assert (
+        LayerDecomposeInput.per_request_image_count(
+            max_images=None,
+            image_count=0,
+            model_id="doubao-seedream-5-0-pro-260628",
+        )
+        == 17
+    ), "5.0 Pro 拆分产图数元数据偏离能力表满额"
     # 组图投影键（max_images、image_count）的生效值合成与流水线消费值逐档一致。
     for max_images in (None, 1, 4):
         for image_count in (0, 1, 3):
             params = SequentialGenerationInput(
                 prompt="组图",
                 image=None if image_count == 0 else ["https://x/a.png"] * image_count,
-                max_images=max_images,
+                sequential_image_generation_options=(
+                    None
+                    if max_images is None
+                    else SequentialImageGenerationOptions(max_images=max_images)
+                ),
             )
             context = build_generation_context(params, config)
-            assert (
-                SequentialGenerationInput.per_request_image_count(
-                    layer_decomposition=False, max_images=max_images, image_count=image_count
-                )
-                == context.max_images
+            assert SequentialGenerationInput.per_request_image_count(
+                max_images=max_images,
+                image_count=image_count,
+                model_id=config.model_id,
+            ) == (context.sequential_image_generation_options or {}).get(
+                "max_images"
             ), f"max_images={max_images} image_count={image_count}: 产图数元数据与生效值漂移"
 
 
@@ -201,7 +252,8 @@ def test_download_tail_serial_model_ignores_save_capacity(
     per_download_ms = worst_case_download_budget_ms(
         config.auto_save_download_timeout, config.auto_save_max_retries
     )
-    max_total_images = MAX_LAYER_DECOMPOSITION_IMAGES * MAX_PARALLEL_REQUEST_COUNT
+    # 总图数遍历以单请求合法满额产图数 × 单批上限封顶，守卫覆盖随单一推导点同步。
+    max_total_images = max_per_request_image_count() * MAX_PARALLEL_REQUEST_COUNT
     for total_images in range(1, max_total_images + 1):
         expected = total_images * per_download_ms
         assert (

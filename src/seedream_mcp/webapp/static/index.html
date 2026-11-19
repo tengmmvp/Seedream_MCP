@@ -89,6 +89,15 @@
               >
                 组图
               </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked="false"
+                data-tool="layer-decompose"
+                tabindex="-1"
+              >
+                图层拆分
+              </button>
             </div>
 
             <label class="field-label" for="prompt" id="prompt-label"
@@ -138,19 +147,46 @@
             </div>
 
             <div class="param-grid">
+              <div class="field collapse collapsed" id="max-images-field">
+                <div class="collapse-inner">
+                  <label class="field-label" for="max-images">组图数量</label>
+                  <input
+                    type="number"
+                    id="max-images"
+                    min="1"
+                    max="15"
+                    placeholder="留空自动"
+                  />
+                </div>
+              </div>
+              <div
+                class="field field-wide collapse collapsed"
+                id="layer-options-field"
+              >
+                <div class="collapse-inner">
+                  <div class="checkbox-row layer-options-row">
+                    <label
+                      class="field-label layer-options-label"
+                      for="layer-max-images"
+                      >拆分数量</label
+                    >
+                    <input
+                      type="number"
+                      id="layer-max-images"
+                      min="2"
+                      max="100"
+                      placeholder="留空自动"
+                    />
+                    <label class="checkbox-label"
+                      ><input type="checkbox" id="text-recognition" />富文本
+                      OCR</label
+                    >
+                  </div>
+                </div>
+              </div>
               <div class="field">
                 <label class="field-label" for="size">尺寸</label>
                 <select id="size"></select>
-              </div>
-              <div class="field">
-                <label class="field-label" for="request-count">生成张数</label>
-                <input
-                  type="number"
-                  id="request-count"
-                  min="1"
-                  max="10"
-                  value="1"
-                />
               </div>
               <div
                 class="field field-wide collapse collapsed"
@@ -179,32 +215,20 @@
               </div>
               <div class="field field-checkbox">
                 <div class="checkbox-row">
-                  <div class="collapse collapse-x collapsed" id="layer-field">
-                    <div class="collapse-inner">
-                      <label class="checkbox-label"
-                        ><input
-                          type="checkbox"
-                          id="layer-decomposition"
-                        />图层拆分</label
-                      >
-                    </div>
-                  </div>
                   <label class="checkbox-label"
                     ><input type="checkbox" id="watermark" />添加水印</label
                   >
                 </div>
               </div>
-              <div class="field collapse collapsed" id="max-images-field">
-                <div class="collapse-inner">
-                  <label class="field-label" for="max-images">组图数量</label>
-                  <input
-                    type="number"
-                    id="max-images"
-                    min="1"
-                    max="15"
-                    placeholder="留空自动"
-                  />
-                </div>
+              <div class="field">
+                <label class="field-label" for="request-count">生成张数</label>
+                <input
+                  type="number"
+                  id="request-count"
+                  min="1"
+                  max="10"
+                  value="1"
+                />
               </div>
             </div>
 
@@ -220,6 +244,17 @@
                       <option value="">跟随服务器</option>
                       <option value="jpeg">JPEG</option>
                       <option value="png">PNG</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field collapse">
+                  <div class="collapse-inner">
+                    <label class="field-label" for="background">背景</label>
+                    <select id="background">
+                      <option value="">跟随服务器</option>
+                      <option value="transparent">透明</option>
+                      <option value="opaque">不透明</option>
+                      <option value="auto">自动</option>
                     </select>
                   </div>
                 </div>

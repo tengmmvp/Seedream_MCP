@@ -41,6 +41,7 @@ export const TOOL_TEXT_TO_IMAGE = "text-to-image";
 export const TOOL_IMAGE_TO_IMAGE = "image-to-image";
 export const TOOL_MULTI_IMAGE_FUSION = "multi-image-fusion";
 export const TOOL_SEQUENTIAL_GENERATION = "sequential-generation";
+export const TOOL_LAYER_DECOMPOSE = "layer-decompose";
 
 /**
  * 图库分页状态的首页初始态工厂：每次返回全新对象。
@@ -110,6 +111,17 @@ export function currentModel() {
       (m) => m.model_id === state.configInfo.model_id,
     ) || null
   );
+}
+
+/**
+ * 取当前模型的能力清单字段，未知模型回退 config-info 下发的 unknown 家族
+ * 声明，回退缺失时空数组（尺寸档位与 background 白名单共用本回退链）。
+ */
+export function capabilityList(modelField, fallbackKey) {
+  const current = currentModel();
+  if (current && Array.isArray(current[modelField])) return current[modelField];
+  const fallback = state.configInfo?.[fallbackKey];
+  return Array.isArray(fallback) ? fallback : [];
 }
 
 /** 切换活动工具并同步高亮、选中态与焦点序。 */

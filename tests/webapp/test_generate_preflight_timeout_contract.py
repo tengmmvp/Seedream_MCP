@@ -16,11 +16,9 @@ from starlette.requests import Request
 
 from _lib.web_fixtures import _assert_imported_from, function_body, read_js_module_source
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.definitions.conventions import (
-    MAX_LAYER_DECOMPOSITION_IMAGES,
-    MAX_PARALLEL_REQUEST_COUNT,
-)
-from seedream_mcp.tools.schemas import ImageToImageInput
+from seedream_mcp.definitions.conventions import MAX_PARALLEL_REQUEST_COUNT
+from seedream_mcp.tools.schemas import LayerDecomposeInput
+from seedream_mcp.utils.model.capabilities import MODEL_CAPABILITIES, MODEL_FAMILY_55
 from seedream_mcp.webapp.generate import (
     _generate_scheduling_budget_ms,
     _preflight_timeout_ms,
@@ -30,6 +28,9 @@ from seedream_mcp.webapp.generate import (
 
 _JS_MODULES = ("api.js", "generate.js", "gallery.js", "main.js", "refs.js")
 
+# 默认模型（Seedream 5.5）图层拆分的满额产图数，满档预算按该值投影，随能力表联动。
+_FULL_LOAD_LAYER_IMAGES = MODEL_CAPABILITIES[MODEL_FAMILY_55].max_layer_decomposition_images
+
 # 服务端预检读取但不由 Web 前端构造的 query 键：parallelism 为 body 携带该
 # 字段的其他客户端预留投影位，Web 表单无此字段。
 _SERVER_ONLY_QUERY_KEYS = frozenset({"parallelism"})
@@ -38,9 +39,9 @@ _SERVER_ONLY_QUERY_KEYS = frozenset({"parallelism"})
 _EXPECTED_QUERY_KEYS = frozenset(
     {
         "request_count",
-        "layer_decomposition",
         "image_count",
         "max_images",
+        "layer_max_images",
         "download_tail",
     }
 )
@@ -83,8 +84,9 @@ def _full_load_preflight_request() -> Request:
             "method": "POST",
             "headers": [],
             "query_string": (
-                f"request_count={MAX_PARALLEL_REQUEST_COUNT}&layer_decomposition=1".encode()
-            ),
+                f"request_count={MAX_PARALLEL_REQUEST_COUNT}"
+                f"&layer_max_images={_FULL_LOAD_LAYER_IMAGES}"
+            ).encode(),
         }
     )
 
@@ -123,7 +125,7 @@ def test_new_server_query_read_without_frontend_construction_turns_guard_red() -
 def test_frontend_drops_query_construction_turns_guard_red() -> None:
     """模拟「前端漏构造一个预算键」：改写源文本喂对账检查必须变红。"""
     source = _preflight_js_body()
-    mutated = source.replace('params.set("max_images", String(body.max_images));', "", 1)
+    mutated = source.replace('params.set("max_images", String(maxImages));', "", 1)
     assert mutated != source, "前端构造锚失配，漏构造模拟未生效"
     with pytest.raises(AssertionError):
         _assert_server_reads_covered_by_frontend(
@@ -249,7 +251,7 @@ def test_generate_timeout_fallback_covers_server_derivation() -> None:
     assert cap is not None, "generate.js 静态保守上限常量形态改变，守护需同步"
     config = SeedreamConfig(api_key="guard-key")
     # 经真实预检入口推导，与线缆行为同源。
-    derived_ms = _preflight_timeout_ms(_full_load_preflight_request(), config, ImageToImageInput)
+    derived_ms = _preflight_timeout_ms(_full_load_preflight_request(), config, LayerDecomposeInput)
     assert (
         int(cap.group(1)) >= derived_ms * 1.5
     ), "静态保守上限低于服务端默认满档推导的 1.5 倍，需抬升上限常量"
@@ -265,7 +267,7 @@ def _unclamped_full_load_budget_ms(config: SeedreamConfig) -> int:
         config, MAX_PARALLEL_REQUEST_COUNT
     ) + worst_case_auto_save_tail_ms(
         config,
-        total_images=MAX_PARALLEL_REQUEST_COUNT * MAX_LAYER_DECOMPOSITION_IMAGES,
+        total_images=MAX_PARALLEL_REQUEST_COUNT * _FULL_LOAD_LAYER_IMAGES,
         auto_save=None,
     )
 
@@ -282,7 +284,7 @@ def test_extreme_config_budget_capped_at_js_timer_domain() -> None:
     unclamped_ms = _unclamped_full_load_budget_ms(config)
     assert unclamped_ms > _JS_SET_TIMEOUT_MAX_MS, "极端档已不越过 JS 值域，封顶用例需重选档位"
     assert (
-        _preflight_timeout_ms(_full_load_preflight_request(), config, ImageToImageInput)
+        _preflight_timeout_ms(_full_load_preflight_request(), config, LayerDecomposeInput)
         == _JS_SET_TIMEOUT_MAX_MS
     ), "preflight 预算未封顶，浏览器计时器回绕立即中止在途生成等待"
     assert (
@@ -297,6 +299,6 @@ def test_default_config_budget_within_js_timer_domain_uncapped() -> None:
 
     assert unclamped_ms <= _JS_SET_TIMEOUT_MAX_MS
     assert (
-        _preflight_timeout_ms(_full_load_preflight_request(), config, ImageToImageInput)
+        _preflight_timeout_ms(_full_load_preflight_request(), config, LayerDecomposeInput)
         == unclamped_ms
     )

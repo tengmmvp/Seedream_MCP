@@ -1,4 +1,4 @@
-"""Web 操作台生成 API 测试：四端点复用 runners、错误映射与 web_path 增强。
+"""Web 操作台生成 API 测试：五端点复用 runners、错误映射与 web_path 增强。
 
 runner 经对象式 monkeypatch 替换，覆盖成功、校验失败与错误类型映射到 HTTP
 状态码的分支；web_path 增强的防劣化分支独立单测；共享资源 shim 的构造行为
@@ -42,7 +42,7 @@ from seedream_mcp.config import (
     get_active_config,
     set_active_config,
 )
-from seedream_mcp.definitions.conventions import MAX_LAYER_DECOMPOSITION_IMAGES
+from seedream_mcp.definitions.conventions import DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
 import seedream_mcp.tools.outputs as outputs_module
 from seedream_mcp.tools.outputs.channels import output_channel_enabled
 from seedream_mcp.tools.pipeline import build_generation_context
@@ -245,7 +245,7 @@ async def test_generate_preflight_folds_layer_and_sequential_image_counts(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """图层拆分按满额图片数、组图按参考图张数推导的生效值折算总下载数。"""
+    """图层拆分按官方默认或显式投影的图片数、组图按参考图数量推导的生效值折算总下载数。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
     config = get_active_config()
@@ -254,18 +254,35 @@ async def test_generate_preflight_folds_layer_and_sequential_image_counts(
     )
     budget_ms = generate_module._generate_scheduling_budget_ms(config, 1)
 
-    layer_response = await web_post_raw(
-        app, "/web/api/generate/image-to-image?preflight=1&layer_decomposition=1", b""
+    layer_response = await web_post_raw(app, "/web/api/generate/layer-decompose?preflight=1", b"")
+    layer_explicit_response = await web_post_raw(
+        app,
+        "/web/api/generate/layer-decompose?preflight=1&layer_max_images=100",
+        b"",
+    )
+    # 默认 5.5 家族不支持组图：投影自门控归零，下载尾巴不计。
+    gated_sequential_response = await web_post_raw(
+        app, "/web/api/generate/sequential-generation?preflight=1&image_count=3", b""
+    )
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            model_id="doubao-seedream-5-0-260128",
+        )
     )
     sequential_response = await web_post_raw(
         app, "/web/api/generate/sequential-generation?preflight=1&image_count=3", b""
     )
 
     expected = {
-        "layer": budget_ms + MAX_LAYER_DECOMPOSITION_IMAGES * per_download_ms,
-        "sequential": budget_ms + resolve_sequential_max_images(None, 3) * per_download_ms,
+        "layer": budget_ms + DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES * per_download_ms,
+        "layer_explicit": budget_ms + 100 * per_download_ms,
+        "sequential": budget_ms + resolve_sequential_max_images(3) * per_download_ms,
     }
     assert layer_response.json()["timeout_ms"] == expected["layer"]
+    assert layer_explicit_response.json()["timeout_ms"] == expected["layer_explicit"]
+    assert gated_sequential_response.json()["timeout_ms"] == budget_ms
     assert sequential_response.json()["timeout_ms"] == expected["sequential"]
 
 
@@ -274,7 +291,7 @@ async def test_generate_preflight_clamps_malformed_projections(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """畸形投影取值经上下界钳位：image_count 封顶使预算恒正，layer_decomposition 仅 "1" 启用，0、空串与垃圾真值一律不启用。"""
+    """畸形投影取值逐键防御：image_count 封顶使预算恒正，拆分端点恒按类声明判场景、不读 layer_decomposition 键，layer_max_images 不可解析按缺省推导。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
     config = get_active_config()
@@ -288,24 +305,49 @@ async def test_generate_preflight_clamps_malformed_projections(
         app, "/web/api/generate/sequential-generation?preflight=1&image_count=999", b""
     )
     layer_zero_response = await web_post_raw(
-        app, "/web/api/generate/image-to-image?preflight=1&layer_decomposition=0", b""
-    )
-    layer_empty_response = await web_post_raw(
-        app, "/web/api/generate/image-to-image?preflight=1&layer_decomposition=", b""
+        app, "/web/api/generate/layer-decompose?preflight=1&layer_decomposition=0", b""
     )
     layer_garbage_response = await web_post_raw(
-        app, "/web/api/generate/image-to-image?preflight=1&layer_decomposition=true", b""
+        app, "/web/api/generate/layer-decompose?preflight=1&layer_decomposition=true", b""
+    )
+    layer_max_garbage_response = await web_post_raw(
+        app,
+        "/web/api/generate/layer-decompose?preflight=1&layer_max_images=abc",
+        b"",
     )
     unparsable_response = await web_post_raw(
         app, "/web/api/generate/text-to-image?preflight=1&request_count=abc", b""
     )
+    # 钳位折算须在支持组图的家族上复算，配置切换置于其余请求之后。
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            model_id="doubao-seedream-5-0-260128",
+        )
+    )
+    clamped_sequential_response = await web_post_raw(
+        app, "/web/api/generate/sequential-generation?preflight=1&image_count=999", b""
+    )
 
+    # 默认 5.5 家族不支持组图：投影自门控归零，下载尾巴不计。
+    assert sequential_response.json()["timeout_ms"] == budget_ms
     # image_count=999 钳位到参考图上限 14，组图产图 15-14=1，负产图数不再推导负预算。
-    assert sequential_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
-    # layer_decomposition 仅 "1" 启用，0、空串与垃圾真值不触发 17 图满额下载尾巴。
-    assert layer_zero_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
-    assert layer_empty_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
-    assert layer_garbage_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
+    assert clamped_sequential_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
+    # 拆分端点即拆分场景，客户端发的 layer_decomposition 键取 0 或垃圾真值均被忽略。
+    assert (
+        layer_zero_response.json()["timeout_ms"]
+        == budget_ms + DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES * per_download_ms
+    )
+    assert (
+        layer_garbage_response.json()["timeout_ms"]
+        == budget_ms + DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES * per_download_ms
+    )
+    # layer_max_images 不可解析回缺省，按官方默认数量推导下载尾巴。
+    assert (
+        layer_max_garbage_response.json()["timeout_ms"]
+        == budget_ms + DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES * per_download_ms
+    )
     # request_count 不可解析回缺省 1，按单请求一波推导。
     assert unparsable_response.json()["timeout_ms"] == budget_ms + single_image_tail_ms
 
@@ -656,7 +698,9 @@ async def test_generate_sequential_generation_returns_structured_payload(
     app = build_web_app()
 
     response = await _post_json(
-        app, "/web/api/generate/sequential-generation", {"prompt": "四格漫画", "max_images": 4}
+        app,
+        "/web/api/generate/sequential-generation",
+        {"prompt": "四格漫画", "sequential_image_generation_options": {"max_images": 4}},
     )
 
     assert response.status_code == 200
@@ -699,6 +743,40 @@ async def test_generate_sequential_generation_empty_image_list_message(
         status=400,
         message_contains="参考图片数量需在 1-14 之间",
     )
+
+
+async def test_generate_layer_decompose_returns_structured_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """拆分端点复用 run_layer_decompose，prompt 缺省的拆分请求体经校验放行。"""
+    write_workspace_config(tmp_path)
+    _install_runner(
+        monkeypatch,
+        "run_layer_decompose",
+        {
+            "tool": "layer_decompose",
+            "success": True,
+            "data": [{"url": "https://x/base.png"}, {"url": "https://x/layer-1.png"}],
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(
+        app,
+        "/web/api/generate/layer-decompose",
+        {"image": "https://x/a.png", "layer_decomposition_options": {"max_images": 50}},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tool"] == "layer_decompose"
+    assert [item["url"] for item in payload["data"]] == [
+        "https://x/base.png",
+        "https://x/layer-1.png",
+    ]
 
 
 async def test_generate_invalid_params_returns_400(

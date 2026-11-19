@@ -4,7 +4,7 @@
 路由引用；挂载则在 app 构造之后向 Starlette 活体路由表追加 Mount。两步的调用
 点由 transport 的 _build_streamable_app 依序触发，时序约束在该调用处本地可见。
 
-handler 按域拆分：meta（入口页/重定向/config-info）、generate（四个生成端点）、
+handler 按域拆分：meta（入口页/重定向/config-info）、generate（五个生成端点）、
 gallery（图库浏览）、files（缩略图与原图）；新增端点时在对应域模块实现后于
 下方注册表登记一行。调用关联作用域由 transport 的 ASGI 最外层中间件单点分配，
 端点内日志按请求归因。
@@ -30,6 +30,7 @@ from .constants import (
     WEB_API_BROWSE,
     WEB_API_CONFIG_INFO,
     WEB_API_GENERATE_IMAGE_TO_IMAGE,
+    WEB_API_GENERATE_LAYER_DECOMPOSE,
     WEB_API_GENERATE_MULTI_IMAGE_FUSION,
     WEB_API_GENERATE_SEQUENTIAL_GENERATION,
     WEB_API_GENERATE_TEXT_TO_IMAGE,
@@ -122,6 +123,7 @@ def register_web_routes() -> None:
             ["POST"],
             generate.web_generate_sequential_generation,
         ),
+        (WEB_API_GENERATE_LAYER_DECOMPOSE, ["POST"], generate.web_generate_layer_decompose),
         (WEB_API_BROWSE, ["POST"], gallery.web_browse),
         (WEB_API_THUMBNAIL, ["GET"], files.web_thumbnail),
         (WEB_API_IMAGE, ["GET"], files.web_image),

@@ -24,7 +24,7 @@ from _lib.web_fixtures import web_asgi_client, write_workspace_config
 from seedream_mcp.config import SeedreamConfig, get_active_config, set_active_config
 from seedream_mcp.definitions.conventions import MAX_PARALLEL_REQUEST_COUNT
 from seedream_mcp.server.transport import _build_streamable_app
-from seedream_mcp.tools.schemas import ImageToImageInput
+from seedream_mcp.tools.schemas import LayerDecomposeInput
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.sanitizers import _CONTAINER_REPR_DEPTH_LIMIT
 from seedream_mcp.utils.model.capabilities import (
@@ -40,7 +40,13 @@ from seedream_mcp.webapp.constants import (
     STATIC_SECURITY_HEADERS,
 )
 from seedream_mcp.webapp.generate import _preflight_timeout_ms
-from seedream_mcp.webapp.meta import _fallback_presets, _upload_budget_chars
+from seedream_mcp.webapp.meta import (
+    _FALLBACK_BACKGROUND_FORMS,
+    _FALLBACK_BACKGROUND_MODES,
+    _FALLBACK_MAX_REFERENCE_IMAGES,
+    _FALLBACK_PRESETS,
+    _upload_budget_chars,
+)
 
 
 def _full_load_preflight_request() -> Request:
@@ -51,7 +57,7 @@ def _full_load_preflight_request() -> Request:
             "method": "POST",
             "headers": [],
             "query_string": (
-                f"request_count={MAX_PARALLEL_REQUEST_COUNT}&layer_decomposition=1".encode()
+                f"request_count={MAX_PARALLEL_REQUEST_COUNT}" "&layer_max_images=100".encode()
             ),
         }
     )
@@ -64,15 +70,14 @@ def test_upload_budget_derivation_floors_at_zero() -> None:
     assert _upload_budget_chars(64 * 1024 * 1024) == 61 * 1024 * 1024
 
 
-def test_fallback_presets_sorted_once_and_reused() -> None:
-    """回退档位排序产物进程内复用，内容与逐次现排序逐字节一致。"""
-    first = _fallback_presets()
+def test_fallback_fields_match_unknown_family() -> None:
+    """回退声明统一取 unknown 家族：档位按数值序、background 取值与形态按字典序、参考图上限直取。"""
+    unknown = get_model_capabilities(MODEL_FAMILY_UNKNOWN)
 
-    assert _fallback_presets() is first
-    assert first == sorted(
-        get_model_capabilities(MODEL_FAMILY_UNKNOWN).allowed_presets,
-        key=preset_numeric_sort_key,
-    )
+    assert _FALLBACK_PRESETS == sorted(unknown.allowed_presets, key=preset_numeric_sort_key)
+    assert _FALLBACK_BACKGROUND_MODES == sorted(unknown.allowed_background_modes)
+    assert _FALLBACK_BACKGROUND_FORMS == sorted(unknown.allowed_background_forms)
+    assert _FALLBACK_MAX_REFERENCE_IMAGES == unknown.max_reference_images
 
 
 async def test_production_app_serves_web_console(
@@ -99,12 +104,14 @@ async def test_production_app_serves_web_console(
     # 满档等待预算兜底与生成端点 preflight 的同投影推导一致（经真实预检入口
     # 复算），预算本体仍由 preflight 按输入单源推导。
     assert info["fallback_presets"] == ["1K", "1.5K", "2K", "3K", "4K"]
+    assert info["fallback_background_modes"] == ["auto", "opaque", "transparent"]
+    assert info["fallback_background_forms"] == ["multi", "single", "text"]
     assert info["unknown_max_reference_images"] == 14
     assert info["upload_budget_chars"] == 61 * 1024 * 1024
     assert info["max_request_count"] == 10
     assert info["max_images"] == 15
     assert info["generate_fallback_timeout_ms"] == _preflight_timeout_ms(
-        _full_load_preflight_request(), get_active_config(), ImageToImageInput
+        _full_load_preflight_request(), get_active_config(), LayerDecomposeInput
     )
     assert info["default_watermark"] is False
     assert static_response.status_code == 200

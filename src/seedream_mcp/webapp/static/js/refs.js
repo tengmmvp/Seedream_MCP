@@ -13,6 +13,7 @@ import {
   showInlineError,
   state,
   TOOL_IMAGE_TO_IMAGE,
+  TOOL_LAYER_DECOMPOSE,
   TOOL_MULTI_IMAGE_FUSION,
   TOOL_SEQUENTIAL_GENERATION,
 } from "./api.js";
@@ -35,10 +36,7 @@ const ZERO_BUDGET_REASONS = new Map([
     BUDGET_SOURCE_SERVER,
     "当前部署请求体上限过低，无法上传参考图，请改用图片 URL",
   ],
-  [
-    BUDGET_SOURCE_INVALID,
-    "服务配置数据异常，暂无法校验上传体积，请刷新页面",
-  ],
+  [BUDGET_SOURCE_INVALID, "服务配置数据异常，暂无法校验上传体积，请刷新页面"],
   [
     BUDGET_SOURCE_UNLOADED,
     "服务配置未加载，暂无法校验上传体积，请刷新页面或改用图片 URL",
@@ -89,12 +87,12 @@ function unknownRefLimit() {
 export function toolConfig(tool) {
   const current = currentModel();
   const refLimit = current ? current.max_reference_images : unknownRefLimit();
-  if (tool === TOOL_IMAGE_TO_IMAGE)
+  if (tool === TOOL_IMAGE_TO_IMAGE || tool === TOOL_LAYER_DECOMPOSE)
     return {
       refs: true,
       min: SINGLE_REF_LIMIT,
       max: SINGLE_REF_LIMIT,
-      promptOptional: true,
+      promptOptional: tool === TOOL_LAYER_DECOMPOSE,
     };
   if (tool === TOOL_MULTI_IMAGE_FUSION)
     return {
@@ -106,6 +104,15 @@ export function toolConfig(tool) {
   if (tool === TOOL_SEQUENTIAL_GENERATION)
     return { refs: true, min: 0, max: refLimit, promptOptional: false };
   return { refs: false, min: 0, max: 0, promptOptional: false };
+}
+
+// 参考图集变更回调槽：唯一消费方在模块加载时登记一次，渲染咽喉处统一触发，
+// 调用方免以 DOM 副作用推断集合变化。
+let refsChangedCallback = null;
+
+/** 登记参考图集变更回调，占满唯一回调槽。 */
+export function setOnRefsChanged(callback) {
+  refsChangedCallback = callback;
 }
 
 /**
@@ -149,6 +156,7 @@ function renderReferences(enterIndex = -1) {
     list.appendChild(item);
   });
   $("ref-count-note").textContent = `${state.refs.length} / ${config.max}`;
+  if (refsChangedCallback) refsChangedCallback();
 }
 
 // 现有 data_uri 参考图的累计字符数。
