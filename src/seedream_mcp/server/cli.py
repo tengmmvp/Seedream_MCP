@@ -111,6 +111,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "未传入时按配置解析",
     )
     parser.add_argument(
+        "--base-url",
+        default=None,
+        help="模型 API 端点 URL；未传入时按配置解析",
+    )
+
+    # 生成请求行为
+    parser.add_argument(
         "--default-size",
         type=str,
         default=None,
@@ -129,11 +136,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="watermark",
         action="store_false",
         help="关闭默认水印；未传入时按配置解析",
-    )
-    parser.add_argument(
-        "--base-url",
-        default=None,
-        help="模型 API 端点 URL；未传入时按配置解析",
     )
 
     # 日志

@@ -54,7 +54,9 @@ SERVER_TITLE = "Seedream Image MCP"
 
 SERVER_DESCRIPTION = "基于火山引擎 Seedream API 的 MCP 图像生成服务器。"
 
-SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生图、多图融合、组图输出与图片浏览。"
+SERVER_INSTRUCTIONS = (
+    "Seedream 图像生成工具，支持文生图、图文生图、多图融合、组图输出、图层拆分与图片浏览。"
+)
 
 # ==================== MCP 服务器实例与共享资源状态 ====================
 
@@ -406,8 +408,6 @@ def _move_call_id_scope_outside_boundary(server: MCPServer) -> None:
         "SDK middleware 链形态变化，调用关联作用域中间件未前移到"
         "「RequestStateBoundary」之外，requestState 失败日志将渲染占位符"
     )
-    # 导入期即时告警，同消息进缓冲由启动路径回放。
-    logger.warning(drift_warning)
     _IMPORT_TIME_WARNINGS.append_once("WARNING", drift_warning)
 
 

@@ -1,16 +1,16 @@
 """Seedream MCP 服务器注册主体。
 
-注册文生图、图文生图、多图融合、组图输出、图片浏览、模型信息查询六种 MCP 工具，
-风格预设 Prompt 与工作区、服务器信息、模型信息、Agent Skills 资源；MCPServer
-实例与共享资源生命周期由 runtime 模块持有，skill 常量与读取函数位于 skills
-模块，门面再导出见包 __init__。
+注册文生图、图文生图、多图融合、组图输出、图层拆分、图片浏览、模型信息查询
+七种 MCP 工具，风格预设 Prompt 与工作区、服务器信息、模型信息、Agent Skills
+资源；MCPServer 实例与共享资源生命周期由 runtime 模块持有，skill 常量与读取
+函数位于 skills 模块，门面再导出见包 __init__。
 
-outputSchema 声明契约：六个工具函数的返回类型注解为
+outputSchema 声明契约：七个工具函数的返回类型注解为
 ``Annotated[CallToolResult, ...StructuredOutput]``，SDK 据注解元数据生成
 outputSchema 并校验 structuredContent，运行时返回的 CallToolResult 原样透传，
 两侧由 test_output_schema 与 test_output_schema_consistency 守护不漂移。
 
-inputSchema 平铺契约：五个带参工具以逐字段平铺参数声明而非单一 params 嵌套模型，
+inputSchema 平铺契约：六个带参工具以逐字段平铺参数声明而非单一 params 嵌套模型，
 FuncMetadata 不支持单参数 BaseModel 自动展开，嵌套声明会把 inputSchema 收敛为
 一个对象字段。平铺字段的名称、类型、默认值、约束与描述镜像 tools.schemas
 的输入模型，描述与约束字面量经该模块的共享常量引用；
@@ -61,8 +61,8 @@ from ..definitions.conventions import (
     BROWSE_IMAGES_TOOL_NAME,
     GET_MODEL_INFO_TOOL_NAME,
     IMAGE_TO_IMAGE_TOOL_NAME,
+    LAYER_DECOMPOSE_TOOL_NAME,
     MAX_PARALLEL_REQUEST_COUNT,
-    MAX_SEQUENTIAL_TOTAL_IMAGES,
     MULTI_IMAGE_FUSION_TOOL_NAME,
     SEQUENTIAL_GENERATION_TOOL_NAME,
     TEXT_TO_IMAGE_TOOL_NAME,
@@ -70,12 +70,14 @@ from ..definitions.conventions import (
 from ..tools import (
     BrowseImagesInput,
     ImageToImageInput,
+    LayerDecomposeInput,
     MultiImageFusionInput,
     SequentialGenerationInput,
     TextToImageInput,
     run_browse_images,
     run_get_model_info,
     run_image_to_image,
+    run_layer_decompose,
     run_multi_image_fusion,
     run_sequential_generation,
     run_text_to_image,
@@ -95,15 +97,15 @@ from ..tools.schemas import (
     FORMAT_FILTER_MAX_ITEMS,
     GenerationTool,
     IMAGE_TO_IMAGE_PROMPT_DESCRIPTION,
-    LAYER_DECOMPOSITION_DESCRIPTION,
+    LAYER_DECOMPOSE_PROMPT_DESCRIPTION,
+    LAYER_DECOMPOSITION_OPTIONS_DESCRIPTION,
+    LayerDecompositionOptions,
     LIMIT_DESCRIPTION,
     LIMIT_MAX,
     LIMIT_MIN,
     MAX_DEPTH_DESCRIPTION,
     MAX_DEPTH_MAX,
     MAX_DEPTH_MIN,
-    MAX_IMAGES_DESCRIPTION,
-    MAX_IMAGES_MIN,
     MULTI_IMAGE_DESCRIPTION,
     MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION,
     MultiImageType,
@@ -121,6 +123,7 @@ from ..tools.schemas import (
     PROMPT_MIN_LENGTH,
     RECURSIVE_DESCRIPTION,
     REQUEST_COUNT_DESCRIPTION,
+    REQUEST_COUNT_LAYER_DESCRIPTION,
     REQUEST_COUNT_MIN,
     REQUEST_COUNT_SEQUENTIAL_DESCRIPTION,
     RESPONSE_FORMAT_DESCRIPTION,
@@ -128,12 +131,14 @@ from ..tools.schemas import (
     SAVE_PATH_DESCRIPTION,
     SAVE_PATH_MAX_LENGTH,
     SEQUENTIAL_IMAGE_DESCRIPTION,
+    SEQUENTIAL_IMAGE_GENERATION_OPTIONS_DESCRIPTION,
     SEQUENTIAL_PROMPT_DESCRIPTION,
+    SequentialImageGenerationOptions,
     SequentialImageType,
     SHOW_DETAILS_DESCRIPTION,
     SINGLE_IMAGE_DESCRIPTION,
     SIZE_DESCRIPTION,
-    SIZE_WITH_LAYER_DESCRIPTION,
+    SIZE_WITH_AUTO_DESCRIPTION,
     STREAM_DESCRIPTION,
     TEXT_TO_IMAGE_PROMPT_DESCRIPTION,
     TOOLS_DESCRIPTION,
@@ -201,23 +206,27 @@ logger = get_logger()
 # ==================== 生成工具共享 Field 常量 ====================
 
 # pydantic 构建 arg_model 时对默认值 FieldInfo 深拷贝合并，共享实例不被改写，
-# 等价性由 test_tool_parameter_order 锁定。image_to_image 的 size 与
+# 等价性由 test_tool_parameter_order 锁定。layer_decompose 的 size 与 request_count、
 # sequential_generation 的 request_count 描述不同，保留内联。
 _OPTIMIZE_PROMPT_OPTIONS_FIELD: OptimizePromptOptions | None = Field(
     default=None, description=OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION
 )
+_SEQUENTIAL_OPTIONS_FIELD: SequentialImageGenerationOptions | None = Field(
+    default=None, description=SEQUENTIAL_IMAGE_GENERATION_OPTIONS_DESCRIPTION
+)
 _SIZE_FIELD: str | None = Field(default=None, description=SIZE_DESCRIPTION)
+_BACKGROUND_FIELD: BackgroundMode | None = Field(default=None, description=BACKGROUND_DESCRIPTION)
 _WATERMARK_FIELD: bool | None = Field(default=None, description=WATERMARK_DESCRIPTION)
-_RESPONSE_FORMAT_FIELD: ResponseFormat = Field(
-    default=ResponseFormat.URL, description=RESPONSE_FORMAT_DESCRIPTION
+_TOOLS_FIELD: list[GenerationTool] | None = Field(
+    default=None, max_length=TOOLS_MAX_ITEMS, description=TOOLS_DESCRIPTION
 )
 _OUTPUT_FORMAT_FIELD: OutputFormat | None = Field(
     default=None, description=OUTPUT_FORMAT_DESCRIPTION
 )
-_STREAM_FIELD: bool = Field(default=False, description=STREAM_DESCRIPTION)
-_TOOLS_FIELD: list[GenerationTool] | None = Field(
-    default=None, max_length=TOOLS_MAX_ITEMS, description=TOOLS_DESCRIPTION
+_RESPONSE_FORMAT_FIELD: ResponseFormat = Field(
+    default=ResponseFormat.URL, description=RESPONSE_FORMAT_DESCRIPTION
 )
+_STREAM_FIELD: bool = Field(default=False, description=STREAM_DESCRIPTION)
 _REQUEST_COUNT_FIELD: int = Field(
     default=1,
     ge=REQUEST_COUNT_MIN,
@@ -273,7 +282,7 @@ def _filter_unset_params(kwargs: dict[str, Any]) -> dict[str, Any]:
     """过滤值为 None 的函数签名默认值，仅保留显式提供的字段。
 
     剔除后组装输入模型使 model_fields_set 仅含显式提供的字段；
-    组图 max_images 的推导按 None 判定缺省。
+    组图配置的缺省按 None 判定。
     response_format/stream/request_count 等带非 None 签名默认值的字段恒进入 fields_set，
     新逻辑不得依赖其判定显式传入。
     此处剥离 MCP 入口的签名默认 None，Web 入口显式 null 直接进模型校验，
@@ -399,11 +408,12 @@ async def text_to_image(
     ),
     optimize_prompt_options: OptimizePromptOptions | None = _OPTIMIZE_PROMPT_OPTIONS_FIELD,
     size: str | None = _SIZE_FIELD,
+    background: BackgroundMode | None = _BACKGROUND_FIELD,
     watermark: bool | None = _WATERMARK_FIELD,
-    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
-    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
-    stream: bool = _STREAM_FIELD,
     tools: list[GenerationTool] | None = _TOOLS_FIELD,
+    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
+    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
+    stream: bool = _STREAM_FIELD,
     request_count: int = _REQUEST_COUNT_FIELD,
     parallelism: int | None = _PARALLELISM_FIELD,
     auto_save: bool | None = _AUTO_SAVE_FIELD,
@@ -435,8 +445,7 @@ async def text_to_image(
     icons=_tool_icons(IMAGE_TO_IMAGE_TOOL_NAME),
 )
 async def image_to_image(
-    prompt: str | None = Field(
-        default=None,
+    prompt: str = Field(
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
         pattern=_NON_BLANK_PATTERN,
@@ -447,23 +456,13 @@ async def image_to_image(
         pattern=_NON_BLANK_PATTERN,
         description=SINGLE_IMAGE_DESCRIPTION,
     ),
-    layer_decomposition: bool | None = Field(
-        default=None,
-        description=LAYER_DECOMPOSITION_DESCRIPTION,
-    ),
-    background: BackgroundMode | None = Field(
-        default=None,
-        description=BACKGROUND_DESCRIPTION,
-    ),
-    size: str | None = Field(
-        default=None,
-        description=SIZE_WITH_LAYER_DESCRIPTION,
-    ),
+    size: str | None = _SIZE_FIELD,
+    background: BackgroundMode | None = _BACKGROUND_FIELD,
     watermark: bool | None = _WATERMARK_FIELD,
-    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
-    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
-    stream: bool = _STREAM_FIELD,
     tools: list[GenerationTool] | None = _TOOLS_FIELD,
+    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
+    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
+    stream: bool = _STREAM_FIELD,
     request_count: int = _REQUEST_COUNT_FIELD,
     parallelism: int | None = _PARALLELISM_FIELD,
     auto_save: bool | None = _AUTO_SAVE_FIELD,
@@ -475,7 +474,7 @@ async def image_to_image(
     """图文生图：基于已有图片进行编辑。
 
     适用：在保留输入图片主体或构图的前提下做元素增删、风格转化、材质替换、色调迁移、改变背景或视角尺寸等。示例：「把人物背景换成海滩」。
-    不适用：纯文字生图改用 text_to_image；融合多张图片特征改用 multi_image_fusion。
+    不适用：纯文字生图改用 text_to_image；融合多张图片特征改用 multi_image_fusion；拆分图层改用 layer_decompose。
     """
     return await _run_tool_pipeline(
         IMAGE_TO_IMAGE_TOOL_NAME,
@@ -506,11 +505,12 @@ async def multi_image_fusion(
         description=MULTI_IMAGE_DESCRIPTION,
     ),
     size: str | None = _SIZE_FIELD,
+    background: BackgroundMode | None = _BACKGROUND_FIELD,
     watermark: bool | None = _WATERMARK_FIELD,
-    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
-    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
-    stream: bool = _STREAM_FIELD,
     tools: list[GenerationTool] | None = _TOOLS_FIELD,
+    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
+    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
+    stream: bool = _STREAM_FIELD,
     request_count: int = _REQUEST_COUNT_FIELD,
     parallelism: int | None = _PARALLELISM_FIELD,
     auto_save: bool | None = _AUTO_SAVE_FIELD,
@@ -553,18 +553,16 @@ async def sequential_generation(
         default=None,
         description=SEQUENTIAL_IMAGE_DESCRIPTION,
     ),
-    size: str | None = _SIZE_FIELD,
-    watermark: bool | None = _WATERMARK_FIELD,
-    max_images: int | None = Field(
-        default=None,
-        ge=MAX_IMAGES_MIN,
-        le=MAX_SEQUENTIAL_TOTAL_IMAGES,
-        description=MAX_IMAGES_DESCRIPTION,
+    sequential_image_generation_options: SequentialImageGenerationOptions | None = (
+        _SEQUENTIAL_OPTIONS_FIELD
     ),
-    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
-    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
-    stream: bool = _STREAM_FIELD,
+    size: str | None = _SIZE_FIELD,
+    background: BackgroundMode | None = _BACKGROUND_FIELD,
+    watermark: bool | None = _WATERMARK_FIELD,
     tools: list[GenerationTool] | None = _TOOLS_FIELD,
+    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
+    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
+    stream: bool = _STREAM_FIELD,
     request_count: int = Field(
         default=1,
         ge=REQUEST_COUNT_MIN,
@@ -589,6 +587,69 @@ async def sequential_generation(
         SequentialGenerationInput,
         _pipeline_kwargs(locals()),
         run_sequential_generation,
+        config=_config_from_context(ctx),
+        ctx=ctx,
+        workspace_roots=workspace_roots,
+    )
+
+
+@mcp.tool(
+    name=LAYER_DECOMPOSE_TOOL_NAME,
+    title="Seedream 图层拆分",
+    annotations=GENERATION_TOOL_ANNOTATIONS,
+    icons=_tool_icons(LAYER_DECOMPOSE_TOOL_NAME),
+)
+async def layer_decompose(
+    prompt: str | None = Field(
+        default=None,
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
+        pattern=_NON_BLANK_PATTERN,
+        description=LAYER_DECOMPOSE_PROMPT_DESCRIPTION,
+    ),
+    optimize_prompt_options: OptimizePromptOptions | None = _OPTIMIZE_PROMPT_OPTIONS_FIELD,
+    image: str = Field(
+        pattern=_NON_BLANK_PATTERN,
+        description=SINGLE_IMAGE_DESCRIPTION,
+    ),
+    layer_decomposition_options: LayerDecompositionOptions | None = Field(
+        default=None,
+        description=LAYER_DECOMPOSITION_OPTIONS_DESCRIPTION,
+    ),
+    size: str | None = Field(
+        default=None,
+        description=SIZE_WITH_AUTO_DESCRIPTION,
+    ),
+    watermark: bool | None = _WATERMARK_FIELD,
+    tools: list[GenerationTool] | None = _TOOLS_FIELD,
+    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
+    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
+    stream: bool = _STREAM_FIELD,
+    request_count: int = Field(
+        default=1,
+        ge=REQUEST_COUNT_MIN,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description=REQUEST_COUNT_LAYER_DESCRIPTION,
+    ),
+    parallelism: int | None = _PARALLELISM_FIELD,
+    auto_save: bool | None = _AUTO_SAVE_FIELD,
+    save_path: str | None = _SAVE_PATH_FIELD,
+    custom_name: str | None = _CUSTOM_NAME_FIELD,
+    workspace_roots: _ROOTS_DEPENDENCY = None,
+    ctx: Context[Any, Any] | None = None,
+) -> Annotated[CallToolResult, GenerationStructuredOutput]:
+    """图层拆分：将单张图片拆解为 1 张底图与多个带透明通道的 PNG 图层。
+
+    适用：提取可独立编辑的图层素材、规整文字的富文本 OCR 识别、按 bbox 坐标指定拆分元素。示例：「提取图中所有文字为独立透明图层」。
+    拆分意图可缺省，由模型自动识别主要元素。
+    图层拆分需当前模型支持。
+    不适用：编辑或改写图片内容改用 image_to_image。
+    """
+    return await _run_tool_pipeline(
+        LAYER_DECOMPOSE_TOOL_NAME,
+        LayerDecomposeInput,
+        _pipeline_kwargs(locals()),
+        run_layer_decompose,
         config=_config_from_context(ctx),
         ctx=ctx,
         workspace_roots=workspace_roots,
@@ -672,8 +733,8 @@ async def get_model_info(
 ) -> Annotated[CallToolResult, GetModelInfoStructuredOutput]:
     """查询当前配置模型的能力快照。
 
-    返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、尺寸档位与像素区间，
-    以及图层拆分、透明背景、输出格式、流式输出、联网搜索与组图生成的支持情况。
+    返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、透明通道取值、尺寸档位与像素区间，
+    以及图层拆分、图层拆分配置与富文本 OCR、透明背景、透明通道全形态、输出格式、流式输出、联网搜索、组图生成与终端用户标识的支持情况。
     生成工具的模型相关参数是否可用以本工具结果为准；不支持时生成工具会报错并附支持该能力的模型清单。
     模型由服务器配置决定，更换模型请告知用户调整服务器配置。
     """

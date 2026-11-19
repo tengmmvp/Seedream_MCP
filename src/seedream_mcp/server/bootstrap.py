@@ -32,6 +32,13 @@ from ..utils.io.path import drain_pending_start_messages, resolve_log_file_path
 logger = get_logger()
 
 
+def _drain_pending_warnings() -> None:
+    """冲刷早于日志初始化的缓冲告警。"""
+    drain_pending_start_messages()
+    drain_pending_build_warnings()
+    drain_pending_import_time_warnings()
+
+
 def cli_main() -> int:
     """执行命令行主流程：解析参数、构建配置、初始化日志并按传输方式启动服务器。
 
@@ -41,36 +48,38 @@ def cli_main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    # 日志初始化前的任何退出都冲刷缓冲告警（drain 幂等）：日志就绪前经默认
+    # stderr 通道，就绪后经配置日志通道输出，新增早退分支不再各自补调。
     try:
-        config = build_config_from_args(args)
-    except SeedreamConfigError as exc:
-        print(f"配置错误: {exc.message}", file=sys.stderr)
-        return 1
+        try:
+            config = build_config_from_args(args)
+        except SeedreamConfigError as exc:
+            print(f"配置错误: {exc.message}", file=sys.stderr)
+            return 1
 
-    # 注入活动配置，server 与 path 经 get_active_config 共用此实例。
-    set_active_config(config)
+        # 注入活动配置，server 与 path 经 get_active_config 共用此实例。
+        set_active_config(config)
 
-    # setup_logging 的目录创建等 I/O 在只读容器或受限账号下可能抛 OSError，捕获后
-    # 降级为 stderr 输出与退出码 1；不经 format_error_for_user，以免未知错误标签
-    # 误导排查并回显绝对路径。日志文件路径由 path 单点求值，回退链整体不可
-    # 解析时同此降级退出。
-    try:
-        setup_logging(
-            config.log_level,
-            str(resolve_log_file_path()),
-            force_standard_logging=True,
-            rotation_mb=config.log_rotation_size,
-            retention_days=config.log_retention_days,
-        )
-    except SeedreamConfigError as exc:
-        print(f"日志目录推导失败: {exc.message}", file=sys.stderr)
-        return 1
-    except OSError:
-        print("日志系统初始化失败（请检查日志目录权限或磁盘空间）", file=sys.stderr)
-        return 1
-    drain_pending_start_messages()
-    drain_pending_build_warnings()
-    drain_pending_import_time_warnings()
+        # setup_logging 的目录创建等 I/O 在只读容器或受限账号下可能抛 OSError，捕获后
+        # 降级为 stderr 输出与退出码 1；不经 format_error_for_user，以免未知错误标签
+        # 误导排查并回显绝对路径。日志文件路径由 path 单点求值，回退链整体不可
+        # 解析时同此降级退出。
+        try:
+            setup_logging(
+                config.log_level,
+                str(resolve_log_file_path()),
+                force_standard_logging=True,
+                rotation_mb=config.log_rotation_size,
+                retention_days=config.log_retention_days,
+            )
+        except SeedreamConfigError as exc:
+            print(f"日志目录推导失败: {exc.message}", file=sys.stderr)
+            return 1
+        except OSError:
+            print("日志系统初始化失败（请检查日志目录权限或磁盘空间）", file=sys.stderr)
+            return 1
+    finally:
+        _drain_pending_warnings()
 
     # 按最终活动配置重绑导入期固化的密钥环，使 --config-file 携带的密钥生效；
     # 置于日志系统就绪后，探测失败的 ERROR 落入文件通道；失败不阻断启动。
@@ -88,7 +97,7 @@ def cli_main() -> int:
         config.generate_concurrency,
         config.stream_buffer_max_size,
         config.effective_sse_event_max_size(),
-        config.effective_response_body_limit(),
+        config.response_body_limit_log_text(),
     )
 
     try:

@@ -71,12 +71,20 @@ async def test_models_info_resource_matches_capability_table() -> None:
     """每条目完整携带能力声明字段，且取值与 get_model_capabilities 全等。"""
     data = json.loads(await models_info_resource())
 
-    expected_fields = set(model_capabilities.ModelCapabilities.__dataclass_fields__)
+    # 绑定映射换出为既有 allowed_background_forms 呈现键，与 model_payloads 同契约。
+    expected_fields = (
+        set(model_capabilities.ModelCapabilities.__dataclass_fields__)
+        - {"background_forms_by_mode"}
+    ) | {"allowed_background_forms"}
     sort_key = model_capabilities.preset_numeric_sort_key
     for entry in data["models"]:
         assert set(entry) == {"alias", "model_id"} | expected_fields, entry["alias"]
-        capabilities = asdict(model_capabilities.get_model_capabilities(entry["model_id"]))
+        caps = model_capabilities.get_model_capabilities(entry["model_id"])
+        capabilities = asdict(caps)
+        del capabilities["background_forms_by_mode"]
         capabilities["allowed_presets"] = sorted(capabilities["allowed_presets"], key=sort_key)
+        capabilities["allowed_background_modes"] = sorted(capabilities["allowed_background_modes"])
+        capabilities["allowed_background_forms"] = sorted(caps.allowed_background_forms)
         assert {key: entry[key] for key in capabilities} == capabilities, entry["alias"]
         assert entry["allowed_presets"] == sorted(entry["allowed_presets"], key=sort_key), entry[
             "alias"
@@ -88,18 +96,28 @@ async def test_models_info_resource_reports_key_capability_values() -> None:
     data = json.loads(await models_info_resource())
     by_alias = {entry["alias"]: entry for entry in data["models"]}
 
-    pro = by_alias["doubao-seedream-5.0-pro"]
-    assert (
-        pro["max_reference_images"] == model_capabilities.SEEDREAM_50PRO_FLASH_MAX_REFERENCE_IMAGES
+    model_55 = by_alias["doubao-seedream-5.5"]
+    assert model_55["model_id"] == "doubao-seedream-5-5-261028"
+    assert model_55["max_reference_images"] == (
+        model_capabilities.SEEDREAM_LIMITED_MAX_REFERENCE_IMAGES
     )
+    assert model_55["allowed_presets"] == ["1K", "1.5K", "2K"]
+    assert model_55["supports_layer_decomposition"] is True
+    assert model_55["supports_layer_decomposition_options"] is True
+    assert model_55["allowed_background_modes"] == ["auto", "opaque", "transparent"]
+    assert model_55["supports_safety_identifier"] is True
+
+    pro = by_alias["doubao-seedream-5.0-pro"]
+    assert pro["max_reference_images"] == model_capabilities.SEEDREAM_LIMITED_MAX_REFERENCE_IMAGES
     assert pro["allowed_presets"] == ["1K", "1.5K", "2K"]
     assert pro["supports_stream"] is False
     assert pro["supports_tools"] is False
     assert pro["supports_sequential_generation"] is False
     assert pro["supports_layer_decomposition"] is True
-    assert pro["supports_background"] is True
-    assert pro["min_size_pixels"] == model_capabilities.SEEDREAM_50PRO_FLASH_MIN_SIZE_PIXELS
-    assert pro["max_size_pixels"] == model_capabilities.SEEDREAM_50PRO_FLASH_MAX_SIZE_PIXELS
+    assert pro["supports_layer_decomposition_options"] is False
+    assert pro["allowed_background_modes"] == ["opaque", "transparent"]
+    assert pro["min_size_pixels"] == model_capabilities.SEEDREAM_1K_MIN_SIZE_PIXELS
+    assert pro["max_size_pixels"] == model_capabilities.SEEDREAM_1K_2K_MAX_SIZE_PIXELS
 
     for alias in ("doubao-seedream-5.0", "doubao-seedream-5.0-lite"):
         entry = by_alias[alias]

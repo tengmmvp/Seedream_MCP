@@ -11,6 +11,7 @@ from ..definitions.conventions import (
     BROWSE_IMAGES_TOOL_NAME,
     GET_MODEL_INFO_TOOL_NAME,
     IMAGE_TO_IMAGE_TOOL_NAME,
+    LAYER_DECOMPOSE_TOOL_NAME,
     MULTI_IMAGE_FUSION_TOOL_NAME,
     SEQUENTIAL_GENERATION_TOOL_NAME,
     TEXT_TO_IMAGE_TOOL_NAME,
@@ -52,6 +53,15 @@ _TOOL_SVGS: dict[str, str] = {
         'stroke-linejoin="round"><path d="m20 13.7-2.1-2.1a2 2 0 0 0-2.8 0L9.7 17"/>'
         '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1'
         'H6.5a1 1 0 0 1 0-5H20"/><circle cx="10" cy="8" r="2"/></svg>'
+    ),
+    # 图标 layers：拆分为底图与图层
+    LAYER_DECOMPOSE_TOOL_NAME: (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
+        'fill="none" stroke="#3790ff" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0'
+        ' 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.84Z"/><path d="m22 17.65'
+        '-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66'
+        ' 0L2 12.65"/></svg>'
     ),
     # 图标 folder-search：在图片目录中检索浏览
     BROWSE_IMAGES_TOOL_NAME: (
@@ -145,6 +155,15 @@ _TOOL_PNG_B64: dict[str, str] = {
         "yWGWVIkPV2o86Elyf3gZUnBWO5/mq64a0BrVgNaoBvQWQXuy8zDL2wA6qA+zZKs+zLJG9WGWNaqqzXn7WYzTo3JVy4rfGSDKSIdb"
         "bJcL7T4gJly43otMAYVZ7+IsCmdBGafadgMe4D8nn60T4+HWp1ZhrkYT6G+SUldVmaYZGwMKowjfzrIsStDYpFDubHYdZYqNTfMO"
         "qyji5RFQrxRvfupTGOcdDmEpnEaO5cnW/2CJ45zDZUy6IgdQUo9hRTZnLCeMdv3r1KpVC4n+AvyI2IMBoEvBAAAAAElFTkSuQmCC"
+    ),
+    LAYER_DECOMPOSE_TOOL_NAME: (
+        "iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAABnUlEQVR42u2cUQ7CMAxD54k7cS2OwrV2qvHFDxrSNprYHs4XIAHp"
+        "a9M1btppisViMZ5ByZn7c13fr5cHJHybFeFsvf9rQN9gKECCIpgtY4Uc1MGwQcEFDAsU3MB0g4IamOUBnP2eDaBRDVQABXYY7WkQ"
+        "ExSUwSiAggMYJig4gWGAgvLwVvANV1jtVvoM9TBiz49wCiVG6M0uOdFZ33717zaql9RAjcr/cJUJusp3VPVAN6gqf+EuclU/ceGW"
+        "ZnT7AJdElbUMgUNvMkcslJ8gCqEsOXkqpTpwFuw7npJw3PLpXGvBLQWQ2TjsqLRgbz3vaePuXIy1Gu7snK3/mhUqLb5B6B65W5/P"
+        "R3+4CtQnjKqQOuo/HEtSOue6IXrQVSTXcj3IWbQ/rQc5garwNRuH2XomCWYpXkj5SwqoUoJ3xSJONRmkRe5QLQOWkzuUCsn3thEM"
+        "bYa9S3ukjacmRgaorhE8BFAnqO7QlpY7RuvgkTsid0TuiNwRuSNyR+SOyB2ROyJ3eJ1ZzannnJvPzQu5u8Pp/iBGAVUuWIrFJOwF"
+        "9hzw+BzyXy4AAAAASUVORK5CYII="
     ),
     BROWSE_IMAGES_TOOL_NAME: (
         "iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAYAAABV7bNHAAAEc0lEQVR4nO2bTW4TMRTH/29AorMinIBwAsKqAxvSEzBIILEjnIDM"

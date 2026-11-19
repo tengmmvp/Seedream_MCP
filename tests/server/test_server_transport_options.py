@@ -207,7 +207,7 @@ def test_cli_main_forwards_web_enabled_to_http_runner(
 def test_cli_main_logs_effective_response_body_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """启动「生成链路生效值」日志含 response_body_limit 键与缺省推导值（50MB × 20）。"""
+    """启动「生成链路生效值」日志含 response_body_limit 键与按请求投影的缺省锚点值。"""
     args = make_run_args("stdio")
     config = SeedreamConfig(api_key="test_key")
     stub_cli_main(monkeypatch, args, config)
@@ -218,7 +218,11 @@ def test_cli_main_logs_effective_response_body_limit(
 
     effective_lines = [message for message in messages if "生成链路生效值" in message]
     assert effective_lines, "启动日志缺少「生成链路生效值」行"
-    assert f"response_body_limit={50 * 1024 * 1024 * 20}" in effective_lines[0]
+    expected = (
+        f"response_body_limit=auto(url={4 * 1024 * 1024},"
+        f"b64_json={4 * ((50 * 1024 * 1024 + 2) // 3)}×N)"
+    )
+    assert expected in effective_lines[0]
 
 
 def test_cli_main_refuses_non_loopback_http_without_auth_token(

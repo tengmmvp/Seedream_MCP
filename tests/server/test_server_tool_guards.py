@@ -18,13 +18,18 @@ import seedream_mcp.server as server
 
 # lifespan 复位 fixture reset_lifespan_singletons
 
-# 五个带参工具各触发一次构造期校验错误的输入：text_to_image、multi_image_fusion、
-# sequential_generation 用 parallelism 大于 request_count 的跨字段规则，
-# image_to_image 用 prompt 缺省且未开图层拆分的组合规则，
+# 六个带参工具各触发一次校验错误的输入：text_to_image、multi_image_fusion、
+# sequential_generation、layer_decompose 用 parallelism 大于 request_count 的
+# 跨字段规则，image_to_image 用透明背景与 jpeg 输出格式的互斥规则，
 # 浏览工具用平铺签名不拦截的空白 format_filter 条目。
 _CROSS_FIELD_INVALID_ARGS: dict[str, dict[str, Any]] = {
     "text_to_image": {"prompt": "一只猫", "request_count": 1, "parallelism": 2},
-    "image_to_image": {"image": "https://example.com/a.png"},
+    "image_to_image": {
+        "prompt": "改图",
+        "image": "https://example.com/a.png",
+        "background": "transparent",
+        "output_format": "jpeg",
+    },
     "multi_image_fusion": {
         "prompt": "融合两张图",
         "image": ["https://example.com/a.png", "https://example.com/b.png"],
@@ -34,6 +39,11 @@ _CROSS_FIELD_INVALID_ARGS: dict[str, dict[str, Any]] = {
     "sequential_generation": {
         "prompt": "四格漫画",
         "image": ["https://example.com/a.png"],
+        "request_count": 1,
+        "parallelism": 2,
+    },
+    "layer_decompose": {
+        "image": "https://example.com/a.png",
         "request_count": 1,
         "parallelism": 2,
     },
@@ -64,7 +74,7 @@ async def test_validation_error_result_reports_registered_tool_name(
     tool_name: str,
     reset_lifespan_singletons: None,
 ) -> None:
-    """构造期校验失败的 structuredContent.tool 与注册名一致，传错常量即错位。"""
+    """校验失败的 structuredContent.tool 与注册名一致，传错常量即错位。"""
     del reset_lifespan_singletons
     result = await server.mcp.call_tool(tool_name, _CROSS_FIELD_INVALID_ARGS[tool_name])
 

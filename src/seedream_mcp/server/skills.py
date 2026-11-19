@@ -28,9 +28,10 @@ _SKILL_REFERENCES_DIR = _SKILLS_DIR / _SKILL_NAME / "references"
 _SKILL_DESCRIPTION = (
     "Seedream 图像生成 MCP 服务器的使用指南，覆盖文生图、图生图、多图融合、"
     "组图生成与图层拆分。当用户要求生成图片、画图、改图、换风格、融合多张图、"
-    "制作连环画或故事书、拆分图层、生成透明背景，或需要调用 text_to_image、"
-    "image_to_image、multi_image_fusion、sequential_generation、browse_images、"
-    "get_model_info 工具，确认当前模型能力与尺寸档位，排查 401/402/403/413/429 "
+    "制作连环画或故事书、拆分图层、生成透明背景或原生 RGBA 素材、识别图层文字，"
+    "或需要调用 text_to_image、image_to_image、multi_image_fusion、"
+    "sequential_generation、layer_decompose、browse_images、get_model_info 工具，"
+    "确认当前模型能力与尺寸档位，排查 401/402/403/413/429 "
     "报错，以及找回已保存的图片时使用本技能。Use when generating or editing "
     "images via the Seedream MCP server."
 )

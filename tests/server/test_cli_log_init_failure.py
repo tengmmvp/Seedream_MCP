@@ -80,16 +80,16 @@ def test_cli_main_hoisting_drift_warning_reaches_file_channel(
     cli_startup: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """前移漂移告警落入日志文件：导入期告警先进缓冲，drain 在 setup_logging 之后执行。"""
+    """前移漂移告警落入日志文件：导入期仅进缓冲不直接发射，drain 在 setup_logging 之后回放。"""
     messages: list[str] = []
     # 空链模拟 SDK 升级后的链形态漂移，cli_main 前直接驱动前移使告警进导入期缓冲；
-    # 即时告警恰一条，锁定导入期可见性不因缓冲化而丢失。
+    # 缓冲外无立即发射，与 config 构建告警、path 回退提示同守 buffer-only 契约。
     with monkeypatch.context() as drift_shape:
         drift_shape.setattr(runtime_module.mcp._lowlevel_server, "middleware", [])
         with capture_loguru_messages(messages, level="WARNING"):
             runtime_module._move_call_id_scope_outside_boundary(runtime_module.mcp)
     drift_count = sum(1 for m in messages if "调用关联作用域中间件未前移" in m)
-    assert drift_count == 1
+    assert drift_count == 0
 
     exit_code = bootstrap_module.cli_main()
 
