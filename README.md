@@ -90,7 +90,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 ARK_API_KEY=your_api_key_here uvx seedream-image-mcp
 
 # 也可显式指定模型、尺寸等运行参数
-ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0 --default-size 2K
+ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0-pro --default-size 1.5K
 ```
 
 `uvx` 自动从 [PyPI](https://pypi.org/project/seedream-image-mcp/) 拉取最新版本并在隔离环境运行——无需 clone 仓库、无需手动创建虚拟环境、无需安装依赖。
@@ -111,6 +111,8 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 ```
 
 服务以 streamable-http 传输监听容器内 `8000` 端口，MCP 端点路径为 `/mcp`；宿主机映射端口由 `SEEDREAM_HTTP_PORT` 控制，默认 8000。端口映射默认仅绑定回环地址 `127.0.0.1`，需从其他设备直连时，把 docker-compose.yml 改为 `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` 或指定宿主机网卡地址。映射一旦改为 `0.0.0.0`，服务即暴露给网络，`SEEDREAM_HTTP_AUTH_TOKEN` 会以明文 HTTP 在网络上传输；此时必须将服务置于 TLS 反向代理之后，或经 `SEEDREAM_EXTRA_CLI_ARGS` 向容器提供 TLS 证书参数，无 TLS 禁止对外暴露。
+
+终端用户标识默认按机器名派生，容器部署下会随容器重建漂移；需要固定标识时在 `.env` 中设置 `SEEDREAM_SAFETY_IDENTIFIER`（见 `.env.example`）。
 
 客户端接入配置以 Claude Desktop 为例，其他支持 streamable-http 的客户端同理：
 
@@ -246,13 +248,13 @@ ARK_API_KEY = "your_api_key_here"
 </details>
 
 > [!NOTE]
-> 需要指定模型/尺寸时，追加到 `args`，例如 `["seedream-image-mcp", "--model", "doubao-seedream-5.0"]`。
+> 需要指定模型/尺寸时，追加到 `args`，例如 `["seedream-image-mcp", "--model", "doubao-seedream-5.0-pro"]`。
 
 配置后重启对应客户端即可使用。
 
 ## 🖥️ Web 操作台
 
-不使用 MCP 客户端的用户也可以直接通过网页使用：以 `--web` 旗标（或环境变量 `SEEDREAM_WEB_ENABLED=true`）启动 streamable-http 传输后，浏览器访问 `http://127.0.0.1:8000/web` 即可打开操作台，覆盖文生图、图生图、多图融合、组图生成与历史图库。默认关闭，stdio 传输与未开启时不暴露任何 Web 端点。
+不使用 MCP 客户端的用户也可以直接通过网页使用：以 `--web` 旗标（或环境变量 `SEEDREAM_WEB_ENABLED=true`）启动 streamable-http 传输后，浏览器访问 `http://127.0.0.1:8000/web` 即可打开操作台，覆盖文生图、图生图、多图融合、组图生成、图层拆分与历史图库。默认关闭，stdio 传输与未开启时不暴露任何 Web 端点。
 
 ```bash
 ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http --web --auth-token your_token_here
@@ -274,11 +276,12 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 - `prompt` (必需) - 图像生成的文本提示词，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
+- `background` (可选) - 透明通道：`transparent` 生成透明背景图（与 `output_format=jpeg` 互斥）、`opaque` 生成常规图或 `auto` 由模型按提示词与输出格式自动判断
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
-- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，可选 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
-- `stream` (可选) - 是否启用流式输出，默认`false`；开启时 `request_count` 须为 1
 - `tools` (可选) - 模型工具配置，例如 `[{"type":"web_search"}]` 开启联网搜索
+- `output_format` (可选) - 输出文件格式，可选 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
+- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `stream` (可选) - 是否启用流式输出，默认`false`；开启时 `request_count` 须为 1
 - `request_count` (可选) - 同一提示并行发起的独立生成次数，每次各产出一张图，范围 1-10，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-10，默认 `min(request_count, 10)`，不得超过 `request_count`，一般无需手动指定
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -305,17 +308,16 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 
 **参数：**
 
-- `prompt` (可选) - 图像修改要求或风格转换指令，建议不超过 300 个汉字或 600 个英文单词；仅图层拆分场景可缺省，由模型自动识别拆分意图
+- `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `image` (必需) - 输入图像，支持图像 URL、本地文件路径或 Base64 图片数据；本地文件路径须在读取范围内，其中相对路径仅限图片保存目录内
-- `layer_decomposition` (可选) - 是否开启图层拆分；开启后将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，图层条目额外返回 `z_index`、`name`、`description`、`bounding_box` 字段；`output_format` 仅控制底图格式，图层始终为 PNG
-- `background` (可选) - 透明通道，`transparent` 生成透明背景图（需输入单张带透明通道的图片，与 `output_format=jpeg` 互斥）或 `opaque` 生成常规图
-- `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容；图层拆分场景仅支持 `1K`、`1.5K`、`2K` 档位或 `auto`（按输入图自适应，未指定尺寸时的默认值）
+- `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
+- `background` (可选) - 透明通道：`transparent` 生成透明背景图（与 `output_format=jpeg` 互斥）、`opaque` 生成常规图或 `auto` 由模型按提示词与输出格式自动判断
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
-- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，可选 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
-- `stream` (可选) - 是否启用流式输出，默认`false`；开启时 `request_count` 须为 1
 - `tools` (可选) - 模型工具配置，例如 `[{"type":"web_search"}]` 开启联网搜索
+- `output_format` (可选) - 输出文件格式，可选 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
+- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `stream` (可选) - 是否启用流式输出，默认`false`；开启时 `request_count` 须为 1
 - `request_count` (可选) - 同一提示并行发起的独立生成次数，每次各产出一张图，范围 1-10，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-10，默认 `min(request_count, 10)`，不得超过 `request_count`，一般无需手动指定
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -347,11 +349,12 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `image` (必需) - 输入图像（2-14 张），每张支持图像 URL、本地文件路径或 Base64 图片数据；本地文件路径须在读取范围内，其中相对路径仅限图片保存目录内
 - `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
+- `background` (可选) - 透明通道：`transparent` 生成透明背景图（与 `output_format=jpeg` 互斥）、`opaque` 生成常规图或 `auto` 由模型按提示词与输出格式自动判断
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
-- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，可选 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
-- `stream` (可选) - 是否启用流式输出，默认`false`；开启时 `request_count` 须为 1
 - `tools` (可选) - 模型工具配置，例如 `[{"type":"web_search"}]` 开启联网搜索
+- `output_format` (可选) - 输出文件格式，可选 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
+- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `stream` (可选) - 是否启用流式输出，默认`false`；开启时 `request_count` 须为 1
 - `request_count` (可选) - 同一提示并行发起的独立生成次数，每次各产出一张图，范围 1-10，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-10，默认 `min(request_count, 10)`，不得超过 `request_count`，一般无需手动指定
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -384,14 +387,15 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 
 - `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
-- `image` (可选) - 参考图像（最多 14 张，且参考图数量与 max_images 之和不超过 15），每张支持图像 URL、本地文件路径或 Base64 图片数据；本地文件路径须在读取范围内，其中相对路径仅限图片保存目录内
+- `image` (可选) - 参考图像（最多 14 张，且参考图数量与生成数量之和不超过 15），每张支持图像 URL、本地文件路径或 Base64 图片数据；本地文件路径须在读取范围内，其中相对路径仅限图片保存目录内
+- `sequential_image_generation_options` (可选) - 组图配置对象：`max_images` 为最大生成图像数量，范围 1-15，默认 15，提供参考图时默认自动扣减为 15 减参考图数量
 - `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
+- `background` (可选) - 透明通道：`transparent` 生成透明背景图（与 `output_format=jpeg` 互斥）、`opaque` 生成常规图或 `auto` 由模型按提示词与输出格式自动判断
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
-- `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15；提供参考图时默认自动扣减为 15 减参考图数量
-- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，可选 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
-- `stream` (可选) - 是否启用流式输出，默认`false`；开启时 `request_count` 须为 1
 - `tools` (可选) - 模型工具配置，例如 `[{"type":"web_search"}]` 开启联网搜索
+- `output_format` (可选) - 输出文件格式，可选 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
+- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `stream` (可选) - 是否启用流式输出，默认`false`；开启时 `request_count` 须为 1
 - `request_count` (可选) - 同一提示并行发起的独立生成次数，每次各产出一组图片，组内图片数量由模型按提示词决定，最多 `max_images` 张，范围 1-10，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-10，默认 `min(request_count, 10)`，不得超过 `request_count`，一般无需手动指定
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -412,7 +416,47 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 </details>
 
 <details>
-<summary><b>5. <code>browse_images</code></b> — 图片浏览</summary>
+<summary><b>5. <code>layer_decompose</code></b> — 图层拆分</summary>
+
+将单张图片拆解为 1 张底图与多个带透明通道的 PNG 图层，图层条目额外返回 `z_index`、`name`、`description`、`bounding_box` 字段；`output_format` 仅控制底图格式，图层始终为 PNG。该工具调用外部计费 API、在本地产出文件，非只读。
+
+**参数：**
+
+- `prompt` (可选) - 图层拆分意图，建议不超过 300 个汉字或 600 个英文单词；缺省时由模型自动识别图片主要元素并拆分
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
+- `image` (必需) - 输入图像，支持图像 URL、本地文件路径或 Base64 图片数据；本地文件路径须在读取范围内，其中相对路径仅限图片保存目录内
+- `layer_decomposition_options` (可选) - 拆分配置对象：`max_images` 为含底图的最大产出图片数，范围 2-100，默认 30；`text_recognition` 开启后对规整文字图层返回富文本 OCR 结果。未指定时由 API 按官方默认取值
+- `size` (可选) - 输出尺寸，仅支持分辨率档位或 `auto`（按输入图尺寸与宽高比自适应，未指定时的默认值）；档位需与所选模型兼容
+- `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
+- `tools` (可选) - 模型工具配置，例如 `[{"type":"web_search"}]` 开启联网搜索
+- `output_format` (可选) - 底图输出格式，可选 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
+- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `stream` (可选) - 是否启用流式输出，默认`false`；开启时 `request_count` 须为 1
+- `request_count` (可选) - 同一提示并行发起的独立生成次数，每次各产出一次拆分结果，范围 1-10，默认 1
+- `parallelism` (可选) - 并行度上限，范围 1-10，默认 `min(request_count, 10)`，不得超过 `request_count`，一般无需手动指定
+- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
+- `save_path` (可选) - 自定义保存目录路径
+- `custom_name` (可选) - 自定义文件名前缀
+
+**调用示例：**
+
+```json
+{
+  "name": "layer_decompose",
+  "arguments": {
+    "image": "2026-08-15/image_to_image/poster.png",
+    "layer_decomposition_options": {
+      "max_images": 50,
+      "text_recognition": true
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>6. <code>browse_images</code></b> — 图片浏览</summary>
 
 浏览工作区中的图片文件，获取文件路径用于图像生成。该工具只读、幂等、不访问网络。
 
@@ -438,7 +482,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 </details>
 
 <details>
-<summary><b>6. <code>get_model_info</code></b> — 模型信息</summary>
+<summary><b>7. <code>get_model_info</code></b> — 模型信息</summary>
 
 查询当前配置模型的能力快照，供调用生成工具前确认参数支持情况。该工具只读、不访问网络。
 
@@ -448,7 +492,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 - `display_name` - 家族展示名，未识别家族时为 null
 - `aliases` - 当前模型的全部可用别名
 - `family` - 模型家族；未识别的模型为 `unknown`，能力按全放行兜底
-- `capabilities` - 提示词优化档位、参考图上限、图层拆分、透明背景、尺寸档位与像素区间，以及 `output_format`、`stream`、`web_search`、`sequential_generation` 各项支持情况
+- `capabilities` - 提示词优化档位、参考图上限、图层拆分、图层拆分配置与富文本 OCR、透明背景、透明通道取值、尺寸档位与像素区间，以及 `output_format`、`stream`、`web_search`、`sequential_generation`、`safety_identifier` 各项支持情况
 
 **调用示例：**
 
@@ -468,6 +512,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 <table align="center">
   <tr>
     <th style="text-align: center">对比维度</th>
+    <th style="text-align: center">5.5</th>
     <th style="text-align: center">5.0 Pro</th>
     <th style="text-align: center">5.0 / 5.0 Lite</th>
     <th style="text-align: center">5.0 Flash</th>
@@ -481,9 +526,11 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
   </tr>
   <tr>
     <td>组图生成</td>
+    <td style="text-align: center">暂不支持</td>
     <td style="text-align: center">暂不支持</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">暂不支持</td>
@@ -493,6 +540,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
   <tr>
     <td>联网搜索</td>
     <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
@@ -500,6 +548,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
   </tr>
   <tr>
     <td>流式输出</td>
+    <td style="text-align: center">暂不支持</td>
     <td style="text-align: center">暂不支持</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">暂不支持</td>
@@ -511,27 +560,58 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
     <td style="text-align: center">png, jpeg</td>
     <td style="text-align: center">png, jpeg</td>
     <td style="text-align: center">png, jpeg</td>
+    <td style="text-align: center">png, jpeg</td>
     <td style="text-align: center">jpeg</td>
     <td style="text-align: center">jpeg</td>
   </tr>
   <tr>
     <td>图层拆分</td>
+    <td style="text-align: center">✓（1+99）</td>
+    <td style="text-align: center">✓（1+16）</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✓（1+16）</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>富文本 OCR</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
-    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
   </tr>
   <tr>
     <td>透明背景</td>
     <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
   </tr>
   <tr>
+    <td>文生透明图</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>原生 RGBA 透明图</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
     <td>提示词优化模式</td>
+    <td style="text-align: center">标准模式</td>
     <td style="text-align: center">标准模式, 极速模式</td>
     <td style="text-align: center">标准模式</td>
     <td style="text-align: center">标准模式</td>
@@ -539,7 +619,26 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
     <td style="text-align: center">标准模式, 极速模式</td>
   </tr>
   <tr>
+    <td>提示词语言</td>
+    <td style="text-align: center">中英及另外 13 种语言</td>
+    <td style="text-align: center">中英及另外 13 种语言</td>
+    <td style="text-align: center">中英</td>
+    <td style="text-align: center">中英及另外 13 种语言</td>
+    <td style="text-align: center">中英</td>
+    <td style="text-align: center">中英</td>
+  </tr>
+  <tr>
+    <td>终端用户标识</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
     <td>分辨率档位</td>
+    <td style="text-align: center">1K / 1.5K / 2K</td>
     <td style="text-align: center">1K / 1.5K / 2K</td>
     <td style="text-align: center">2K / 3K / 4K</td>
     <td style="text-align: center">1K / 1.5K / 2K</td>
@@ -549,6 +648,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
   <tr>
     <td>参考图上限</td>
     <td style="text-align: center">10 张</td>
+    <td style="text-align: center">10 张</td>
     <td style="text-align: center">14 张</td>
     <td style="text-align: center">10 张</td>
     <td style="text-align: center">14 张</td>
@@ -557,7 +657,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 </table>
 
 > [!TIP]
-> **提示**：默认模型为 **doubao-seedream-5.0**（与 5.0 Lite 等价），能力覆盖最全，开箱即用。图层拆分与透明背景仅 `doubao-seedream-5.0-pro` 与 `doubao-seedream-5.0-flash` 支持，前者画质最高，后者生成更快、单价更低。切换到这两个模型后，组图、联网搜索与流式输出不可用，尺寸仅支持 `1K/1.5K/2K`，参考图上限降为 10 张。
+> **提示**：默认模型为 **doubao-seedream-5.5**，各模型能力差异与切换建议见上方对比表。
 
 ## 💰 模型价格
 
@@ -568,6 +668,11 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
     <th style="text-align: center">模型</th>
     <th style="text-align: center">输入图单价（元/张）</th>
     <th style="text-align: center">输出图单价（元/张）</th>
+  </tr>
+  <tr>
+    <td>5.5</td>
+    <td style="text-align: center">0.05</td>
+    <td style="text-align: center">1.5K 及以下 0.13，1.5K 以上 0.23</td>
   </tr>
   <tr>
     <td>5.0 Pro</td>
@@ -704,12 +809,15 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
 --api-key TEXT                                     # API 密钥（推荐用环境变量 ARK_API_KEY；命令行传入会留在进程列表与 shell 历史中）
 
 # 模型与端点
---model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-5.0-flash|doubao-seedream-4.5|doubao-seedream-4.0]
-                                                 # 模型选择；完整 Model ID 或 Endpoint ID 经 SEEDREAM_MODEL_ID 传入 (默认: doubao-seedream-5.0)
+--model [doubao-seedream-5.5|doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-5.0-flash|doubao-seedream-4.5|doubao-seedream-4.0]
+                                                 # 模型选择；完整 Model ID 或 Endpoint ID 经 SEEDREAM_MODEL_ID 传入 (默认: doubao-seedream-5.5)
+                                                 # 升级提示：默认模型已由 doubao-seedream-5.0 切换，升级前依赖 3K/4K 默认尺寸的部署需显式指定原模型或调整 SEEDREAM_DEFAULT_SIZE
+--base-url TEXT                                    # 模型 API 端点 URL（须 https，http 需设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
+
+# 生成请求行为
 --default-size [1K|1.5K|2K|3K|4K|<宽>x<高>]        # 默认生成尺寸，需与所选模型兼容 (默认: 2K)
 --watermark                                        # 启用水印
 --no-watermark                                     # 关闭水印
---base-url TEXT                                    # 模型 API 端点 URL（须 https，http 需设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
 
 # 日志
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日志级别 (默认: INFO)

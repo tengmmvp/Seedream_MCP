@@ -90,7 +90,7 @@ Get your API key from the [Volcengine Console](https://ark.volcengine.com/region
 ARK_API_KEY=your_api_key_here uvx seedream-image-mcp
 
 # Or explicitly specify model, size and other options
-ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0 --default-size 2K
+ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0-pro --default-size 1.5K
 ```
 
 `uvx` automatically pulls the latest version from [PyPI](https://pypi.org/project/seedream-image-mcp/) and runs it in an isolated environment — no need to clone the repo, create a virtual environment, or install dependencies.
@@ -111,6 +111,8 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 ```
 
 The service listens on container port `8000` via the streamable-http transport and serves the MCP endpoint at `/mcp`; `SEEDREAM_HTTP_PORT` controls the host-side mapping, defaulting to 8000. The mapping binds to the loopback address `127.0.0.1` by default; for direct connections from other machines, change it in docker-compose.yml to `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` or a specific host interface address. Once the mapping becomes `0.0.0.0`, the service is exposed to the network and `SEEDREAM_HTTP_AUTH_TOKEN` travels over plaintext HTTP; the deployment must then sit behind a TLS reverse proxy, or receive TLS certificate arguments in the container via `SEEDREAM_EXTRA_CLI_ARGS`. Never expose the service without TLS.
+
+The terminal-user identifier is derived from the machine name by default and drifts whenever the container is recreated; set `SEEDREAM_SAFETY_IDENTIFIER` in `.env` to pin it (see `.env.example`).
 
 Client configuration below uses Claude Desktop as the example; other streamable-http clients are analogous:
 
@@ -246,13 +248,13 @@ Any client that supports the standard `mcpServers` stdio structure (`command` + 
 </details>
 
 > [!NOTE]
-> To specify a model/size, append it to `args`, e.g. `["seedream-image-mcp", "--model", "doubao-seedream-5.0"]`.
+> To specify a model/size, append it to `args`, e.g. `["seedream-image-mcp", "--model", "doubao-seedream-5.0-pro"]`.
 
 Restart the corresponding client after configuration.
 
 ## 🖥️ Web Console
 
-Users without an MCP client can work directly in the browser: start the streamable-http transport with the `--web` flag (or `SEEDREAM_WEB_ENABLED=true`), then open `http://127.0.0.1:8000/web` to use text-to-image, image-to-image, multi-image fusion, sequential generation and the history gallery. Off by default; stdio transport and runs without the flag expose no web endpoints.
+Users without an MCP client can work directly in the browser: start the streamable-http transport with the `--web` flag (or `SEEDREAM_WEB_ENABLED=true`), then open `http://127.0.0.1:8000/web` to use text-to-image, image-to-image, multi-image fusion, sequential generation, layer decomposition and the history gallery. Off by default; stdio transport and runs without the flag expose no web endpoints.
 
 ```bash
 ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http --web --auth-token your_token_here
@@ -274,11 +276,12 @@ Generate an image from a text prompt. This tool calls an external billed API and
 - `prompt` (required) - Text prompt for image generation; recommended no more than 300 Chinese characters or 600 English words
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
+- `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (mutually exclusive with `output_format=jpeg`), `opaque` produces a regular image, or `auto` lets the model decide based on the prompt and output format
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
-- `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
 - `tools` (optional) - Model tool config; e.g. `[{"type":"web_search"}]` enables web search
+- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
+- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -305,17 +308,16 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 
 **Parameters:**
 
-- `prompt` (optional) - Image editing request or style transfer instruction; recommended no more than 300 Chinese characters or 600 English words; may be omitted only in the layer decomposition scenario, where the model automatically identifies elements to split
+- `prompt` (required) - Image editing request or style transfer instruction; recommended no more than 300 Chinese characters or 600 English words
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
 - `image` (required) - Input image; supports image URL, local file path, or Base64 image data; local file paths must fall within the read scope, with relative paths limited to the image save directory
-- `layer_decomposition` (optional) - Enable layer decomposition; splits the single input image into 1 base image and up to 16 PNG layers with alpha channels; layer entries additionally return `z_index`, `name`, `description`, and `bounding_box` fields; `output_format` only controls the base image format — layers are always PNG
-- `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (requires a single input image with an alpha channel; mutually exclusive with `output_format=jpeg`) or `opaque` produces a regular image
-- `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model; the layer decomposition scenario only supports the `1K`, `1.5K`, `2K` presets or `auto` (adapts to the input image, and is the default when no size is specified)
+- `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
+- `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (mutually exclusive with `output_format=jpeg`), `opaque` produces a regular image, or `auto` lets the model decide based on the prompt and output format
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
-- `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
 - `tools` (optional) - Model tool config; e.g. `[{"type":"web_search"}]` enables web search
+- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
+- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -347,11 +349,12 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
 - `image` (required) - Input images (2-14); each supports image URL, local file path, or Base64 image data; local file paths must fall within the read scope, with relative paths limited to the image save directory
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
+- `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (mutually exclusive with `output_format=jpeg`), `opaque` produces a regular image, or `auto` lets the model decide based on the prompt and output format
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
-- `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
 - `tools` (optional) - Model tool config; e.g. `[{"type":"web_search"}]` enables web search
+- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
+- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -384,14 +387,15 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 
 - `prompt` (required) - Text prompt for image generation; should clearly specify the quantity and content; recommended no more than 300 Chinese characters or 600 English words
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
-- `image` (optional) - Reference images (up to 14, and the sum of reference images and max_images must not exceed 15); each supports image URL, local file path, or Base64 image data; local file paths must fall within the read scope, with relative paths limited to the image save directory
+- `image` (optional) - Reference images (up to 14, and the sum of reference images and generated images must not exceed 15); each supports image URL, local file path, or Base64 image data; local file paths must fall within the read scope, with relative paths limited to the image save directory
+- `sequential_image_generation_options` (optional) - Sequential generation config object: `max_images` is the maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
+- `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (mutually exclusive with `output_format=jpeg`), `opaque` produces a regular image, or `auto` lets the model decide based on the prompt and output format
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
-- `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
-- `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
 - `tools` (optional) - Model tool config; e.g. `[{"type":"web_search"}]` enables web search
+- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
+- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, each producing a group of images; the number of images in each group is decided by the model based on the prompt, up to max_images; range 1-10; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -412,7 +416,47 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 </details>
 
 <details>
-<summary><b>5. <code>browse_images</code></b> — Browse Images</summary>
+<summary><b>5. <code>layer_decompose</code></b> — Layer Decomposition</summary>
+
+Decompose a single image into 1 base image and multiple PNG layers with alpha channels; layer entries additionally return `z_index`, `name`, `description`, and `bounding_box` fields; `output_format` only controls the base image format — layers are always PNG. This tool calls an external billed API and produces files locally; it is not read-only.
+
+**Parameters:**
+
+- `prompt` (optional) - Layer decomposition intent; recommended no more than 300 Chinese characters or 600 English words; when omitted, the model automatically identifies the main elements of the image and splits them
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
+- `image` (required) - Input image; supports image URL, local file path, or Base64 image data; local file paths must fall within the read scope, with relative paths limited to the image save directory
+- `layer_decomposition_options` (optional) - Decomposition config object: `max_images` is the maximum number of produced images including the base image; range 2-100; default 30; `text_recognition`, when enabled, returns rich-text OCR results for well-formed text layers. When not specified, the API applies the official default
+- `size` (optional) - Output size; only resolution presets or `auto` (adapts to the input image size and aspect ratio, and is the default when no size is specified); presets must be compatible with the selected model
+- `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
+- `tools` (optional) - Model tool config; e.g. `[{"type":"web_search"}]` enables web search
+- `output_format` (optional) - Base image output format; `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
+- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
+- `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one decomposition result each; range 1-10; default 1
+- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
+- `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
+- `save_path` (optional) - Custom save directory path
+- `custom_name` (optional) - Custom filename prefix
+
+**Call examples:**
+
+```json
+{
+  "name": "layer_decompose",
+  "arguments": {
+    "image": "2026-08-15/image_to_image/poster.png",
+    "layer_decomposition_options": {
+      "max_images": 50,
+      "text_recognition": true
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>6. <code>browse_images</code></b> — Browse Images</summary>
 
 Browse image files in the workspace and get file paths for image generation. This tool is read-only, idempotent, and does not access the network.
 
@@ -438,7 +482,7 @@ Browse image files in the workspace and get file paths for image generation. Thi
 </details>
 
 <details>
-<summary><b>6. <code>get_model_info</code></b> — Model Info</summary>
+<summary><b>7. <code>get_model_info</code></b> — Model Info</summary>
 
 Query a capability snapshot of the currently configured model to check parameter support before calling generation tools. This tool is read-only and does not access the network.
 
@@ -448,7 +492,7 @@ Query a capability snapshot of the currently configured model to check parameter
 - `display_name` - Family display name; `null` when the family is unrecognized
 - `aliases` - All available aliases of the current model
 - `family` - Model family; `unknown` for unrecognized models, whose capabilities fall back to allow-all
-- `capabilities` - Optimize prompt modes, reference image limit, layer decomposition, transparent background, size presets and pixel range, and support status of `output_format`, `stream`, `web_search`, `sequential_generation`
+- `capabilities` - Optimize prompt modes, reference image limit, layer decomposition, layer decomposition config and rich-text OCR, transparent background, transparency modes, size presets and pixel range, and support status of `output_format`, `stream`, `web_search`, `sequential_generation`, `safety_identifier`
 
 **Call examples:**
 
@@ -468,6 +512,7 @@ Different models support different capabilities and parameter ranges. Please not
 <table align="center">
   <tr>
     <th style="text-align: center">Dimension</th>
+    <th style="text-align: center">5.5</th>
     <th style="text-align: center">5.0 Pro</th>
     <th style="text-align: center">5.0 / 5.0 Lite</th>
     <th style="text-align: center">5.0 Flash</th>
@@ -481,9 +526,11 @@ Different models support different capabilities and parameter ranges. Please not
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
   </tr>
   <tr>
     <td>Sequential Generation</td>
+    <td style="text-align: center">Not yet supported</td>
     <td style="text-align: center">Not yet supported</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">Not yet supported</td>
@@ -493,6 +540,7 @@ Different models support different capabilities and parameter ranges. Please not
   <tr>
     <td>Web Search</td>
     <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
@@ -500,6 +548,7 @@ Different models support different capabilities and parameter ranges. Please not
   </tr>
   <tr>
     <td>Streaming Output</td>
+    <td style="text-align: center">Not yet supported</td>
     <td style="text-align: center">Not yet supported</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">Not yet supported</td>
@@ -511,27 +560,58 @@ Different models support different capabilities and parameter ranges. Please not
     <td style="text-align: center">png, jpeg</td>
     <td style="text-align: center">png, jpeg</td>
     <td style="text-align: center">png, jpeg</td>
+    <td style="text-align: center">png, jpeg</td>
     <td style="text-align: center">jpeg</td>
     <td style="text-align: center">jpeg</td>
   </tr>
   <tr>
     <td>Layer Decomposition</td>
+    <td style="text-align: center">✓ (1+99)</td>
+    <td style="text-align: center">✓ (1+16)</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✓ (1+16)</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>Rich-Text OCR</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
-    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
   </tr>
   <tr>
     <td>Transparent Background</td>
     <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
   </tr>
   <tr>
+    <td>Transparent Text-to-Image</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>Native RGBA Transparency</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
     <td>Prompt Optimization Modes</td>
+    <td style="text-align: center">standard</td>
     <td style="text-align: center">standard, fast</td>
     <td style="text-align: center">standard</td>
     <td style="text-align: center">standard</td>
@@ -539,7 +619,26 @@ Different models support different capabilities and parameter ranges. Please not
     <td style="text-align: center">standard, fast</td>
   </tr>
   <tr>
+    <td>Prompt Languages</td>
+    <td style="text-align: center">Chinese, English + 13 more</td>
+    <td style="text-align: center">Chinese, English + 13 more</td>
+    <td style="text-align: center">Chinese, English</td>
+    <td style="text-align: center">Chinese, English + 13 more</td>
+    <td style="text-align: center">Chinese, English</td>
+    <td style="text-align: center">Chinese, English</td>
+  </tr>
+  <tr>
+    <td>Terminal-User Identifier</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
     <td>Resolution Presets</td>
+    <td style="text-align: center">1K / 1.5K / 2K</td>
     <td style="text-align: center">1K / 1.5K / 2K</td>
     <td style="text-align: center">2K / 3K / 4K</td>
     <td style="text-align: center">1K / 1.5K / 2K</td>
@@ -549,6 +648,7 @@ Different models support different capabilities and parameter ranges. Please not
   <tr>
     <td>Max Reference Images</td>
     <td style="text-align: center">10</td>
+    <td style="text-align: center">10</td>
     <td style="text-align: center">14</td>
     <td style="text-align: center">10</td>
     <td style="text-align: center">14</td>
@@ -557,7 +657,7 @@ Different models support different capabilities and parameter ranges. Please not
 </table>
 
 > [!TIP]
-> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), offering the broadest capability coverage out of the box. Layer decomposition and transparent background are only available on `doubao-seedream-5.0-pro` and `doubao-seedream-5.0-flash` — the former delivers the highest image quality, the latter is the fastest and cheapest. Switching to either of these models disables sequential generation, web search, and streaming output, limits sizes to `1K/1.5K/2K`, and caps reference images at 10.
+> **Tip**: The default model is **doubao-seedream-5.5**; see the capability table above for differences and switching guidance across models.
 
 ## 💰 Model Pricing
 
@@ -568,6 +668,11 @@ All models are billed per image:
     <th style="text-align: center">Model</th>
     <th style="text-align: center">Input Image (¥/image)</th>
     <th style="text-align: center">Output (¥/image)</th>
+  </tr>
+  <tr>
+    <td>5.5</td>
+    <td style="text-align: center">0.05</td>
+    <td style="text-align: center">0.13 at 1.5K and below, 0.23 above 1.5K</td>
   </tr>
   <tr>
     <td>5.0 Pro</td>
@@ -704,12 +809,15 @@ The server provides the following MCP prompt templates to generate text-to-image
 --api-key TEXT                                     # API key (ARK_API_KEY env var recommended; a CLI value stays in the process list and shell history)
 
 # Model & endpoint
---model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-5.0-flash|doubao-seedream-4.5|doubao-seedream-4.0]
-                                                   # Model selection; full Model IDs or Endpoint IDs go through SEEDREAM_MODEL_ID (default: doubao-seedream-5.0)
+--model [doubao-seedream-5.5|doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-5.0-flash|doubao-seedream-4.5|doubao-seedream-4.0]
+                                                   # Model selection; full Model IDs or Endpoint IDs go through SEEDREAM_MODEL_ID (default: doubao-seedream-5.5)
+                                                   # Upgrade note: the default model changed from doubao-seedream-5.0; deployments relying on 3K/4K default sizes must pin the previous model or adjust SEEDREAM_DEFAULT_SIZE
+--base-url TEXT                                    # Model API endpoint URL (must be https; http requires SEEDREAM_ALLOW_HTTP_BASE_URL=true)
+
+# Generation request behavior
 --default-size [1K|1.5K|2K|3K|4K|<width>x<height>] # Default image size, must be compatible with the model (default: 2K)
 --watermark                                        # Enable watermark
 --no-watermark                                     # Disable watermark
---base-url TEXT                                    # Model API endpoint URL (must be https; http requires SEEDREAM_ALLOW_HTTP_BASE_URL=true)
 
 # Logging
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # Log level (default: INFO)
