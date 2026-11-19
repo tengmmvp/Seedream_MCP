@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from PIL import Image
 from pydantic import ValidationError
 
+from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.pipeline._paths import prevalidate_save_path
 from seedream_mcp.tools.pipeline import (
@@ -21,14 +23,19 @@ from seedream_mcp.tools.schemas import (
     BackgroundMode,
     GenerationTool,
     ImageToImageInput,
+    LayerDecomposeInput,
+    LayerDecompositionOptions,
+    MultiImageFusionInput,
     OptimizePromptOptions,
     OutputFormat,
     SequentialGenerationInput,
+    SequentialImageGenerationOptions,
     TextToImageInput,
 )
 from seedream_mcp.utils.io.save import AutoSaveResult
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 
+from _lib.client_fakes import _capture_call_api
 from _lib.path_helpers import abs_path_stub
 
 
@@ -66,7 +73,12 @@ def test_build_generation_context_rejects_sequential_for_pro_model() -> None:
 
     with pytest.raises(SeedreamValidationError, match="不支持组图生成"):
         build_generation_context(
-            SequentialGenerationInput(prompt="test", image=["a.png"], max_images=4), config
+            SequentialGenerationInput(
+                prompt="test",
+                image=["a.png"],
+                sequential_image_generation_options=SequentialImageGenerationOptions(max_images=4),
+            ),
+            config,
         )
 
 
@@ -79,12 +91,10 @@ def _build_pro_config() -> SeedreamConfig:
 
 
 def test_build_generation_context_layer_decomposition_defaults_size_auto() -> None:
-    """图层拆分开启且未显式提供 size 时按官方默认取 auto，不取 config.default_size。"""
+    """图层拆分工具未显式提供 size 时按官方默认取 auto，不取 config.default_size。"""
     config = _build_pro_config()
     context = build_generation_context(
-        ImageToImageInput(
-            prompt="拆分图层", image="https://example.com/a.png", layer_decomposition=True
-        ),
+        LayerDecomposeInput(prompt="拆分图层", image="https://example.com/a.png"),
         config,
     )
 
@@ -96,10 +106,9 @@ def test_build_generation_context_layer_decomposition_keeps_explicit_size() -> N
     """图层拆分场景显式 size 原样保留，不被 auto 覆盖。"""
     config = _build_pro_config()
     context = build_generation_context(
-        ImageToImageInput(
+        LayerDecomposeInput(
             prompt="拆分图层",
             image="https://example.com/a.png",
-            layer_decomposition=True,
             size="1K",
         ),
         config,
@@ -109,20 +118,143 @@ def test_build_generation_context_layer_decomposition_keeps_explicit_size() -> N
 
 
 def test_build_generation_context_layer_decomposition_rejected_for_lite() -> None:
-    """lite 模型开启 layer_decomposition 即校验拒绝。"""
+    """lite 模型调用图层拆分工具即校验拒绝。"""
     config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0-260128")
 
     with pytest.raises(SeedreamValidationError, match="不支持图层拆分（layer_decomposition）"):
         build_generation_context(
-            ImageToImageInput(
-                prompt="拆分图层", image="https://example.com/a.png", layer_decomposition=True
-            ),
+            LayerDecomposeInput(prompt="拆分图层", image="https://example.com/a.png"),
             config,
         )
 
 
+def test_build_generation_context_layer_options_null_equals_omitted() -> None:
+    """显式 null 的 max_images 视同未指定，不落入下游整数校验使整个请求失败。"""
+    config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5.5")
+    context = build_generation_context(
+        LayerDecomposeInput(
+            image="https://example.com/a.png",
+            layer_decomposition_options=LayerDecompositionOptions(max_images=None),
+        ),
+        config,
+    )
+
+    assert context.layer_decomposition_options is None
+
+
+def test_build_generation_context_layer_options_null_key_keeps_other_keys() -> None:
+    """null 键滤除不吞并同批显式给定的其余键。"""
+    config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5.5")
+    context = build_generation_context(
+        LayerDecomposeInput(
+            image="https://example.com/a.png",
+            layer_decomposition_options=LayerDecompositionOptions(
+                max_images=None, text_recognition=True
+            ),
+        ),
+        config,
+    )
+
+    assert context.layer_decomposition_options == {"text_recognition": True}
+
+
+def test_layer_options_bool_max_images_rejected_at_schema() -> None:
+    """布尔 max_images 在 schema 层即拒绝，与直连 client 路径的整数要求一致。"""
+    with pytest.raises(ValidationError, match="必须是整数"):
+        SequentialImageGenerationOptions.model_validate({"max_images": True})
+    with pytest.raises(ValidationError, match="必须是整数"):
+        LayerDecompositionOptions.model_validate({"max_images": True})
+
+
+def test_layer_options_text_recognition_null_equals_omitted() -> None:
+    """显式 null 的 text_recognition 视同未指定，归一后仅保留显式给定键。"""
+    context = build_generation_context(
+        LayerDecomposeInput(
+            image="https://example.com/a.png",
+            layer_decomposition_options=LayerDecompositionOptions(
+                max_images=50, text_recognition=None
+            ),
+        ),
+        SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5.5"),
+    )
+
+    assert context.layer_decomposition_options == {"max_images": 50}
+
+
+async def test_layer_options_null_key_parity_between_context_and_client_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式 null 的 max_images 两路径产出同一 layer_decomposition_options 载荷，null 键不入载荷。"""
+    workspace = tmp_path / "workspace"
+    image_file = workspace / ".seedream" / "images" / "ref.png"
+    image_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 64), color=(255, 0, 0)).save(image_file)
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+
+    config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5.5", max_retries=1)
+    context = build_generation_context(
+        LayerDecomposeInput(
+            image="ref.png",
+            layer_decomposition_options=LayerDecompositionOptions(
+                max_images=None, text_recognition=True
+            ),
+        ),
+        config,
+    )
+    client = SeedreamClient(config)
+
+    async def invoke(options: dict[str, Any] | None) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr(client, "_call_api", _capture_call_api(captured))
+        await client.image_to_image(
+            image="ref.png", layer_decomposition=True, layer_decomposition_options=options
+        )
+        return captured
+
+    mcp_request = await invoke(context.layer_decomposition_options)
+    direct_request = await invoke({"max_images": None, "text_recognition": True})
+
+    assert mcp_request["layer_decomposition_options"] == {"text_recognition": True}
+    assert direct_request["layer_decomposition_options"] == {"text_recognition": True}
+
+
+async def test_sequential_options_null_key_parity_between_context_and_client_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式 null 的 max_images 两路径均按参考图数量推导生效值，null 值不入载荷。"""
+    config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5-0-260128", max_retries=1)
+    context = build_generation_context(
+        SequentialGenerationInput(
+            prompt="test",
+            image=["a.png", "b.png"],
+            sequential_image_generation_options=SequentialImageGenerationOptions(max_images=None),
+        ),
+        config,
+    )
+    client = SeedreamClient(config)
+
+    async def fake_prepare_images_in_parallel(images: list[str]) -> list[str]:
+        return list(images)
+
+    monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
+
+    async def invoke(options: dict[str, Any] | None) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr(client, "_call_api", _capture_call_api(captured))
+        await client.sequential_generation(
+            prompt="test", image=["a.png", "b.png"], sequential_image_generation_options=options
+        )
+        return captured
+
+    mcp_request = await invoke(context.sequential_image_generation_options)
+    direct_request = await invoke({"max_images": None})
+
+    assert mcp_request["sequential_image_generation_options"] == {"max_images": 13}
+    assert direct_request["sequential_image_generation_options"] == {"max_images": 13}
+
+
 def test_build_generation_context_background_carried_to_context() -> None:
-    """background 参数透传到 context，图层拆分缺省 False。"""
+    """background 参数透传到 context，纯编辑输入的 layer_decomposition 恒 False。"""
     config = _build_pro_config()
     context = build_generation_context(
         ImageToImageInput(
@@ -137,11 +269,42 @@ def test_build_generation_context_background_carried_to_context() -> None:
     assert context.layer_decomposition is False
 
 
+def test_build_generation_context_background_form_classifies_by_reference_count() -> None:
+    """受限形态家族按参考图数量判定调用形态：0 张文生、1 张单图、多张多图。"""
+    config = _build_pro_config()
+
+    context = build_generation_context(
+        ImageToImageInput(
+            prompt="透明背景",
+            image="https://example.com/a.png",
+            background=cast(BackgroundMode, "transparent"),
+        ),
+        config,
+    )
+    assert context.background == "transparent"
+
+    with pytest.raises(SeedreamValidationError, match="仅在单参考图的图生场景可用"):
+        build_generation_context(
+            TextToImageInput(prompt="透明背景", background=cast(BackgroundMode, "transparent")),
+            config,
+        )
+
+    with pytest.raises(SeedreamValidationError, match="多参考图场景请更换"):
+        build_generation_context(
+            MultiImageFusionInput(
+                prompt="透明背景",
+                image=["https://example.com/a.png", "https://example.com/b.png"],
+                background=cast(BackgroundMode, "transparent"),
+            ),
+            config,
+        )
+
+
 def test_build_generation_context_layer_scenario_allows_missing_prompt() -> None:
     """图层拆分场景 prompt 可缺省，context 携带 None 且 size 默认 auto。"""
     config = _build_pro_config()
     context = build_generation_context(
-        ImageToImageInput(image="https://example.com/a.png", layer_decomposition=True),
+        LayerDecomposeInput(image="https://example.com/a.png"),
         config,
     )
 
@@ -149,10 +312,10 @@ def test_build_generation_context_layer_scenario_allows_missing_prompt() -> None
     assert context.size == "auto"
 
 
-def test_image_to_image_input_rejects_missing_prompt_without_layer() -> None:
-    """非图层拆分场景 prompt 缺省在输入模型层即拒绝。"""
-    with pytest.raises(ValidationError, match="prompt 不能为空"):
-        ImageToImageInput(image="https://example.com/a.png")
+def test_image_to_image_input_requires_prompt() -> None:
+    """图文生图为纯编辑工具，prompt 缺省在输入模型层即拒绝。"""
+    with pytest.raises(ValidationError, match="prompt"):
+        ImageToImageInput.model_validate({"image": "https://example.com/a.png"})
 
 
 def test_build_generation_context_rejects_transparent_with_jpeg() -> None:
@@ -176,15 +339,16 @@ def test_generation_execution_context_field_order_matches_mcp_order() -> None:
     assert [field.name for field in fields(GenerationExecutionContext)] == [
         "prompt",
         "optimize_prompt_options",
-        "size",
-        "watermark",
-        "response_format",
-        "output_format",
-        "stream",
-        "tools",
         "layer_decomposition",
+        "layer_decomposition_options",
+        "sequential_image_generation_options",
+        "size",
         "background",
-        "max_images",
+        "watermark",
+        "tools",
+        "output_format",
+        "response_format",
+        "stream",
         "request_count",
         "parallelism",
         "enable_auto_save",
@@ -207,8 +371,6 @@ def test_build_generation_context_rejects_reference_images_over_pro_limit() -> N
     schema 上限只能表达全家族默认 14；留给 client 层则进度已上报「参数校验完成」
     后才报错。
     """
-    from seedream_mcp.tools.schemas import MultiImageFusionInput
-
     config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0-pro")
     params = MultiImageFusionInput(
         prompt="融合测试",
@@ -221,8 +383,6 @@ def test_build_generation_context_rejects_reference_images_over_pro_limit() -> N
 
 def test_build_generation_context_allows_default_model_reference_limit() -> None:
     """非 Pro 家族的默认上限 14 在 context 层放行，不误伤合法输入。"""
-    from seedream_mcp.tools.schemas import MultiImageFusionInput
-
     config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0")
     params = MultiImageFusionInput(
         prompt="融合测试",

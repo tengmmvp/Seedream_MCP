@@ -193,10 +193,10 @@ async def _run_generation_requests(
             optimize_prompt_options=context.optimize_prompt_options,
             size=context.size,
             watermark=context.watermark,
-            response_format=context.response_format,
-            output_format=context.output_format,
-            stream=context.stream,
             tools=context.tools,
+            output_format=context.output_format,
+            response_format=context.response_format,
+            stream=context.stream,
             layer_decomposition=context.layer_decomposition,
         )
         if context.request_count == 1:

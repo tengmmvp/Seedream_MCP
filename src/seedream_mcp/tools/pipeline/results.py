@@ -663,14 +663,16 @@ def _build_generation_structured_result(
         "prompt": context.prompt,
         "optimize_prompt_options": context.optimize_prompt_options,
         "layer_decomposition": context.layer_decomposition,
-        "background": context.background,
+        "layer_decomposition_options": context.layer_decomposition_options,
+        # 组图回显对齐官方参数名，与 handler 请求装配共用 context 上的同一字段。
+        "sequential_image_generation_options": context.sequential_image_generation_options,
         "size": context.size,
+        "background": context.background,
         "watermark": context.watermark,
-        "max_images": context.max_images,
-        "response_format": context.response_format,
-        "output_format": context.output_format,
-        "stream": context.stream,
         "tools": context.tools,
+        "output_format": context.output_format,
+        "response_format": context.response_format,
+        "stream": context.stream,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
         "data": sanitized_images,
@@ -679,14 +681,6 @@ def _build_generation_structured_result(
         "usage": sanitized_usage,
         "batch": raw_batch if isinstance(raw_batch, dict) else None,
     }
-
-    truncated_events = _extract_truncated_events(result)
-    if truncated_events is not None:
-        payload["truncated_events"] = truncated_events
-
-    deadline_exceeded = _extract_deadline_exceeded(result)
-    if deadline_exceeded:
-        payload["deadline_exceeded"] = deadline_exceeded
 
     if context.enable_auto_save:
         payload["auto_save"] = {
@@ -697,6 +691,14 @@ def _build_generation_structured_result(
         }
     else:
         payload["auto_save"] = {"enabled": False}
+
+    truncated_events = _extract_truncated_events(result)
+    if truncated_events is not None:
+        payload["truncated_events"] = truncated_events
+
+    deadline_exceeded = _extract_deadline_exceeded(result)
+    if deadline_exceeded:
+        payload["deadline_exceeded"] = deadline_exceeded
 
     if failed:
         aggregated, message_limit, raw_error = _failure_render_context(result)

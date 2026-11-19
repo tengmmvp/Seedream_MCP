@@ -12,7 +12,8 @@ server 层按协商版本取回注入；再将 pydantic 校验后的入参模型
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import TypeVar
 
 from mcp.server.mcpserver import Context
@@ -26,6 +27,7 @@ from .schemas import (
     EntryBound,
     GenerationInputParams,
     ImageToImageInput,
+    LayerDecomposeInput,
     MultiImageFusionInput,
     SequentialGenerationInput,
     TextToImageInput,
@@ -35,6 +37,7 @@ from .handlers.image_to_image import handle_image_to_image
 from .handlers.get_model_info import handle_get_model_info
 from .handlers.multi_image_fusion import handle_multi_image_fusion
 from .handlers.sequential_generation import handle_sequential_generation
+from .handlers.layer_decompose import handle_layer_decompose
 from .handlers.text_to_image import handle_text_to_image
 
 # 泛型绑定具体输入模型，避免 Callable 逆变要求 handler 接受任意协议实现。
@@ -46,6 +49,16 @@ _GenerationHandler = Callable[
 ]
 
 
+@asynccontextmanager
+async def _entry_call_scopes(
+    workspace_roots: ListRootsResult | None = None,
+) -> AsyncIterator[None]:
+    """开启请求入口的调用关联 ID 与工作区边界作用域（无 Roots 声明时不设边界，回退环境回退根）。"""
+    with call_id_scope():
+        async with workspace_roots_scope_from_result(workspace_roots):
+            yield
+
+
 async def _run_generation_tool(
     params: _GenerationInputT,
     config: SeedreamConfig,
@@ -55,9 +68,8 @@ async def _run_generation_tool(
     workspace_roots: ListRootsResult | None = None,
 ) -> CallToolResult:
     """在工作区边界作用域内将类型化入参模型委托给生成 handler。"""
-    with call_id_scope():
-        async with workspace_roots_scope_from_result(workspace_roots):
-            return await handler(params, config, ctx)
+    async with _entry_call_scopes(workspace_roots):
+        return await handler(params, config, ctx)
 
 
 async def run_text_to_image(
@@ -112,6 +124,18 @@ async def run_sequential_generation(
     )
 
 
+async def run_layer_decompose(
+    params: LayerDecomposeInput,
+    config: SeedreamConfig,
+    ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
+) -> CallToolResult:
+    """注入工作区边界后委托 ``handle_layer_decompose`` 处理图层拆分请求。"""
+    return await _run_generation_tool(
+        params, config, ctx, handle_layer_decompose, workspace_roots=workspace_roots
+    )
+
+
 async def run_browse_images(
     params: BrowseImagesInput,
     ctx: Context | None = None,
@@ -128,9 +152,8 @@ async def run_browse_images(
         entry_bound: 请求目录与条目共用的替代界（EntryBound），请求目录越出界
             以同界门拒绝，条目与读权限求交后生效，None 时按读权限过滤。
     """
-    with call_id_scope():
-        async with workspace_roots_scope_from_result(workspace_roots):
-            return await handle_browse_images(params, ctx=ctx, entry_bound=entry_bound)
+    async with _entry_call_scopes(workspace_roots):
+        return await handle_browse_images(params, ctx=ctx, entry_bound=entry_bound)
 
 
 async def run_get_model_info(config: SeedreamConfig) -> CallToolResult:

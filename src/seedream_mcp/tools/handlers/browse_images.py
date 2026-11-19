@@ -119,9 +119,9 @@ class _BrowseRequestState:
         max_depth: 递归扫描的最大深度。
         limit: 单页图片数量上限。
         offset: 分页起始偏移。
-        show_details: 图片条目是否附带大小与修改时间详情。
         format_filter: 生效的扩展名过滤值，部分受支持时仅保留受支持后缀，全部不受
             支持时保留原始输入供回显；None 表示不限制。
+        show_details: 图片条目是否附带大小与修改时间详情。
     """
 
     workspace_roots: list[Path]
@@ -131,8 +131,8 @@ class _BrowseRequestState:
     max_depth: int
     limit: int
     offset: int
-    show_details: bool
     format_filter: list[str] | None
+    show_details: bool
 
     @classmethod
     def from_params(
@@ -162,8 +162,8 @@ class _BrowseRequestState:
             max_depth=params.max_depth,
             limit=params.limit,
             offset=params.offset,
-            show_details=params.show_details,
             format_filter=format_filter,
+            show_details=params.show_details,
         )
 
 
@@ -581,8 +581,8 @@ class _BrowsePage(NamedTuple):
 def _paginate_browse_images(
     *,
     image_entries: list[ScanEntry],
-    offset: int,
     limit: int,
+    offset: int,
     scan_result: ScanResult | None,
 ) -> _BrowsePage:
     """分页切片阶段：切出当前页条目并派生 has_more、next_offset、total_count 与 rescan_futile。
@@ -841,8 +841,8 @@ async def execute_browse_request(
 
     page = _paginate_browse_images(
         image_entries=image_entries,
-        offset=state.offset,
         limit=state.limit,
+        offset=state.offset,
         scan_result=scan_result,
     )
     if not page.entries:

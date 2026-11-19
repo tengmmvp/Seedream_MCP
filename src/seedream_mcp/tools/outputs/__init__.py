@@ -27,6 +27,7 @@ from ...definitions.conventions import (
     BROWSE_IMAGES_TOOL_NAME,
     GET_MODEL_INFO_TOOL_NAME,
     IMAGE_TO_IMAGE_TOOL_NAME,
+    LAYER_DECOMPOSE_TOOL_NAME,
     MULTI_IMAGE_FUSION_TOOL_NAME,
     SEQUENTIAL_GENERATION_TOOL_NAME,
     TEXT_TO_IMAGE_TOOL_NAME,
@@ -78,28 +79,32 @@ def _stringify_keys(mapping: dict[Any, Any]) -> dict[str, Any]:
 
 
 class GenerationStructuredOutput(_BaseStructuredOutput):
-    """生成类工具的结构化输出 schema，覆盖文生图、图文生图、多图融合与组图输出。
+    """生成类工具的结构化输出 schema，覆盖文生图、图文生图、多图融合、组图输出
+    与图层拆分。
 
     参数回显字段序与生成工具的输入参数序一致。
 
     Attributes:
-        prompt: 生成提示词回显；图文生图的图层拆分场景可为 None。
+        prompt: 生成提示词回显；仅图层拆分工具可为 None。
         optimize_prompt_options: 生效的提示词优化选项，未指定时为 None。
-        layer_decomposition: 是否开启图层拆分，非 False 取值仅出现在图文生图。
-        background: 透明通道取值，非 None 取值仅出现在图文生图显式指定时。
+        layer_decomposition: 是否开启图层拆分，非 False 取值仅出现在图层拆分工具。
+        layer_decomposition_options: 生效的图层拆分配置，仅含显式给定的子字段，
+            未指定时为 None。
+        sequential_image_generation_options: 组图配置回显，仅含 max_images 生效值
+            （显式声明优先，缺省按参考图数量推导）；非组图工具为 None。
         size: 生效的生成尺寸。
+        background: 透明通道取值，未指定时为 None；图层拆分工具不暴露该参数。
         watermark: 生效的水印开关。
-        max_images: 组图单次请求的生成数量上限，未显式传入时为按参考图数量推导的
-            生效值；非组图工具为 None。
-        response_format: 响应格式，url 或 b64_json。
-        output_format: 输出图片格式，未指定时为 None。
-        stream: 是否启用流式输出。
         tools: 模型工具配置，未指定时为 None。
+        output_format: 输出图片格式，未指定时为 None。
+        response_format: 响应格式，url 或 b64_json。
+        stream: 是否启用流式输出。
         request_count: 同一提示并行发起的独立生成次数。
         parallelism: 并行度上限。
         data: 图片条目列表，条目含 url 或 b64_json 及自动保存回填的本地路径信息；
-            图层拆分场景条目另含 z_index、name、description、bounding_box 字段。
-        usage: 用量统计字典，键由上游透传；部分模型另含 input_images 输入图片数。
+            图层拆分场景条目另含 z_index、name、description、bounding_box 字段，
+            开启 text_recognition 后，Seedream 5.5 的规整文字图层另含富文本 OCR 结果。
+        usage: 用量统计字典，键由上游透传。
         batch: 并行批次统计，单次请求时为 None。
         auto_save: 自动保存摘要，未启用时仅含 enabled 键。
         truncated_events: SSE 解析因超限或解析失败丢弃的事件数，未发生丢弃时为
@@ -111,14 +116,15 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
     prompt: str | None = None
     optimize_prompt_options: dict[str, Any] | None = None
     layer_decomposition: bool | None = None
-    background: str | None = None
+    layer_decomposition_options: dict[str, Any] | None = None
+    sequential_image_generation_options: dict[str, Any] | None = None
     size: str | None = None
+    background: str | None = None
     watermark: bool | None = None
-    max_images: int | None = None
-    response_format: str | None = None
-    output_format: str | None = None
-    stream: bool | None = None
     tools: list[dict[str, Any]] | None = None
+    output_format: str | None = None
+    response_format: str | None = None
+    stream: bool | None = None
     request_count: int | None = None
     parallelism: int | None = None
     data: list[dict[str, Any]] | None = None
@@ -155,7 +161,6 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
         count: 当前页返回的图片条数。
         total_count: 全量匹配图片总数，未扫完全量时为 None；与表达当前页条数的
             count 分页语义不同。
-        offset: 当前页起始偏移。
         has_more: 是否仍有未返回的匹配图片。
         next_offset: 下一页或截断/停滞续扫的起始偏移，仅确知末页（has_more=false）、
             永久停滞与截断徒劳页（rescan_futile=true）等终态为 None；
@@ -170,6 +175,7 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
         recursive: 是否递归查找子目录。
         max_depth: 递归查找的最大深度。
         limit: 单页返回的最大文件数量。
+        offset: 当前页起始偏移。
         format_filter: 生效的图片扩展名过滤列表，未提供时为 None。
         show_details: 图片条目是否包含文件大小与修改时间详情。
     """
@@ -179,7 +185,6 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
     workspace_roots: list[str] | None = None
     count: int | None = None
     total_count: int | None = None
-    offset: int | None = None
     has_more: bool | None = None
     next_offset: int | None = None
     stall_permanent: bool = False
@@ -189,6 +194,7 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
     recursive: bool | None = None
     max_depth: int | None = None
     limit: int | None = None
+    offset: int | None = None
     format_filter: list[str] | None = None
     show_details: bool | None = None
 
@@ -202,9 +208,11 @@ class GetModelInfoStructuredOutput(_BaseStructuredOutput):
         aliases: 归一到当前模型 ID 的全部友好别名。
         family: 模型家族规范名，未识别家族为 unknown。
         capabilities: 能力字段，按调用流程排序：optimize_prompt_modes、
-            max_reference_images、layer_decomposition、transparent_background、
-            size_presets、min_size_pixels、max_size_pixels、output_format、stream、
-            web_search、sequential_generation。
+            max_reference_images、layer_decomposition、layer_decomposition_options、
+            transparent_background、full_form_transparency、background_modes、
+            size_presets、min_size_pixels、max_size_pixels、
+            output_format、stream、web_search、sequential_generation、
+            safety_identifier。
     """
 
     model_id: str | None = None
@@ -220,6 +228,7 @@ TOOL_OUTPUT_MODELS: Mapping[str, type[_BaseStructuredOutput]] = {
     IMAGE_TO_IMAGE_TOOL_NAME: GenerationStructuredOutput,
     MULTI_IMAGE_FUSION_TOOL_NAME: GenerationStructuredOutput,
     SEQUENTIAL_GENERATION_TOOL_NAME: GenerationStructuredOutput,
+    LAYER_DECOMPOSE_TOOL_NAME: GenerationStructuredOutput,
     BROWSE_IMAGES_TOOL_NAME: BrowseImagesStructuredOutput,
     GET_MODEL_INFO_TOOL_NAME: GetModelInfoStructuredOutput,
 }

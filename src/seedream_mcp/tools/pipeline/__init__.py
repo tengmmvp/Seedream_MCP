@@ -2,7 +2,7 @@
 
 内部按职责拆分到 _execute/context/results/parallel/auto_save/_progress/_failures/_paths
 子模块，本门面聚合公共符号供 handlers 与测试导入。``ToolMetadata`` 收纳各工具的静态元数据，
-``execute_generation_handler`` 是四类生成工具的统一处理流水线，各阶段职责与异常降级
+``execute_generation_handler`` 是五类生成工具的统一处理流水线，各阶段职责与异常降级
 契约见该函数 docstring。
 """
 

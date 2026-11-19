@@ -1,6 +1,6 @@
 """生成类工具 handlers 共享的工具元数据常量与开始日志参数构造。
 
-四个生成 handler 传给 ``execute_generation_handler`` 的元数据高度同构，
+五个生成 handler 传给 ``execute_generation_handler`` 的元数据高度同构，
 收敛为不可变的 ``ToolMetadata`` 常量；
 数据类定义于 pipeline 域，依赖方向保持 pipeline <- handlers。
 工具名常量定义于 definitions/conventions，Web 装配同源引用。
@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...definitions.conventions import (
     IMAGE_TO_IMAGE_TOOL_NAME,
+    LAYER_DECOMPOSE_TOOL_NAME,
     MULTI_IMAGE_FUSION_TOOL_NAME,
     SEQUENTIAL_GENERATION_TOOL_NAME,
     TEXT_TO_IMAGE_TOOL_NAME,
@@ -42,7 +43,7 @@ def _sequential_start_log_values(
     """构造组图输出开始日志参数元组，携带执行上下文派生的生效 max_images。"""
     return (
         len(context.prompt or ""),
-        context.max_images,
+        (context.sequential_image_generation_options or {}).get("max_images"),
         context.size,
         context.stream,
         context.request_count,
@@ -89,4 +90,14 @@ SEQUENTIAL_GENERATION = ToolMetadata(
         "request_count={}, parallelism={}"
     ),
     start_log_values_builder=_sequential_start_log_values,
+)
+
+LAYER_DECOMPOSE = ToolMetadata(
+    tool_name=LAYER_DECOMPOSE_TOOL_NAME,
+    completion_title="图层拆分任务完成",
+    failure_prefix="图层拆分",
+    start_log_message=(
+        "图层拆分开始: prompt_len={}, size={}, stream={}, request_count={}, parallelism={}"
+    ),
+    start_log_values_builder=_default_start_log_values,
 )

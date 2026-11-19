@@ -31,9 +31,12 @@ from seedream_mcp.tools.schemas import (
     GenerationTool,
     GenerationToolType,
     ImageToImageInput,
+    LayerDecomposeInput,
+    LayerDecompositionOptions,
     OptimizePromptOptions,
     OutputFormat,
     SequentialGenerationInput,
+    SequentialImageGenerationOptions,
     TextToImageInput,
 )
 
@@ -250,8 +253,28 @@ def _image_to_image_echo_context() -> GenerationExecutionContext:
 def _sequential_echo_context(max_images: int) -> GenerationExecutionContext:
     """携带指定 max_images 生效值的组图上下文。"""
     return build_generation_context(
-        SequentialGenerationInput(prompt="四格漫画", max_images=max_images),
-        SeedreamConfig(api_key="k"),
+        SequentialGenerationInput(
+            prompt="四格漫画",
+            sequential_image_generation_options=SequentialImageGenerationOptions(
+                max_images=max_images
+            ),
+        ),
+        # 默认 5.5 模型不支持组图，门控即拒绝。
+        SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0"),
+    )
+
+
+def _layer_decompose_echo_context() -> GenerationExecutionContext:
+    """携带固定拆分意图与显式拆分配置的图层拆分上下文。"""
+    return build_generation_context(
+        LayerDecomposeInput(
+            image="https://example.com/ref.png",
+            layer_decomposition_options=LayerDecompositionOptions(
+                max_images=5, text_recognition=True
+            ),
+        ),
+        # 拆分配置仅 5.5 家族支持。
+        SeedreamConfig(api_key="k", model_id="doubao-seedream-5.5"),
     )
 
 
@@ -262,10 +285,14 @@ def _sequential_echo_context(max_images: int) -> GenerationExecutionContext:
             _image_to_image_echo_context(),
             {"optimize_prompt_options", "background", "output_format", "tools"},
         ),
-        (_sequential_echo_context(1), {"max_images"}),
-        (_sequential_echo_context(15), {"max_images"}),
+        (_sequential_echo_context(1), {"sequential_image_generation_options"}),
+        (_sequential_echo_context(15), {"sequential_image_generation_options"}),
+        (
+            _layer_decompose_echo_context(),
+            {"layer_decomposition", "layer_decomposition_options"},
+        ),
     ],
-    ids=["image_to_image", "sequential_min", "sequential_max"],
+    ids=["image_to_image", "sequential_min", "sequential_max", "layer_decompose"],
 )
 def test_echo_payload_covers_output_model_echo_fields(
     context: GenerationExecutionContext, non_none_fields: set[str]
@@ -273,8 +300,9 @@ def test_echo_payload_covers_output_model_echo_fields(
     """成功路径回显字段的取值与上下文逐项相等，漏构造的新字段恒 None 即失败。
 
     回显字段与结果区字段在模型与 payload 构造两处双列，extra=forbid 只拦反向
-    漂移，漏构造的新字段退化为 None，与上下文实际值不等在此暴露；五个可选回显
-    字段经两类上下文全部取非 None 值，避免 None 与 None 的恒真比较。
+    漂移，漏构造的新字段退化为 None，与上下文实际值不等在此暴露；可选回显字段
+    经各场景参数化全部取非 None 值，避免 None 与 None 的恒真比较。组图回显键
+    经 context 的同名存储字段对账，与请求装配同源。
     """
     structured = _build_generation_structured_result(
         tool_name="text_to_image",

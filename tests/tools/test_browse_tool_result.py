@@ -1378,8 +1378,8 @@ async def test_browse_error_boundary_sanitizes_both_channels() -> None:
         max_depth=1,
         limit=10,
         offset=0,
-        show_details=False,
         format_filter=None,
+        show_details=False,
     )
     dirty = "目录扫描中断: ../../etc\r\nFAKE-LINE: 伪造摘要行"
     result = await _build_browse_error(state=state, message=dirty)

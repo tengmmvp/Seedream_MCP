@@ -27,11 +27,13 @@ from seedream_mcp.tools.pipeline.results import _add_usage_value
 from seedream_mcp.tools.pipeline.results import aggregate_parallel_generation_results
 from seedream_mcp.tools.schemas import (
     ImageToImageInput,
+    LayerDecomposeInput,
     MultiImageFusionInput,
     SequentialGenerationInput,
     TextToImageInput,
 )
 from seedream_mcp.tools.handlers.image_to_image import handle_image_to_image
+from seedream_mcp.tools.handlers.layer_decompose import handle_layer_decompose
 from seedream_mcp.tools.handlers.multi_image_fusion import handle_multi_image_fusion
 from seedream_mcp.tools.handlers.sequential_generation import handle_sequential_generation
 from seedream_mcp.tools.handlers.text_to_image import handle_text_to_image
@@ -39,9 +41,12 @@ from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationE
 from seedream_mcp.utils.io import save as io_save
 
 
-def _build_config() -> SeedreamConfig:
+def _build_config(model_id: str | None = None) -> SeedreamConfig:
     # 关闭自动保存：测试 mock 返回占位 URL，避免对 example.com 发起真实下载拖慢 CI
-    return SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False)
+    overrides: dict[str, Any] = {"max_retries": 1, "auto_save_enabled": False}
+    if model_id is not None:
+        overrides["model_id"] = model_id
+    return SeedreamConfig(api_key="test_key", **overrides)
 
 
 def _success_result(url: str) -> dict[str, Any]:
@@ -55,12 +60,13 @@ def _success_result(url: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    ("handler", "method_name", "params"),
+    ("handler", "method_name", "params", "model_id"),
     [
         (
             handle_text_to_image,
             "text_to_image",
             TextToImageInput(prompt="test", request_count=3, parallelism=2),
+            None,
         ),
         (
             handle_image_to_image,
@@ -71,6 +77,7 @@ def _success_result(url: str) -> dict[str, Any]:
                 request_count=3,
                 parallelism=2,
             ),
+            None,
         ),
         (
             handle_multi_image_fusion,
@@ -81,6 +88,7 @@ def _success_result(url: str) -> dict[str, Any]:
                 request_count=3,
                 parallelism=2,
             ),
+            None,
         ),
         (
             handle_sequential_generation,
@@ -91,6 +99,18 @@ def _success_result(url: str) -> dict[str, Any]:
                 request_count=3,
                 parallelism=2,
             ),
+            # 默认 5.5 模型不支持组图，门控即拒绝。
+            "doubao-seedream-5.0",
+        ),
+        (
+            handle_layer_decompose,
+            "image_to_image",
+            LayerDecomposeInput(
+                image="https://example.com/ref.png",
+                request_count=3,
+                parallelism=2,
+            ),
+            None,
         ),
     ],
 )
@@ -99,8 +119,9 @@ async def test_generation_handlers_support_parallel_requests(
     handler: Callable[[BaseModel, SeedreamConfig], Awaitable[CallToolResult]],
     method_name: str,
     params: BaseModel,
+    model_id: str | None,
 ) -> None:
-    """四个生成工具的 handler 均支持并行请求，按 request_count 分发并汇总。"""
+    """五个生成工具的 handler 均支持并行请求，按 request_count 分发并汇总。"""
     call_count = 0
 
     async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
@@ -111,7 +132,7 @@ async def test_generation_handlers_support_parallel_requests(
 
     monkeypatch.setattr(SeedreamClient, method_name, fake_method)
 
-    result = await handler(params, _build_config())
+    result = await handler(params, _build_config(model_id))
 
     assert call_count == 3
     assert result.is_error is False
@@ -352,7 +373,7 @@ def test_parallel_options_reject_request_count_over_limit_in_schema() -> None:
 
 def test_parallel_options_reject_parallelism_greater_than_request_count_in_schema() -> None:
     """parallelism 大于 request_count 被 schema 拒绝。"""
-    with pytest.raises(ValidationError, match="parallelism 不能大于 request_count"):
+    with pytest.raises(ValidationError, match="request_count 不能小于 parallelism"):
         TextToImageInput(prompt="test", request_count=2, parallelism=3)
 
 

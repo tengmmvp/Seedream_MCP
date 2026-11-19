@@ -24,7 +24,10 @@ from pydantic import (
 )
 
 from ..definitions.conventions import (
-    MAX_LAYER_DECOMPOSITION_IMAGES,
+    DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES,
+    LAYER_DECOMPOSITION_MAX_IMAGES,
+    LAYER_DECOMPOSITION_MIN_IMAGES,
+    MAX_IMAGES_MIN,
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
@@ -39,9 +42,11 @@ from ..utils.core.errors import (
 from ..utils.images.validation import MAX_IMAGE_FILE_SIZE
 from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+    get_model_capabilities,
     layer_decomposition_presets_text,
 )
 from ..utils.core.validators import (
+    INTEGER_REQUIRED_TEMPLATE,
     VALID_BACKGROUND_MODES,
     VALID_GENERATION_TOOL_TYPES,
     VALID_OPTIMIZE_MODES,
@@ -78,7 +83,6 @@ SEQUENTIAL_IMAGE_MIN_ITEMS = 1
 
 REQUEST_COUNT_MIN = 1
 PARALLELISM_MIN = 1
-MAX_IMAGES_MIN = 1
 
 # 浏览工具的深度、数量与偏移界限为产品决策，防止单次扫描或翻页过深。
 MAX_DEPTH_MIN = 1
@@ -99,14 +103,13 @@ FORMAT_FILTER_MAX_ITEMS = 32
 # 带内边距的合法值不受影响，strip 仍由函数体内组装输入模型时完成。
 NON_BLANK_PATTERN = r"\S"
 
-# 四个生成工具的 prompt 描述。
+# 五个生成工具的 prompt 描述。
 TEXT_TO_IMAGE_PROMPT_DESCRIPTION = (
     "用于生成图片的提示词，建议不超过300个汉字或600个英文单词。"
     "例如：一只戴墨镜的猫坐在月球上，写实风格。"
 )
 IMAGE_TO_IMAGE_PROMPT_DESCRIPTION = (
-    "图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词；"
-    "图层拆分场景可缺省，由模型自动识别拆分意图。"
+    "图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。"
     "例如：把背景换成雪山、将照片转为水彩画风格。"
 )
 MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION = (
@@ -116,6 +119,11 @@ MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION = (
 SEQUENTIAL_PROMPT_DESCRIPTION = (
     "连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。"
     "例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。"
+)
+LAYER_DECOMPOSE_PROMPT_DESCRIPTION = (
+    "图层拆分意图，建议不超过300个汉字或600个英文单词；"
+    "缺省时由模型自动识别图片主要元素并拆分。"
+    "例如：将图片进行精确图层分离，需分离的文字坐标为 <bbox>180 64 812 198</bbox>。"
 )
 
 # 生成工具共享字段的描述。
@@ -140,39 +148,51 @@ SEQUENTIAL_IMAGE_DESCRIPTION = (
     "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
     "例如：https://example.com/a.png 或 2026-08-15/sequential_generation/b.jpeg。"
 )
-LAYER_DECOMPOSITION_DESCRIPTION = (
-    "是否开启图层拆分，需当前模型支持；"
-    "开启后将单张输入图拆解为 1 张底图"
-    "与最多 16 个带透明通道的 PNG 图层，可配合 prompt 指定拆分意图。"
-)
-BACKGROUND_DESCRIPTION = (
-    "图片透明通道，需当前模型支持；"
-    "transparent 生成透明背景图"
-    "（需输入单张带透明通道的图片），opaque 生成常规实体背景图。"
-)
-SIZE_DESCRIPTION = "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值，需当前模型支持；未提供时使用全局默认值。例如：2K 或 2048x2048。"
-SIZE_WITH_LAYER_DESCRIPTION = (
-    "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值，需当前模型支持；"
-    f"图层拆分场景仅支持 {layer_decomposition_presets_text()}"
-    " 档位或 auto，未提供时默认 auto；"
-    "其余场景未提供时使用全局默认值。例如：2K 或 2048x2048。"
-)
-WATERMARK_DESCRIPTION = "是否添加水印；未提供时沿用全局默认值（默认不添加）。"
-MAX_IMAGES_DESCRIPTION = (
-    f"本次请求允许生成的最大图片数量，范围 1-{MAX_SEQUENTIAL_TOTAL_IMAGES}；"
+# 组图与图层拆分的规则文本：容器字段描述与嵌套字段描述同源引用，约束调整单点维护。
+_MAX_IMAGES_RULE = (
+    f"本次请求允许生成的最大图片数量，范围 {MAX_IMAGES_MIN}-{MAX_SEQUENTIAL_TOTAL_IMAGES}；"
     f"未提供时按参考图数量推导为 {MAX_SEQUENTIAL_TOTAL_IMAGES} 减参考图张数，"
     f"参考图数量与其之和不得超过 {MAX_SEQUENTIAL_TOTAL_IMAGES}。"
 )
-RESPONSE_FORMAT_DESCRIPTION = "响应格式，url 返回可下载链接，b64_json 返回 base64 数据。"
+SEQUENTIAL_IMAGE_GENERATION_OPTIONS_DESCRIPTION = (
+    f"组图配置，仅组图生成支持；max_images 为{_MAX_IMAGES_RULE}"
+)
+_LAYER_MAX_IMAGES_RULE = (
+    f"含底图的最大产出图片数（{LAYER_DECOMPOSITION_MIN_IMAGES}-"
+    f"{LAYER_DECOMPOSITION_MAX_IMAGES}，未指定时由模型默认）"
+)
+LAYER_DECOMPOSITION_OPTIONS_DESCRIPTION = (
+    f"图层拆分配置，max_images 为{_LAYER_MAX_IMAGES_RULE}，"
+    "text_recognition 开启后对规整文字图层返回富文本 OCR 结果；仅部分模型支持。"
+)
+SIZE_DESCRIPTION = "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值，需当前模型支持；未提供时使用全局默认值。例如：2K 或 2048x2048。"
+SIZE_WITH_AUTO_DESCRIPTION = (
+    "输出图片尺寸，仅支持分辨率档位或 auto（按输入图尺寸与宽高比自适应），"
+    f"档位为 {layer_decomposition_presets_text()}，需当前模型支持；"
+    "未提供时默认 auto。"
+)
+BACKGROUND_DESCRIPTION = (
+    "图片透明通道，需当前模型支持；"
+    "transparent 生成透明背景图（部分模型要求输入图片带透明通道且仅图生场景可用），"
+    "opaque 生成常规实体背景图，"
+    "auto 由模型按提示词与输出格式自动判断（仅部分模型支持）。"
+)
+WATERMARK_DESCRIPTION = "是否添加水印；未提供时沿用全局默认值（默认不添加）。"
+TOOLS_DESCRIPTION = "模型工具配置，目前仅支持联网搜索（web_search），需当前模型支持。"
 OUTPUT_FORMAT_DESCRIPTION = "输出图片格式，可选 jpeg 或 png，需当前模型支持。"
+RESPONSE_FORMAT_DESCRIPTION = "响应格式，url 返回可下载链接，b64_json 返回 base64 数据。"
 STREAM_DESCRIPTION = (
     "是否启用流式输出，需当前模型支持；开启后将以事件流返回生成进度，且 request_count 必须为 1。"
 )
-TOOLS_DESCRIPTION = "模型工具配置，目前仅支持联网搜索（web_search），需当前模型支持。"
 REQUEST_COUNT_DESCRIPTION = "同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。"
 REQUEST_COUNT_SEQUENTIAL_DESCRIPTION = (
     "同一提示并行发起的独立生成次数，每次各产出一组图片，组内图片数量由模型"
     "按提示词决定，最多 max_images 张；适合一次获取多组独立的组图结果。"
+)
+REQUEST_COUNT_LAYER_DESCRIPTION = (
+    "同一图片并行发起的独立拆分次数，每次各产出一组「底图与图层」图片，组内"
+    "数量上限由 layer_decomposition_options.max_images 指定（仅部分模型支持，"
+    "不支持时为模型固定拆分）；适合一次获取多组独立的拆分结果。"
 )
 PARALLELISM_DESCRIPTION = (
     "并行度上限（1-10），不得超过 request_count；"
@@ -225,6 +245,7 @@ class BackgroundMode(str, Enum):
 
     TRANSPARENT = "transparent"
     OPAQUE = "opaque"
+    AUTO = "auto"
 
 
 # 各枚举字段的合法值排序表，从 validators 白名单单源派生。
@@ -285,11 +306,59 @@ class GenerationTool(BaseModel):
     normalize_type = _enum_normalizer(_GENERATION_TOOL_TYPE_ALLOWED, "type")
 
 
+def _reject_bool_max_images(value: object) -> object:
+    """max_images 拒绝布尔的 before-validator：布尔是 int 子类，pydantic 宽松模式会静默强转（True→1）。"""
+
+    if isinstance(value, bool):
+        raise ValueError(raw_error_text(INTEGER_REQUIRED_TEMPLATE, field=as_plain("max_images")))
+    return value
+
+
+# 两处同名 max_images 字段共享的值类型声明。
+_MaxImagesValue = Annotated[int | None, BeforeValidator(_reject_bool_max_images)]
+
+
+class SequentialImageGenerationOptions(BaseModel):
+    """组图配置模型。
+
+    与官方 sequential_image_generation_options 参数同名同构。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_images: _MaxImagesValue = Field(
+        default=None,
+        ge=MAX_IMAGES_MIN,
+        le=MAX_SEQUENTIAL_TOTAL_IMAGES,
+        description=_MAX_IMAGES_RULE,
+    )
+
+
+class LayerDecompositionOptions(BaseModel):
+    """图层拆分配置模型。
+
+    仅 5.5 家族支持；未给定的子字段不进入请求体，由 API 按官方默认取值。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_images: _MaxImagesValue = Field(
+        default=None,
+        ge=LAYER_DECOMPOSITION_MIN_IMAGES,
+        le=LAYER_DECOMPOSITION_MAX_IMAGES,
+        description=f"{_LAYER_MAX_IMAGES_RULE}。",
+    )
+    text_recognition: bool | None = Field(
+        default=None,
+        description="是否对规整文字图层返回富文本 OCR 结果。",
+    )
+
+
 class _PromptAndOptimizeInput(BaseModel):
     """提示词与提示词优化参数。"""
 
     # prompt 在基类声明以锚定字段顺序：模型字段顺序是 server/_registration.py 平铺签名的镜像来源，
-    # prompt 须居首；图文生图子类覆盖为 str | None 以支持图层拆分场景缺省。
+    # prompt 须居首；图层拆分子类覆盖为 str | None 以支持拆分意图缺省。
     prompt: str = Field(
         ...,
         min_length=PROMPT_MIN_LENGTH,
@@ -378,6 +447,10 @@ class _SingleImageInput(BaseModel):
         而非放行到 client 归一化层后退化为 isError 工具结果。"""
         return _reject_blank_or_oversized_image_items([value])[0]
 
+    def reference_images(self) -> list[str]:
+        """场景声明：单图形态，参考图恒一张。"""
+        return [self.image]
+
 
 class _MultiImageInput(BaseModel):
     """多图输入参数。"""
@@ -393,6 +466,10 @@ class _MultiImageInput(BaseModel):
         """逐项 strip 归一并拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
         client 归一化层后退化为 isError 工具结果。"""
         return _reject_blank_or_oversized_image_items(value)
+
+    def reference_images(self) -> list[str]:
+        """场景声明：多图形态，image 必填恒为列表。"""
+        return self.image
 
 
 # 条目类型参数化的组图族 image 类型：单串与列表分支的组合形状在此单点。
@@ -444,15 +521,16 @@ class _SequentialImageInput(BaseModel):
             return None
         return _reject_blank_or_oversized_image_items(value)
 
+    def reference_images(self) -> list[str] | None:
+        """场景声明：组图参考可选，字段校验器已归一为列表。"""
+        return cast("list[str] | None", self.image)
 
-class _LayerDecompositionInput(BaseModel):
-    """图层拆分与透明通道参数，仅图文生图工具暴露，支持与否由能力表统一判定，
-    门控在 context 构建与 client 重校验两处执行。"""
 
-    layer_decomposition: bool | None = Field(
-        default=None,
-        description=LAYER_DECOMPOSITION_DESCRIPTION,
-    )
+class _BackgroundInput(BaseModel):
+    """透明通道参数，文生图、图文生图、多图融合与组图输出工具暴露（图层拆分
+    工具不暴露），支持取值与调用形态由能力表判定，门控在 context 构建与 client
+    重校验两处执行。"""
+
     background: BackgroundMode | None = Field(
         default=None,
         description=BACKGROUND_DESCRIPTION,
@@ -461,52 +539,78 @@ class _LayerDecompositionInput(BaseModel):
     normalize_background = _enum_normalizer(_BACKGROUND_MODE_ALLOWED, "background")
 
 
-class _SizeAndWatermarkInput(BaseModel):
-    """尺寸与水印参数。"""
+class _SizeInput(BaseModel):
+    """输出尺寸参数。"""
 
     size: str | None = Field(
         default=None,
         description=SIZE_DESCRIPTION,
     )
+
+
+class _WatermarkInput(BaseModel):
+    """水印参数。"""
+
     watermark: bool | None = Field(
         default=None,
         description=WATERMARK_DESCRIPTION,
     )
 
 
-class _SequentialMaxImagesInput(BaseModel):
-    """组图最大生成数量参数。"""
+class _LayerOptionsInput(BaseModel):
+    """图层拆分配置参数，仅图层拆分工具暴露，支持与否由能力表统一判定，
+    门控在 context 构建与 client 重校验两处执行。"""
 
-    # Optional 字段使显式 null 与缺省同走按参考图数量推导，
-    # 与平铺签名的 int | None = None 声明字面一致；字段仅承载显式输入，
-    # 生效值经 effective_max_images 访问器现算。
-    max_images: int | None = Field(
+    layer_decomposition_options: LayerDecompositionOptions | None = Field(
         default=None,
-        ge=MAX_IMAGES_MIN,
-        le=MAX_SEQUENTIAL_TOTAL_IMAGES,
-        description=MAX_IMAGES_DESCRIPTION,
+        description=LAYER_DECOMPOSITION_OPTIONS_DESCRIPTION,
+    )
+
+
+class _ToolsInput(BaseModel):
+    """模型工具配置参数，如联网搜索。"""
+
+    tools: list[GenerationTool] | None = Field(
+        default=None,
+        max_length=TOOLS_MAX_ITEMS,
+        description=TOOLS_DESCRIPTION,
+    )
+
+
+class _OutputFormatInput(BaseModel):
+    """输出图片格式参数。"""
+
+    output_format: OutputFormat | None = Field(
+        default=None,
+        description=OUTPUT_FORMAT_DESCRIPTION,
+    )
+
+    normalize_output_format = _enum_normalizer(_OUTPUT_FORMAT_ALLOWED, "output_format")
+
+
+class _SequentialOptionsInput(BaseModel):
+    """组图配置参数，仅组图输出工具暴露。
+
+    options 内 max_images 为 Optional 字段使显式 null 与缺省同走按参考图数量
+    推导；字段仅承载显式输入，生效值经宿主模型的 effective_max_images 现算。
+    """
+
+    sequential_image_generation_options: SequentialImageGenerationOptions | None = Field(
+        default=None,
+        description=SEQUENTIAL_IMAGE_GENERATION_OPTIONS_DESCRIPTION,
     )
 
 
 class _ResponseAndExecutionInput(BaseModel):
-    """响应格式、执行策略与自动保存参数。"""
+    """响应送达与执行编排参数。"""
 
     response_format: ResponseFormat = Field(
         default=ResponseFormat.URL,
         description=RESPONSE_FORMAT_DESCRIPTION,
     )
-    output_format: OutputFormat | None = Field(
-        default=None,
-        description=OUTPUT_FORMAT_DESCRIPTION,
-    )
     stream: bool = Field(
         default=False,
         description=STREAM_DESCRIPTION,
-    )
-    tools: list[GenerationTool] | None = Field(
-        default=None,
-        max_length=TOOLS_MAX_ITEMS,
-        description=TOOLS_DESCRIPTION,
     )
     request_count: int = Field(
         default=1,
@@ -520,23 +624,8 @@ class _ResponseAndExecutionInput(BaseModel):
         le=MAX_PARALLEL_REQUEST_COUNT,
         description=PARALLELISM_DESCRIPTION,
     )
-    auto_save: bool | None = Field(
-        default=None,
-        description=AUTO_SAVE_DESCRIPTION,
-    )
-    save_path: str | None = Field(
-        default=None,
-        max_length=SAVE_PATH_MAX_LENGTH,
-        description=SAVE_PATH_DESCRIPTION,
-    )
-    custom_name: str | None = Field(
-        default=None,
-        max_length=CUSTOM_NAME_MAX_LENGTH,
-        description=CUSTOM_NAME_DESCRIPTION,
-    )
 
     normalize_response_format = _enum_normalizer(_RESPONSE_FORMAT_ALLOWED, "response_format")
-    normalize_output_format = _enum_normalizer(_OUTPUT_FORMAT_ALLOWED, "output_format")
 
     @model_validator(mode="after")
     def validate_parallel_options(self) -> "_ResponseAndExecutionInput":
@@ -562,14 +651,29 @@ class _ResponseAndExecutionInput(BaseModel):
 class BaseGenerationInput(BaseModel):
     """图片生成工具的通用输入校验基类。
 
-    提供共享模型配置、校验逻辑与单请求产图数的单点派生，
-    具体字段顺序由各工具输入模型定义。
+    提供共享模型配置、存储参数、校验逻辑与单请求产图数的单点派生，
+    其余字段顺序由各工具输入模型的 mixin 排列定义。
     """
 
     model_config = ConfigDict(
         extra="forbid",
         str_strip_whitespace=True,
         validate_assignment=True,
+    )
+
+    auto_save: bool | None = Field(
+        default=None,
+        description=AUTO_SAVE_DESCRIPTION,
+    )
+    save_path: str | None = Field(
+        default=None,
+        max_length=SAVE_PATH_MAX_LENGTH,
+        description=SAVE_PATH_DESCRIPTION,
+    )
+    custom_name: str | None = Field(
+        default=None,
+        max_length=CUSTOM_NAME_MAX_LENGTH,
+        description=CUSTOM_NAME_DESCRIPTION,
     )
 
     @field_validator("save_path", "custom_name", check_fields=False)
@@ -587,40 +691,91 @@ class BaseGenerationInput(BaseModel):
     def per_request_image_count(
         cls,
         *,
-        layer_decomposition: bool,
         max_images: int | None,
         image_count: int,
+        model_id: str,
+        layer_max_images: int | None = None,
     ) -> int:
-        """单请求产图数：按字段在场单点派生产图形态，子类不覆写。
+        """单请求产图数：按场景定义 option mixin 的组合单点派生产图形态，子类不覆写。
 
-        入参为请求体字段的投影值，供不经模型实例化的调用方消费；三个投影键均必传，
-        漏接调用点即刻 TypeError 而非静默按缺省档低估。
-        键消费与 build_generation_context 同以字段在场驱动：
-        有 layer_decomposition 字段者图层拆分场景取满额常量，
-        有 max_images 字段者与 effective_max_images 共用同一推导函数，其余恒产一图。
+        入参为请求体字段的投影值，供不经模型实例化的调用方消费；核心投影键
+        均必传，漏接调用点即刻 TypeError 而非静默按缺省档低估，layer_max_images
+        为可选投影。
+        派发随 option mixin：混入 _LayerOptionsInput 者按模型能力与显式配置取值
+        （支持拆分配置的模型显式给定 layer_max_images 时取该值，缺省取官方默认；
+        其余家族取能力表值，不支持拆分者为 0），
+        混入 _SequentialOptionsInput 者先能力门控（不支持家族产 0，与拆分投影
+        对称，调用点免做外层判断）再与 effective_max_images 共用同一推导函数，
+        未混入者恒产一图。
         产图数值与流水线真实形态的逐值对账由 webapp parity 守护锁定。
         """
-        if layer_decomposition and "layer_decomposition" in cls.model_fields:
-            return MAX_LAYER_DECOMPOSITION_IMAGES
-        if "max_images" in cls.model_fields:
-            return resolve_sequential_max_images(max_images, image_count)
+        if issubclass(cls, _LayerOptionsInput):
+            caps = get_model_capabilities(model_id)
+            if caps.supports_layer_decomposition_options:
+                if layer_max_images is not None:
+                    return layer_max_images
+                return DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
+            return caps.max_layer_decomposition_images
+        if issubclass(cls, _SequentialOptionsInput):
+            if not get_model_capabilities(model_id).supports_sequential_generation:
+                return 0
+            return resolve_sequential_max_images(image_count, max_images)
         return 1
+
+    @classmethod
+    def worst_case_projection(cls, *, model_id: str) -> int:
+        """单请求产图数的最坏情形投影：各场景的最坏入参随场景在此单点声明，
+        满档等待预算聚合（webapp）免逐工具手工挑参。
+
+        数值为 per_request_image_count 在该场景投影域上的最大值：拆分取配置
+        值域上界（不支持拆分配置的家族自门控取能力表满额），组图取总数上界
+        （不支持家族自门控归零），其余场景恒一图。
+        """
+        if issubclass(cls, _LayerOptionsInput):
+            return cls.per_request_image_count(
+                max_images=None,
+                image_count=0,
+                model_id=model_id,
+                layer_max_images=LAYER_DECOMPOSITION_MAX_IMAGES,
+            )
+        if issubclass(cls, _SequentialOptionsInput):
+            return cls.per_request_image_count(
+                max_images=MAX_SEQUENTIAL_TOTAL_IMAGES,
+                image_count=0,
+                model_id=model_id,
+            )
+        return cls.per_request_image_count(
+            max_images=None,
+            image_count=0,
+            model_id=model_id,
+        )
 
 
 class TextToImageInput(
     BaseGenerationInput,
     _ResponseAndExecutionInput,
-    _SizeAndWatermarkInput,
+    _OutputFormatInput,
+    _ToolsInput,
+    _WatermarkInput,
+    _BackgroundInput,
+    _SizeInput,
     _PromptAndOptimizeInput,
 ):
     """文生图：通过提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。"""
+
+    def reference_images(self) -> list[str] | None:
+        """场景声明：文生图无参考图。"""
+        return None
 
 
 class ImageToImageInput(
     BaseGenerationInput,
     _ResponseAndExecutionInput,
-    _SizeAndWatermarkInput,
-    _LayerDecompositionInput,
+    _OutputFormatInput,
+    _ToolsInput,
+    _WatermarkInput,
+    _BackgroundInput,
+    _SizeInput,
     _SingleImageInput,
     _PromptAndOptimizeInput,
 ):
@@ -629,33 +784,23 @@ class ImageToImageInput(
     支持图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等操作。
     """
 
-    # 图层拆分场景 prompt 可缺省，其余场景必填；基类锚定为必填 str 以固定字段顺序，
-    # 本类宽化覆盖为可选，组合约束由下方 model_validator 在运行时兜底。
-    prompt: str | None = Field(  # type: ignore[assignment]
-        default=None,
+    # 覆盖共享基类的 prompt 描述以表达编辑指令语义，覆盖声明不改变字段顺序。
+    prompt: str = Field(
+        ...,
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
         description=IMAGE_TO_IMAGE_PROMPT_DESCRIPTION,
-    )
-
-    @model_validator(mode="after")
-    def validate_prompt_required_without_layer_decomposition(self) -> "ImageToImageInput":
-        """非图层拆分场景 prompt 必填，缺省时在构造输入模型阶段即拒绝。"""
-        if self.prompt is None and not self.layer_decomposition:
-            raise ValueError("prompt 不能为空，仅图层拆分场景允许缺省")
-        return self
-
-    # 覆盖共享基类的 size 描述以表达图层拆分特例，覆盖声明不改变字段顺序。
-    size: str | None = Field(
-        default=None,
-        description=SIZE_WITH_LAYER_DESCRIPTION,
     )
 
 
 class MultiImageFusionInput(
     BaseGenerationInput,
     _ResponseAndExecutionInput,
-    _SizeAndWatermarkInput,
+    _OutputFormatInput,
+    _ToolsInput,
+    _WatermarkInput,
+    _BackgroundInput,
+    _SizeInput,
     _MultiImageInput,
     _PromptAndOptimizeInput,
 ):
@@ -676,15 +821,19 @@ class MultiImageFusionInput(
 class SequentialGenerationInput(
     BaseGenerationInput,
     _ResponseAndExecutionInput,
-    _SequentialMaxImagesInput,
-    _SizeAndWatermarkInput,
+    _OutputFormatInput,
+    _ToolsInput,
+    _WatermarkInput,
+    _BackgroundInput,
+    _SizeInput,
+    _SequentialOptionsInput,
     _SequentialImageInput,
     _PromptAndOptimizeInput,
 ):
     """组图输出：以一张或多张参考图与文字信息，生成一组内容关联的图片。
 
     支持漫画分镜、品牌视觉等场景；request_count 表示并行生成多组独立的组图结果，
-    而非扩大单组内的图片数量；单组图片数量由 max_images 控制，二者相互独立。
+    而非扩大单组内的图片数量；单组图片数量由组图配置的 max_images 控制，二者相互独立。
     """
 
     # 覆盖共享基类的 prompt 描述以表达组图提示语义，覆盖声明不改变字段顺序。
@@ -709,9 +858,9 @@ class SequentialGenerationInput(
         """校验参考图数量与生成数量的总和限制。"""
         # before-validator 已归一，运行时值恒为 list[str] | None，cast 收窄供传参。
         images = cast("list[str] | None", self.image)
-        # 推导不回写 max_images，显式与否经字段值本身区分。
+        # 推导不回写 max_images，显式与否经 options 字段值本身区分。
         try:
-            validate_sequential_image_limit(self.effective_max_images, images)
+            validate_sequential_image_limit(images, self.effective_max_images)
         except SeedreamValidationError as exc:
             raise ValueError(exc.message) from exc
         return self
@@ -720,7 +869,51 @@ class SequentialGenerationInput(
     def effective_max_images(self) -> int:
         """生效的生成数量上限：显式值透传，缺省按参考图张数推导。"""
         images = cast("list[str] | None", self.image)
-        return resolve_sequential_max_images(self.max_images, len(images or []))
+        options = self.sequential_image_generation_options
+        explicit = options.max_images if options is not None else None
+        return resolve_sequential_max_images(len(images or []), explicit)
+
+
+class LayerDecomposeInput(
+    BaseGenerationInput,
+    _ResponseAndExecutionInput,
+    _OutputFormatInput,
+    _ToolsInput,
+    _WatermarkInput,
+    _SizeInput,
+    _LayerOptionsInput,
+    _SingleImageInput,
+    _PromptAndOptimizeInput,
+):
+    """图层拆分：将单张图片拆解为 1 张底图与多个带透明通道的 PNG 图层。
+
+    需当前模型支持；图层条目额外返回叠放顺序、名称、描述与边界框，
+    支持 5.5 的拆分数量控制与富文本 OCR。
+    """
+
+    # 图层拆分意图可缺省；基类锚定为必填 str 以固定字段顺序，本类宽化覆盖为可选，
+    # 缺省放行由 client 公共校验的 layer_decomposition 场景参数承担。
+    prompt: str | None = Field(  # type: ignore[assignment]
+        default=None,
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
+        description=LAYER_DECOMPOSE_PROMPT_DESCRIPTION,
+    )
+
+    # 覆盖共享基类的 size 描述以表达档位与 auto 语义，覆盖声明不改变字段顺序。
+    size: str | None = Field(
+        default=None,
+        description=SIZE_WITH_AUTO_DESCRIPTION,
+    )
+
+    # 覆盖共享基类的 request_count 描述：单次请求产出一组「底图与图层」而非单张，
+    # 共享描述的「每次各产出一张图」在本工具不成立；覆盖声明不改变字段顺序。
+    request_count: int = Field(
+        default=1,
+        ge=REQUEST_COUNT_MIN,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description=REQUEST_COUNT_LAYER_DESCRIPTION,
+    )
 
 
 def _normalize_format_filter_item(value: object) -> object:
@@ -833,26 +1026,41 @@ class EntryBound:
             )
 
 
+# 生成工具输入模型注册：Web 等待预算最坏候选等按全量派生，新增生成工具须登记，
+# 名单由 test_generation_input_models_registry_matches_five_tools 对账。
+GENERATION_INPUT_MODELS: tuple[type[BaseGenerationInput], ...] = (
+    TextToImageInput,
+    ImageToImageInput,
+    MultiImageFusionInput,
+    LayerDecomposeInput,
+    SequentialGenerationInput,
+)
+
+
 class GenerationInputParams(Protocol):
-    """四个生成工具输入模型共享字段的协议类型。
+    """五个生成工具输入模型共享字段的协议类型。
 
     各工具的具体输入模型经结构化子类型自动满足本协议，无需显式继承。
     """
 
-    # prompt 经只读 property 声明：各工具实现为 str 或 str | None，只读协变使两类
-    # 实现均满足本协议。
+    # prompt 经只读 property 声明：各工具实现分别为 str 或 str | None，只读协变
+    # 使各类实现均满足本协议。
     @property
     def prompt(self) -> str | None: ...
 
     optimize_prompt_options: OptimizePromptOptions | None
     size: str | None
     watermark: bool | None
-    response_format: ResponseFormat
-    output_format: OutputFormat | None
-    stream: bool
     tools: list[GenerationTool] | None
+    output_format: OutputFormat | None
+    response_format: ResponseFormat
+    stream: bool
     request_count: int
     parallelism: int | None
     auto_save: bool | None
     save_path: str | None
     custom_name: str | None
+
+    # 参考图场景声明：输入模型经 image mixin 或自身实现（文生图为 None），
+    # context 构建消费，未声明的工具调用即 AttributeError 而非静默跳过数量校验。
+    def reference_images(self) -> list[str] | None: ...

@@ -62,7 +62,7 @@ def test_deprecated_ctx_log_push_channel_removed() -> None:
 
 
 async def test_tools_register_top_level_title() -> None:
-    """六工具注册顶层 title，对齐 MCP 规范的 Tool.title 字段。"""
+    """七工具注册顶层 title，对齐 MCP 规范的 Tool.title 字段。"""
     tools = await mcp.list_tools()
     titles = {tool.name: tool.title for tool in tools}
 
@@ -70,6 +70,7 @@ async def test_tools_register_top_level_title() -> None:
     assert titles["image_to_image"] == "Seedream 图文生图"
     assert titles["multi_image_fusion"] == "Seedream 多图融合"
     assert titles["sequential_generation"] == "Seedream 组图输出"
+    assert titles["layer_decompose"] == "Seedream 图层拆分"
     assert titles["browse_images"] == "Seedream 图片浏览"
     assert titles["get_model_info"] == "Seedream 模型信息"
 
@@ -83,8 +84,19 @@ async def test_tool_titles_not_duplicated_in_annotations() -> None:
         assert getattr(tool.annotations, "title", None) is None
 
 
+async def test_server_instructions_mention_all_registered_tools() -> None:
+    """服务器指令提及全部生成与浏览工具的用途词。
+
+    新增工具漏更指令时，依赖 instructions 路由的客户端模型难以想到用它。
+    """
+    from seedream_mcp.server.runtime import SERVER_INSTRUCTIONS
+
+    for phrase in ("文生图", "图文生图", "多图融合", "组图输出", "图层拆分", "图片浏览"):
+        assert phrase in SERVER_INSTRUCTIONS, f"SERVER_INSTRUCTIONS 未提及 {phrase}"
+
+
 async def test_tool_annotations_locked_to_current_hints() -> None:
-    """六工具 annotations 逐项锁定，防止行为提示被无意改动。
+    """七工具 annotations 逐项锁定，防止行为提示被无意改动。
 
     生成类工具需联网调用 API，四个 hint 依次为 False/False/False/True；浏览与
     模型信息工具只读本地数据，read_only 与 open_world 为 True/False。规范仅为
@@ -96,6 +108,7 @@ async def test_tool_annotations_locked_to_current_hints() -> None:
         "image_to_image": (False, False, False, True),
         "multi_image_fusion": (False, False, False, True),
         "sequential_generation": (False, False, False, True),
+        "layer_decompose": (False, False, False, True),
         "browse_images": (True, None, None, False),
         "get_model_info": (True, None, None, False),
     }

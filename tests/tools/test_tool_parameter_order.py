@@ -32,6 +32,7 @@ from seedream_mcp.tools.schemas import (
     BrowseImagesInput,
     FORMAT_FILTER_ITEM_MAX_LENGTH,
     ImageToImageInput,
+    LayerDecomposeInput,
     _MULTI_IMAGE_MODEL_TYPE,
     MULTI_IMAGE_MIN_ITEMS,
     MultiImageFusionInput,
@@ -41,7 +42,7 @@ from seedream_mcp.tools.schemas import (
     SEQUENTIAL_IMAGE_MIN_ITEMS,
     SequentialGenerationInput,
     SIZE_DESCRIPTION,
-    SIZE_WITH_LAYER_DESCRIPTION,
+    SIZE_WITH_AUTO_DESCRIPTION,
     STREAM_DESCRIPTION,
     TextToImageInput,
     TOOLS_DESCRIPTION,
@@ -58,6 +59,7 @@ _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "image_to_image": ImageToImageInput,
     "multi_image_fusion": MultiImageFusionInput,
     "sequential_generation": SequentialGenerationInput,
+    "layer_decompose": LayerDecomposeInput,
     "browse_images": BrowseImagesInput,
 }
 
@@ -75,11 +77,12 @@ def test_text_to_image_parameter_order() -> None:
         "prompt",
         "optimize_prompt_options",
         "size",
+        "background",
         "watermark",
-        "response_format",
-        "output_format",
-        "stream",
         "tools",
+        "output_format",
+        "response_format",
+        "stream",
         "request_count",
         "parallelism",
         "auto_save",
@@ -94,14 +97,34 @@ def test_image_to_image_parameter_order() -> None:
         "prompt",
         "optimize_prompt_options",
         "image",
-        "layer_decomposition",
+        "size",
         "background",
+        "watermark",
+        "tools",
+        "output_format",
+        "response_format",
+        "stream",
+        "request_count",
+        "parallelism",
+        "auto_save",
+        "save_path",
+        "custom_name",
+    ]
+
+
+def test_layer_decompose_parameter_order() -> None:
+    """layer_decompose 输入模型字段顺序，prompt 居首、拆分配置位于 image 之后。"""
+    assert list(LayerDecomposeInput.model_fields.keys()) == [
+        "prompt",
+        "optimize_prompt_options",
+        "image",
+        "layer_decomposition_options",
         "size",
         "watermark",
-        "response_format",
-        "output_format",
-        "stream",
         "tools",
+        "output_format",
+        "response_format",
+        "stream",
         "request_count",
         "parallelism",
         "auto_save",
@@ -117,11 +140,12 @@ def test_multi_image_fusion_parameter_order() -> None:
         "optimize_prompt_options",
         "image",
         "size",
+        "background",
         "watermark",
-        "response_format",
-        "output_format",
-        "stream",
         "tools",
+        "output_format",
+        "response_format",
+        "stream",
         "request_count",
         "parallelism",
         "auto_save",
@@ -131,18 +155,19 @@ def test_multi_image_fusion_parameter_order() -> None:
 
 
 def test_sequential_generation_parameter_order() -> None:
-    """sequential_generation 输入模型字段顺序，max_images 位于 size 之后。"""
+    """sequential_generation 输入模型字段顺序，prompt 居首、组图配置位于 image 之后。"""
     assert list(SequentialGenerationInput.model_fields.keys()) == [
         "prompt",
         "optimize_prompt_options",
         "image",
+        "sequential_image_generation_options",
         "size",
+        "background",
         "watermark",
-        "max_images",
-        "response_format",
-        "output_format",
-        "stream",
         "tools",
+        "output_format",
+        "response_format",
+        "stream",
         "request_count",
         "parallelism",
         "auto_save",
@@ -168,7 +193,7 @@ def test_browse_images_parameter_order() -> None:
 
 
 async def test_tool_registration_independent_of_collection_order() -> None:
-    """单文件独立运行时共享 mcp 单例上六工具均已注册。
+    """单文件独立运行时共享 mcp 单例上七工具均已注册。
 
     工具注册发生在 seedream_mcp.server 导入期，由 tests/conftest.py 顶层导入兜底；
     移除该导入时本用例单独运行即失败。get_model_info 无输入模型，不参与平铺
@@ -179,7 +204,7 @@ async def test_tool_registration_independent_of_collection_order() -> None:
 
 
 async def test_flat_input_schema_property_order_matches_model_fields() -> None:
-    """五工具平铺 inputSchema 顶层字段名与顺序和模型字段全等，prompt 居首。
+    """六工具平铺 inputSchema 顶层字段名与顺序和模型字段全等，生成工具 prompt 居首。
 
     同时锁定平铺形态本身：不得退回单一 params 嵌套对象字段，否则客户端以平铺
     键名调用会被 required params 校验拒绝。
@@ -227,6 +252,10 @@ _NON_BLANK_MIRROR_FIELDS = {
     ("sequential_generation", "image"),
     ("sequential_generation", "save_path"),
     ("sequential_generation", "custom_name"),
+    ("layer_decompose", "prompt"),
+    ("layer_decompose", "image"),
+    ("layer_decompose", "save_path"),
+    ("layer_decompose", "custom_name"),
 }
 
 # 非空语义镜像的 pattern 取值，与 server._NON_BLANK_PATTERN 保持一致。
@@ -379,36 +408,64 @@ async def test_flat_input_schema_nested_definitions_match_model() -> None:
         assert schema.get("$defs", {}) == model.model_json_schema().get("$defs", {}), name
 
 
-async def test_flat_schema_description_tokens_match_model_constraints() -> None:
-    """inputSchema 描述文案中的数值区间与默认值必须与模型字段实际约束一致。
+def _unwrap_nested_options_model(info: FieldInfo) -> type[BaseModel] | None:
+    """展开字段注解直接承载的嵌套 options 模型，Optional 包装后仍是模型的同样展开。"""
+    annotation = info.annotation
+    args = get_args(annotation)
+    if type(None) in args:
+        non_none = [arg for arg in args if arg is not type(None)]
+        if len(non_none) == 1:
+            annotation = non_none[0]
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    return None
+
+
+def _assert_description_tokens_match_bounds(
+    label: str, description: str | None, info: FieldInfo
+) -> None:
+    """断言描述文案中的数值区间与默认值数字同字段实际约束一致。"""
+    assert isinstance(description, str) and description.strip(), label
+    lower, upper = _field_bounds(info)
+    range_text = _DESCRIPTION_DATE_PATTERN.sub("", description)
+    for match in _DESCRIPTION_RANGE_PATTERN.finditer(range_text):
+        assert (int(match.group(1)), int(match.group(2))) == (lower, upper), (
+            label,
+            match.group(0),
+        )
+    for match in _DESCRIPTION_DEFAULT_PATTERN.finditer(description):
+        assert int(match.group(1)) == info.default, (label, match.group(0))
+
+
+def test_flat_schema_description_tokens_match_model_constraints() -> None:
+    """描述文案中的数值区间与默认值必须与模型字段实际约束一致。
 
     描述镜像只保证两侧文案相同；约束调整后残留硬编码数值的文案须由本断言发现。
+    嵌套 options 容器字段的区间文案指向其子字段值域，容器自身无数值约束，
+    扫描下钻到子字段；工具侧描述与模型字段描述的等价由镜像与 $defs 全等断言
+    保证，本断言扫描模型侧字段。
     """
-    tools = await mcp.list_tools()
-    by_name = {tool.name: tool for tool in tools}
-
-    for name, model in _TOOL_INPUT_MODELS.items():
-        schema = by_name[name].input_schema
+    for model in _TOOL_INPUT_MODELS.values():
         for field, info in model.model_fields.items():
-            description = schema["properties"][field].get("description")
-            assert isinstance(description, str), (name, field)
-            lower, upper = _field_bounds(info)
-            range_text = _DESCRIPTION_DATE_PATTERN.sub("", description)
-            for match in _DESCRIPTION_RANGE_PATTERN.finditer(range_text):
-                assert (int(match.group(1)), int(match.group(2))) == (lower, upper), (
-                    name,
-                    field,
-                    match.group(0),
-                )
-            for match in _DESCRIPTION_DEFAULT_PATTERN.finditer(description):
-                assert int(match.group(1)) == info.default, (name, field, match.group(0))
+            nested = _unwrap_nested_options_model(info)
+            if nested is not None:
+                for sub_field, sub_info in nested.model_fields.items():
+                    _assert_description_tokens_match_bounds(
+                        f"{model.__name__}.{field}.{sub_field}",
+                        sub_info.description,
+                        sub_info,
+                    )
+                continue
+            _assert_description_tokens_match_bounds(
+                f"{model.__name__}.{field}", info.description, info
+            )
 
 
 # ==================== 平铺 inputSchema 封闭性 ====================
 
 
 async def test_flat_input_schema_forbids_additional_properties() -> None:
-    """六工具 inputSchema 顶层 additionalProperties 恒为 False，声明平铺字段封闭集合。
+    """七工具 inputSchema 顶层 additionalProperties 恒为 False，声明平铺字段封闭集合。
 
     平铺签名使 MCPServer 生成的 schema 不再继承输入模型的 extra=forbid 声明；
     server 注册期的 _tighten_flat_tool_schemas 负责补偿，含无参的 get_model_info
@@ -443,6 +500,10 @@ async def test_flat_input_schema_forbids_additional_properties() -> None:
             },
         ),
         ("sequential_generation", {"prompt": "a cat", "max_imagess": 4}),
+        (
+            "layer_decompose",
+            {"image": "https://example.com/cat.png", "layer_decomposition_optionss": {}},
+        ),
         ("browse_images", {"directory": ".", "recursve": True}),
         ("get_model_info", {"modell_id": "doubao-seedream-5.0-pro"}),
     ],
@@ -450,7 +511,7 @@ async def test_flat_input_schema_forbids_additional_properties() -> None:
 async def test_flat_tool_rejects_unknown_parameter_names(
     tool_name: str, typo_args: dict[str, Any]
 ) -> None:
-    """六工具的平铺签名在运行时拒绝拼错参数名，不被静默丢弃。
+    """七工具的平铺签名在运行时拒绝拼错参数名，不被静默丢弃。
 
     平铺参数模型默认忽略未知键，server 注册期替换为 extra=forbid 子类补偿，服务端
     与 inputSchema 本地校验同样拒绝。其余参数均取合法值，确保报错仅源于未知键。
@@ -662,7 +723,7 @@ async def test_generation_tool_rejects_oversized_tools_list() -> None:
 # 能力到其门控参数描述常量的映射，静态提示契约用例的参数化数据源。
 _CAPABILITY_DESCRIPTION_SOURCES = {
     "allowed_presets": SIZE_DESCRIPTION,
-    "allowed_presets_layered": SIZE_WITH_LAYER_DESCRIPTION,
+    "allowed_presets_layered": SIZE_WITH_AUTO_DESCRIPTION,
     "supports_fast_optimize_prompt": OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
     "supports_output_format": OUTPUT_FORMAT_DESCRIPTION,
     "supports_stream": STREAM_DESCRIPTION,

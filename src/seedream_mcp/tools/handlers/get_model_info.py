@@ -14,6 +14,7 @@ from ...definitions.conventions import GET_MODEL_INFO_TOOL_NAME, MODEL_INFO_FAIL
 from ...utils.core.errors import format_error_for_user
 from ...utils.core.logs import get_logger
 from ...utils.model.capabilities import (
+    ALL_BACKGROUND_FORMS,
     CAPABILITY_LABELS,
     MODEL_ALIASES,
     MODEL_FAMILY_UNKNOWN,
@@ -35,9 +36,10 @@ logger = get_logger()
 
 # 取值型能力字段的中文标签序，每条标签映射其覆盖的 payload 字段元组，
 # 工具描述的取值段列举由此派生。
-_NUMERIC_FIELD_LABELS: tuple[tuple[str, tuple[str, ...]], ...] = (
+_VALUE_FIELD_LABELS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("提示词优化档位", ("optimize_prompt_modes",)),
     ("参考图上限", ("max_reference_images",)),
+    ("透明通道取值", ("background_modes",)),
     ("尺寸档位与像素区间", ("size_presets", "min_size_pixels", "max_size_pixels")),
 )
 
@@ -59,7 +61,10 @@ def build_model_info_payload(config: SeedreamConfig) -> dict[str, Any]:
             ),
             "max_reference_images": caps.max_reference_images,
             "layer_decomposition": caps.supports_layer_decomposition,
-            "transparent_background": caps.supports_background,
+            "layer_decomposition_options": caps.supports_layer_decomposition_options,
+            "transparent_background": "transparent" in caps.allowed_background_modes,
+            "full_form_transparency": caps.allowed_background_forms == ALL_BACKGROUND_FORMS,
+            "background_modes": sorted(caps.allowed_background_modes),
             "size_presets": sorted(caps.allowed_presets, key=preset_numeric_sort_key),
             "min_size_pixels": caps.min_size_pixels,
             "max_size_pixels": caps.max_size_pixels,
@@ -67,6 +72,7 @@ def build_model_info_payload(config: SeedreamConfig) -> dict[str, Any]:
             "stream": caps.supports_stream,
             "web_search": caps.supports_tools,
             "sequential_generation": caps.supports_sequential_generation,
+            "safety_identifier": caps.supports_safety_identifier,
         },
     }
 
@@ -85,12 +91,12 @@ def _pixel_range_text(caps: dict[str, Any]) -> str:
 
 def build_model_info_description() -> str:
     """组装 get_model_info 的工具描述，两段列举由标签序派生。"""
-    numeric_fields = "、".join(label for label, _ in _NUMERIC_FIELD_LABELS)
+    value_fields = "、".join(label for label, _ in _VALUE_FIELD_LABELS)
     capabilities = "、".join(entry.label for entry in CAPABILITY_LABELS)
     return (
         "查询当前配置模型的能力快照。\n"
         "\n"
-        f"返回当前模型 ID、别名与能力字段：{numeric_fields}，\n"
+        f"返回当前模型 ID、别名与能力字段：{value_fields}，\n"
         f"以及{capabilities}的支持情况。\n"
         "生成工具的模型相关参数是否可用以本工具结果为准；不支持时生成工具会报错并附支持该能力的模型清单。\n"
         "模型由服务器配置决定，更换模型请告知用户调整服务器配置。"

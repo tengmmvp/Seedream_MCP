@@ -45,11 +45,12 @@ async def handle_text_to_image(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             size=context.size,
+            background=context.background,
             watermark=context.watermark,
-            response_format=context.response_format,
-            output_format=context.output_format,
-            stream=context.stream,
             tools=context.tools,
+            output_format=context.output_format,
+            response_format=context.response_format,
+            stream=context.stream,
         )
 
     return await execute_generation_handler(

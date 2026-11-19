@@ -1121,8 +1121,8 @@ async def test_browse_error_exit_routes_through_error_tool_result(
         max_depth=1,
         limit=10,
         offset=0,
-        show_details=False,
         format_filter=None,
+        show_details=False,
     )
     calls = _patched_error_tool_result_spy(monkeypatch, browse_module)
     result = await browse_module._build_browse_error(state=state, message="目录扫描中断")
@@ -1765,8 +1765,11 @@ def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> 
 
 
 def test_structured_status_sanitized_and_max_images_surfaced() -> None:
-    """status 上游原文经净化进入 structuredContent，max_images 生效值原样回显。"""
-    context = dataclasses.replace(make_generation_context(), max_images=4)
+    """status 上游原文经净化进入 structuredContent，组图配置生效值原样回显。"""
+    context = dataclasses.replace(
+        make_generation_context(),
+        sequential_image_generation_options={"max_images": 4},
+    )
     structured = _structured(
         {"success": True, "status": "ok\r\ninjected", "data": [], "usage": {}},
         tool_name="sequential_generation",
@@ -1776,7 +1779,7 @@ def test_structured_status_sanitized_and_max_images_surfaced() -> None:
 
     assert "\r" not in structured["status"]
     assert "\n" not in structured["status"]
-    assert structured["max_images"] == 4
+    assert structured["sequential_image_generation_options"] == {"max_images": 4}
 
 
 # ==================== 伪造序号字段净化 ====================

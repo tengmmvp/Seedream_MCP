@@ -11,79 +11,97 @@ from mcp.types import CallToolResult, TextContent
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools.handlers.get_model_info import (
-    _NUMERIC_FIELD_LABELS,
+    _VALUE_FIELD_LABELS,
     build_model_info_payload,
     build_model_info_text,
 )
 from seedream_mcp.utils.core.validators import VALID_OPTIMIZE_MODES, capability_gate_error
 from seedream_mcp.utils.model.capabilities import CAPABILITY_LABELS, ModelCapabilities
 
-# 能力表字段到快照键的映射全集，映射完整性断言的数据源。
-_CAPS_FIELD_TO_PAYLOAD_KEY = {
-    "supports_fast_optimize_prompt": "optimize_prompt_modes",
-    "max_reference_images": "max_reference_images",
-    "supports_layer_decomposition": "layer_decomposition",
-    "supports_background": "transparent_background",
-    "allowed_presets": "size_presets",
-    "min_size_pixels": "min_size_pixels",
-    "max_size_pixels": "max_size_pixels",
-    "supports_output_format": "output_format",
-    "supports_stream": "stream",
-    "supports_tools": "web_search",
-    "supports_sequential_generation": "sequential_generation",
+# 能力表字段到快照键的映射全集，映射完整性断言的数据源；allowed_background_modes
+# 一字段派生两键（布尔开关与取值清单），background_forms_by_mode 派生全形态布尔
+# 快照键，快照键为手工映射（含 web_search 等语义化重命名），asdict 派生做不到
+# 重命名。
+_CAPS_FIELD_TO_PAYLOAD_KEYS = {
+    "supports_fast_optimize_prompt": ("optimize_prompt_modes",),
+    "max_reference_images": ("max_reference_images",),
+    "supports_layer_decomposition": ("layer_decomposition",),
+    "supports_layer_decomposition_options": ("layer_decomposition_options",),
+    "allowed_background_modes": ("transparent_background", "background_modes"),
+    "background_forms_by_mode": ("full_form_transparency",),
+    "allowed_presets": ("size_presets",),
+    "min_size_pixels": ("min_size_pixels",),
+    "max_size_pixels": ("max_size_pixels",),
+    "supports_output_format": ("output_format",),
+    "supports_stream": ("stream",),
+    "supports_tools": ("web_search",),
+    "supports_sequential_generation": ("sequential_generation",),
+    "supports_safety_identifier": ("safety_identifier",),
 }
 
-# 能力开关字段全集，未识别模型的全放行兜底断言遍历此集。
+# 供拆分预算推导与图层数上限文案取值、不进能力快照的能力表字段。
+_NON_SNAPSHOT_CAPS_FIELDS = frozenset({"max_layer_decomposition_images"})
+
+# 能力开关字段全集，未识别模型的全放行兜底断言遍历此集；safety_identifier 因
+# 服务器主动附加而从紧，是该兜底的唯一例外。
 _CAPABILITY_SWITCH_KEYS = (
     "output_format",
     "stream",
     "web_search",
     "sequential_generation",
     "layer_decomposition",
+    "layer_decomposition_options",
     "transparent_background",
+    "full_form_transparency",
+    "safety_identifier",
 )
 
 
 def test_payload_for_default_model() -> None:
-    """默认 5.0 模型的快照：家族、同 ID 双别名与能力字段取值。"""
+    """默认 5.5 模型的快照：家族、别名与能力字段取值。"""
     payload = build_model_info_payload(SeedreamConfig(api_key="k"))
 
-    assert payload["model_id"] == "doubao-seedream-5-0-260128"
-    assert payload["family"] == "5.0-lite"
-    assert payload["display_name"] == "doubao-seedream-5.0"
-    assert payload["aliases"] == ["doubao-seedream-5.0", "doubao-seedream-5.0-lite"]
+    assert payload["model_id"] == "doubao-seedream-5-5-261028"
+    assert payload["family"] == "5.5"
+    assert payload["display_name"] == "doubao-seedream-5.5"
+    assert payload["aliases"] == ["doubao-seedream-5.5"]
 
     caps = payload["capabilities"]
-    assert caps["size_presets"] == ["2K", "3K", "4K"]
-    assert caps["min_size_pixels"] == 2560 * 1440
-    assert caps["max_size_pixels"] == 4096 * 4096
-    assert caps["max_reference_images"] == 14
+    assert caps["size_presets"] == ["1K", "1.5K", "2K"]
+    assert caps["min_size_pixels"] == 1280 * 720
+    assert caps["max_size_pixels"] == 4624220
+    assert caps["max_reference_images"] == 10
     assert caps["output_format"] is True
-    assert caps["stream"] is True
-    assert caps["web_search"] is True
-    assert caps["sequential_generation"] is True
-    assert caps["layer_decomposition"] is False
-    assert caps["transparent_background"] is False
+    assert caps["stream"] is False
+    assert caps["web_search"] is False
+    assert caps["sequential_generation"] is False
+    assert caps["layer_decomposition"] is True
+    assert caps["layer_decomposition_options"] is True
+    assert caps["transparent_background"] is True
+    assert caps["background_modes"] == ["auto", "opaque", "transparent"]
+    assert caps["safety_identifier"] is True
     assert caps["optimize_prompt_modes"] == ["standard"]
 
 
 def test_capability_mapping_covers_capability_table() -> None:
-    """能力字段映射覆盖能力表全部能力字段，新增字段漏配映射即失败。
-
-    快照键为手工映射（含 transparent_background/web_search 等语义化重命名），
-    asdict 派生做不到重命名。
-    """
-    caps_fields = {f.name for f in fields(ModelCapabilities)} - {"family", "display_name"}
-    assert set(_CAPS_FIELD_TO_PAYLOAD_KEY) == caps_fields
+    """能力字段映射覆盖能力表全部快照字段，新增字段漏配映射即失败。"""
+    caps_fields = (
+        {f.name for f in fields(ModelCapabilities)}
+        - {"family", "display_name"}
+        - _NON_SNAPSHOT_CAPS_FIELDS
+    )
+    assert set(_CAPS_FIELD_TO_PAYLOAD_KEYS) == caps_fields
 
     payload = build_model_info_payload(SeedreamConfig(api_key="k"))
-    assert set(payload["capabilities"]) == set(_CAPS_FIELD_TO_PAYLOAD_KEY.values())
+    all_keys = {key for keys in _CAPS_FIELD_TO_PAYLOAD_KEYS.values() for key in keys}
+    assert set(payload["capabilities"]) == all_keys
 
 
 def test_capability_table_field_order_matches_snapshot_mapping() -> None:
     """能力表字段序与快照映射序一致，数据类重排使字段序声称失真即失败。"""
-    table_order = [f.name for f in fields(ModelCapabilities)][2:]
-    assert table_order == list(_CAPS_FIELD_TO_PAYLOAD_KEY)
+    excluded = {"family", "display_name"} | _NON_SNAPSHOT_CAPS_FIELDS
+    table_order = [f.name for f in fields(ModelCapabilities) if f.name not in excluded]
+    assert table_order == list(_CAPS_FIELD_TO_PAYLOAD_KEYS)
 
 
 def test_capability_labels_cover_switch_keys() -> None:
@@ -93,14 +111,14 @@ def test_capability_labels_cover_switch_keys() -> None:
     assert {entry.payload_key for entry in CAPABILITY_LABELS} == switch_keys
 
 
-def test_numeric_field_labels_cover_payload_numeric_fields() -> None:
+def test_value_field_labels_cover_payload_value_fields() -> None:
     """取值段标签表覆盖全部非布尔能力字段，新增取值字段漏配标签即工具描述列举缺项。"""
     payload = build_model_info_payload(SeedreamConfig(api_key="k"))
-    numeric_keys = {
+    value_keys = {
         key for key, value in payload["capabilities"].items() if not isinstance(value, bool)
     }
-    labeled = {field for _, fields in _NUMERIC_FIELD_LABELS for field in fields}
-    assert labeled == numeric_keys
+    labeled = {field for _, fields in _VALUE_FIELD_LABELS for field in fields}
+    assert labeled == value_keys
 
 
 def test_optimize_prompt_modes_match_validator_vocabulary() -> None:
@@ -123,7 +141,10 @@ def test_payload_field_order_locked() -> None:
         "optimize_prompt_modes",
         "max_reference_images",
         "layer_decomposition",
+        "layer_decomposition_options",
         "transparent_background",
+        "full_form_transparency",
+        "background_modes",
         "size_presets",
         "min_size_pixels",
         "max_size_pixels",
@@ -131,11 +152,12 @@ def test_payload_field_order_locked() -> None:
         "stream",
         "web_search",
         "sequential_generation",
+        "safety_identifier",
     ]
 
 
 def test_payload_for_pro_model() -> None:
-    """5.0 Pro 快照：组图、联网、流式关闭，图层拆分、透明背景、fast 档开启。"""
+    """5.0 Pro 快照：组图、联网、流式、拆分配置关闭，图层拆分、透明背景、fast 档开启。"""
     payload = build_model_info_payload(
         SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0-pro")
     )
@@ -146,7 +168,10 @@ def test_payload_for_pro_model() -> None:
     assert caps["web_search"] is False
     assert caps["sequential_generation"] is False
     assert caps["layer_decomposition"] is True
+    assert caps["layer_decomposition_options"] is False
     assert caps["transparent_background"] is True
+    assert caps["background_modes"] == ["opaque", "transparent"]
+    assert caps["safety_identifier"] is True
     assert caps["optimize_prompt_modes"] == ["standard", "fast"]
 
 
@@ -162,7 +187,8 @@ def test_payload_for_unrecognized_model_falls_back_to_allow_all() -> None:
     assert caps["size_presets"] == ["1K", "1.5K", "2K", "3K", "4K"]
     assert caps["min_size_pixels"] is None
     assert caps["max_size_pixels"] is None
-    assert all(caps[key] is True for key in _CAPABILITY_SWITCH_KEYS)
+    assert all(caps[key] is True for key in _CAPABILITY_SWITCH_KEYS if key != "safety_identifier")
+    assert caps["safety_identifier"] is False
 
 
 def test_text_summary_renders_capability_lines() -> None:
@@ -170,21 +196,30 @@ def test_text_summary_renders_capability_lines() -> None:
     payload = build_model_info_payload(SeedreamConfig(api_key="k"))
     text = build_model_info_text(payload)
 
-    assert "当前模型：doubao-seedream-5.0（doubao-seedream-5-0-260128）" in text
-    assert "别名：doubao-seedream-5.0、doubao-seedream-5.0-lite" in text
-    assert "尺寸档位：2K/3K/4K；像素总量 3686400-16777216" in text
-    assert "参考图上限：14 张" in text
+    assert "当前模型：doubao-seedream-5.5（doubao-seedream-5-5-261028）" in text
+    assert "别名：doubao-seedream-5.5" in text
+    assert "尺寸档位：1K/1.5K/2K；像素总量 921600-4624220" in text
+    assert "参考图上限：10 张" in text
     assert "提示词优化：standard" in text
-    assert "不支持：图层拆分（layer_decomposition）、透明背景（background）" in text
+    assert (
+        "支持：图层拆分（layer_decomposition）、"
+        "图层拆分配置与富文本 OCR（layer_decomposition_options）、"
+        "透明背景（background）、透明通道全形态（background）、"
+        "输出格式（output_format）、"
+        "终端用户标识（safety_identifier）"
+    ) in text
+    assert (
+        "不支持：流式输出（stream）、联网搜索（tools）、组图生成（sequential_generation）" in text
+    )
 
 
 def test_text_summary_for_unrecognized_model_declares_fallback() -> None:
-    """未识别模型的文本摘要声明全放行兜底，不支持行为空。"""
+    """未识别模型的文本摘要声明全放行兜底，仅主动附加的终端用户标识例外。"""
     payload = build_model_info_payload(SeedreamConfig(api_key="k", model_id="ep-20260101-test"))
     text = build_model_info_text(payload)
 
     assert "当前模型：ep-20260101-test（未识别家族，能力按全放行兜底）" in text
-    assert "不支持：无" in text
+    assert "不支持：终端用户标识（safety_identifier）" in text
 
 
 async def test_tool_call_returns_structured_snapshot(
@@ -192,7 +227,7 @@ async def test_tool_call_returns_structured_snapshot(
 ) -> None:
     """端到端调用返回结构化快照与文本摘要，工具不报错。
 
-    无请求上下文时配置取全局活动配置，fixture 注入默认 5.0 模型。
+    无请求上下文时配置取全局活动配置，fixture 注入默认 5.5 模型。
     """
     del reset_lifespan_singletons
     result = await mcp.call_tool("get_model_info", {})
@@ -203,8 +238,8 @@ async def test_tool_call_returns_structured_snapshot(
     assert structured is not None
     assert structured["tool"] == "get_model_info"
     assert structured["success"] is True
-    assert structured["model_id"] == "doubao-seedream-5-0-260128"
-    assert structured["capabilities"]["size_presets"] == ["2K", "3K", "4K"]
+    assert structured["model_id"] == "doubao-seedream-5-5-261028"
+    assert structured["capabilities"]["size_presets"] == ["1K", "1.5K", "2K"]
     first_block = result.content[0]
     assert isinstance(first_block, TextContent)
     assert first_block.text.startswith("当前模型：")
@@ -246,10 +281,12 @@ async def test_tool_call_returns_structured_error_on_unexpected_failure(
 _MODEL_INFO_DESCRIPTION_LOCKED = (
     "查询当前配置模型的能力快照。\n"
     "\n"
-    "返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、尺寸档位与像素区间，\n"
-    "以及图层拆分（layer_decomposition）、透明背景（background）、"
-    "输出格式（output_format）、流式输出（stream）、联网搜索（tools）、"
-    "组图生成（sequential_generation）的支持情况。\n"
+    "返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、透明通道取值、尺寸档位与像素区间，\n"
+    "以及图层拆分（layer_decomposition）、"
+    "图层拆分配置与富文本 OCR（layer_decomposition_options）、"
+    "透明背景（background）、透明通道全形态（background）、输出格式（output_format）、流式输出（stream）、"
+    "联网搜索（tools）、组图生成（sequential_generation）、"
+    "终端用户标识（safety_identifier）的支持情况。\n"
     "生成工具的模型相关参数是否可用以本工具结果为准；不支持时生成工具会报错并附支持该能力的模型清单。\n"
     "模型由服务器配置决定，更换模型请告知用户调整服务器配置。"
 )
@@ -266,16 +303,16 @@ async def test_get_model_info_description_enumerations_match_label_tables() -> N
     """注册描述的两段列举与标签序一致，手写描述绕开派生即失同步。"""
     tools = await mcp.list_tools()
     description = next(tool.description or "" for tool in tools if tool.name == "get_model_info")
-    numeric_fields = "、".join(label for label, _ in _NUMERIC_FIELD_LABELS)
+    value_fields = "、".join(label for label, _ in _VALUE_FIELD_LABELS)
     capabilities = "、".join(entry.label for entry in CAPABILITY_LABELS)
-    assert f"能力字段：{numeric_fields}，\n" in description
+    assert f"能力字段：{value_fields}，\n" in description
     assert f"以及{capabilities}的支持情况。" in description
 
 
 def test_label_tables_cover_payload_capability_fields() -> None:
     """两张标签表的字段并集恰等于 payload 能力字段集，新增字段漏配标签即失败。"""
     payload = build_model_info_payload(SeedreamConfig(api_key="k"))
-    labeled = {field for _, fields in _NUMERIC_FIELD_LABELS for field in fields}
+    labeled = {field for _, fields in _VALUE_FIELD_LABELS for field in fields}
     labeled |= {entry.payload_key for entry in CAPABILITY_LABELS}
     assert labeled == set(payload["capabilities"])
 

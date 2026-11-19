@@ -19,6 +19,7 @@ from seedream_mcp.tools.schemas import (
     MultiImageFusionInput,
     ResponseFormat,
     SequentialGenerationInput,
+    SequentialImageGenerationOptions,
     TextToImageInput,
 )
 from seedream_mcp.tools.runners import (
@@ -401,9 +402,17 @@ async def test_run_sequential_generation_dispatches_via_composition_root(
     )
     _patch_save_success(monkeypatch)
 
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
+    config = SeedreamConfig(
+        api_key="test_key",
+        # 默认 5.5 模型不支持组图，门控即拒绝。
+        model_id="doubao-seedream-5.0",
+        data_root=str(tmp_path),
+    )
     set_active_config(config)
-    params = SequentialGenerationInput(prompt="sequence", max_images=2)
+    params = SequentialGenerationInput(
+        prompt="sequence",
+        sequential_image_generation_options=SequentialImageGenerationOptions(max_images=2),
+    )
 
     result = await run_sequential_generation(params, config, ctx=None)
 
