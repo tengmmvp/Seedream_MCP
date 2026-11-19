@@ -93,7 +93,8 @@ async def test_stream_top_level_error_failure_keeps_usage_dict(no_sleep: None) -
 
     顶层 error 守卫的失败返回不绕过 usage 归一化。
     """
-    config = SeedreamConfig(api_key="k", max_retries=1)
+    # 默认 5.5 模型不支持流式，参数校验即被拒。
+    config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0", max_retries=1)
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request

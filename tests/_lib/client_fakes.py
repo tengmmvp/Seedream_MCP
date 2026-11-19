@@ -1,7 +1,8 @@
 """SeedreamClient 与 SSE 解析测试共享的替身与注入辅助。
 
-需要伪造 API 响应分块流、_send_request 或注入 MockTransport 的测试经此复用
-_make_send_request_fake、_FakeLog/_FakeSSEResponse 与注入逻辑，避免逐行重复定义造成语义漂移。
+需要伪造 API 响应分块流、_send_request、捕获 _call_api 请求数据或注入
+MockTransport 的测试经此复用 _make_send_request_fake、_capture_call_api、
+_FakeLog/_FakeSSEResponse 与注入逻辑，避免逐行重复定义造成语义漂移。
 伪 SSE 响应按 httpx 公开接口的最小子集模拟分块字节流；_parse_sse 以标准参数组合
 解析伪响应，调用方仅声明偏离默认值的参数；_make_client 复用最小测试配置的
 客户端构造。
@@ -17,6 +18,7 @@ import httpx
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.io.sse import parse_sse_response
+from seedream_mcp.utils.model.capabilities import max_per_request_image_count
 
 if TYPE_CHECKING:
     from loguru import Logger
@@ -63,7 +65,7 @@ async def _install_mock_transport(client: SeedreamClient, handler: Callable[[Any
     client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-_ResponseHandler = Callable[[httpx.Response, float], Awaitable[dict[str, Any]]]
+_ResponseHandler = Callable[[httpx.Response, float, int], Awaitable[dict[str, Any]]]
 _SendOutcome = Callable[[int], dict[str, Any] | BaseException]
 
 # fake_send 缺省与调用方显式注入共用的成功载荷，调用方只读。
@@ -102,10 +104,11 @@ def _make_send_request_fake(
         request_body: bytes,
         request_timeout: httpx.Timeout,
         attempt_timeout_seconds: float,
+        byte_limit: int,
         handle_response: _ResponseHandler,
     ) -> dict[str, Any]:
         nonlocal calls
-        del self, client, url, request_timeout
+        del self, client, url, request_timeout, byte_limit
         calls += 1
         if bodies is not None:
             bodies.append(request_body)
@@ -127,20 +130,37 @@ def _make_send_request_fake(
     return fake_send, lambda: calls
 
 
+def _capture_call_api(captured: dict[str, Any]) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """构造捕获请求数据并返回成功空载荷的 _call_api 替身。"""
+
+    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
+        del endpoint
+        captured.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    return fake_call_api
+
+
 async def _parse_sse(
     chunks: list[bytes],
     *,
     buffer_max_size: int = 4096,
     event_truncate_threshold: int = 4096,
     total_bytes_limit: int = 64 * 1024,
+    min_items: int | None = None,
     log: Logger | None = None,
 ) -> dict[str, Any]:
     """以标准参数组合解析伪 SSE 响应，调用方仅声明偏离默认值的参数。"""
+    # min_items 缺省按调用时能力表活算，导入期绑定会令
+    # monkeypatch 能力表的用例拿到过期下限。
+    if min_items is None:
+        min_items = max_per_request_image_count()
     return await parse_sse_response(
         cast(httpx.Response, _FakeSSEResponse(chunks)),
         model_id="m",
         buffer_max_size=buffer_max_size,
         event_truncate_threshold=event_truncate_threshold,
         total_bytes_limit=total_bytes_limit,
+        min_items=min_items,
         log=cast("Logger", _FakeLog()) if log is None else log,
     )

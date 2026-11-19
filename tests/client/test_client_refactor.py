@@ -37,23 +37,17 @@ from seedream_mcp.utils.core.executors import (
     CpuOffloadPoolClosedError,
     shutdown_cpu_offload_executor,
 )
+from seedream_mcp.utils.core.validators import ValidatedCommonParams
 from seedream_mcp.utils.images import validation as image_validation_module
 from seedream_mcp.utils.io.stream import escalate_partial_status, item_has_image_payload
 
-from _lib.client_fakes import _install_mock_transport, _make_send_request_fake
+from _lib.client_fakes import (
+    _capture_call_api,
+    _install_mock_transport,
+    _make_send_request_fake,
+)
 from _lib.cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
 from _lib.log_fakes import RecordingLogger
-
-
-def _capture_call_api(captured: dict[str, Any]) -> Callable[..., Awaitable[dict[str, Any]]]:
-    """构造捕获请求数据并返回成功空载荷的 _call_api 替身。"""
-
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    return fake_call_api
 
 
 async def test_validate_common_generation_params_synthesizes_defaults() -> None:
@@ -67,10 +61,10 @@ async def test_validate_common_generation_params_synthesizes_defaults() -> None:
         optimize_prompt_options=None,
         size=None,
         watermark=None,
-        response_format="url",
-        output_format=None,
-        stream=False,
         tools=None,
+        output_format=None,
+        response_format="url",
+        stream=False,
         layer_decomposition=True,
     )
 
@@ -103,7 +97,13 @@ def test_prevalidate_common_generation_params_is_single_public_entry() -> None:
         inspect.signature(SeedreamClient.prevalidate_common_generation_params).parameters
     )
     entry_params.discard("self")
-    method_specific = {"image", "background", "max_images"}
+    method_specific = {
+        "image",
+        "background",
+        "layer_decomposition",
+        "layer_decomposition_options",
+        "sequential_image_generation_options",
+    }
     for method in (
         SeedreamClient.text_to_image,
         SeedreamClient.image_to_image,
@@ -116,19 +116,20 @@ def test_prevalidate_common_generation_params_is_single_public_entry() -> None:
 
 
 def test_build_common_request_assembles_shared_params() -> None:
-    """_build_common_request 组装四方法共享参数；None 字段省略，extra 并入。"""
+    """_build_common_request 整收公共参数聚合；None 字段省略，extra 并入。"""
     config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5-0-260128")
     client = SeedreamClient(config)
-    request = client._build_common_request(
+    validated = ValidatedCommonParams(
         prompt="p",
+        optimize_prompt_options={"mode": "standard"},
         size="2K",
         watermark=False,
-        response_format="url",
-        output_format="png",
-        stream=True,
         tools=[{"type": "web_search"}],
-        validated_opts={"mode": "standard"},
+        output_format="png",
+        response_format="url",
+        stream=True,
     )
+    request = client._build_common_request(validated=validated)
     assert request["model"] == "doubao-seedream-5-0-260128"
     assert request["prompt"] == "p"
     assert request["size"] == "2K"
@@ -144,17 +145,17 @@ def test_build_common_request_merges_extra_and_skips_none() -> None:
     """extra 参数并入请求体，None 值字段省略对应键。"""
     config = SeedreamConfig(api_key="k")
     client = SeedreamClient(config)
-    request = client._build_common_request(
+    validated = ValidatedCommonParams(
         prompt="p",
+        optimize_prompt_options=None,
         size="2K",
         watermark=False,
-        response_format="url",
-        output_format=None,
-        stream=False,
         tools=None,
-        validated_opts=None,
-        extra={"image": "data"},
+        output_format=None,
+        response_format="url",
+        stream=False,
     )
+    request = client._build_common_request(validated, extra={"image": "data"})
     assert request["image"] == "data"
     assert "output_format" not in request
     assert "stream" not in request
@@ -163,7 +164,9 @@ def test_build_common_request_merges_extra_and_skips_none() -> None:
 
 
 def _build_config() -> SeedreamConfig:
-    return SeedreamConfig(api_key="test_key", max_retries=1)
+    # 固定 5.0（14 张参考图、2K/3K/4K 档位、组图支持）：默认模型随版本演进，
+    # 测试语义不随默认值漂移。
+    return SeedreamConfig(api_key="test_key", max_retries=1, model_id="doubao-seedream-5-0-260128")
 
 
 @asynccontextmanager
@@ -182,16 +185,17 @@ async def _client_with_mock_transport(
 def test_build_common_request_omits_prompt_key_when_none() -> None:
     """图层拆分场景缺省提示词时请求体不含 prompt 键，由模型自动识别拆分意图。"""
     client = SeedreamClient(_build_config())
-    data = client._build_common_request(
+    validated = ValidatedCommonParams(
         prompt=None,
+        optimize_prompt_options=None,
         size="auto",
         watermark=False,
-        response_format="url",
-        output_format=None,
-        stream=False,
         tools=None,
-        validated_opts=None,
+        output_format=None,
+        response_format="url",
+        stream=False,
     )
+    data = client._build_common_request(validated=validated)
 
     assert "prompt" not in data
     assert data["model"] == client.config.model_id
@@ -227,7 +231,9 @@ async def test_generation_methods_synthesize_defaults_from_config(
     硬性守护：watermark 未显式传入时必须保持 False；default_watermark 默认 False
     与官方默认 true 相悖，为项目有意决策。
     """
-    config = SeedreamConfig(api_key="test_key", max_retries=1, default_size="4K")
+    config = SeedreamConfig(
+        api_key="test_key", max_retries=1, model_id="doubao-seedream-5-0-260128", default_size="4K"
+    )
     client = SeedreamClient(config)
     captured: dict[str, Any] = {}
     monkeypatch.setattr(client, "_call_api", _capture_call_api(captured))
@@ -268,10 +274,10 @@ async def test_image_to_image_resolves_relative_path_from_images_root(
     assert captured_request["image"].startswith("data:image/png;base64,")
 
 
-async def test_image_to_image_payload_carries_layer_and_background(
+async def test_image_to_image_payload_carries_layer_and_rejects_background(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """5.0 Pro 的图层拆分与透明背景进入 API 请求载荷，不止校验层放行。"""
+    """5.0 Pro 的图层拆分进入 API 请求载荷；拆分场景与 background 互斥前置拒绝。"""
     workspace = tmp_path / "workspace"
     images_root = workspace / ".seedream" / "images"
     image_file = images_root / "ref.png"
@@ -285,15 +291,78 @@ async def test_image_to_image_payload_carries_layer_and_background(
     captured_request: dict[str, Any] = {}
     monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
 
+    await client.image_to_image(prompt="test", image="ref.png", layer_decomposition=True)
+    assert captured_request["layer_decomposition"] is True
+
+    with pytest.raises(SeedreamValidationError, match="图层拆分场景不支持 background"):
+        await client.image_to_image(
+            prompt="test",
+            image="ref.png",
+            layer_decomposition=True,
+            background="transparent",
+        )
+
+
+async def test_text_to_image_payload_carries_background(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认 5.5 模型的透明背景进入文生图请求载荷。"""
+    # _build_config 锚定的 5.0 家族不支持透明背景与图层拆分，以下用例取默认 5.5 模型。
+    client = SeedreamClient(SeedreamConfig(api_key="k", max_retries=1))
+    captured_request: dict[str, Any] = {}
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
+
+    await client.text_to_image(prompt="test", background="transparent")
+
+    assert captured_request["background"] == "transparent"
+
+
+async def test_image_to_image_payload_carries_background(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """默认 5.5 模型的透明背景进入图文生图请求载荷。"""
+    workspace = tmp_path / "workspace"
+    images_root = workspace / ".seedream" / "images"
+    image_file = images_root / "ref.png"
+    image_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 64), color=(255, 0, 0)).save(image_file)
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+
+    client = SeedreamClient(SeedreamConfig(api_key="k", max_retries=1))
+    captured_request: dict[str, Any] = {}
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
+
+    await client.image_to_image(prompt="test", image="ref.png", background="transparent")
+
+    assert captured_request["background"] == "transparent"
+
+
+async def test_image_to_image_payload_carries_layer_decomposition_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """拆分配置归一后完整进入图文生图请求载荷。"""
+    workspace = tmp_path / "workspace"
+    images_root = workspace / ".seedream" / "images"
+    image_file = images_root / "ref.png"
+    image_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 64), color=(255, 0, 0)).save(image_file)
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+
+    client = SeedreamClient(SeedreamConfig(api_key="k", max_retries=1))
+    captured_request: dict[str, Any] = {}
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
+
     await client.image_to_image(
         prompt="test",
         image="ref.png",
         layer_decomposition=True,
-        background="transparent",
+        layer_decomposition_options={"max_images": 5, "text_recognition": True},
     )
 
-    assert captured_request["layer_decomposition"] is True
-    assert captured_request["background"] == "transparent"
+    assert captured_request["layer_decomposition_options"] == {
+        "max_images": 5,
+        "text_recognition": True,
+    }
 
 
 async def test_text_to_image_includes_seedream_50_output_format_and_tools(
@@ -567,7 +636,7 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
 async def test_multi_image_fusion_accepts_up_to_14_images(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """默认模型多图融合接受至多 14 张参考图。"""
+    """5.0 多图融合接受至多 14 张参考图。"""
     client = SeedreamClient(_build_config())
     input_images = [f"https://example.com/{idx}.png" for idx in range(14)]
     captured_request: dict[str, Any] = {}
@@ -586,7 +655,7 @@ async def test_multi_image_fusion_accepts_up_to_14_images(
 
 
 async def test_multi_image_fusion_rejects_more_than_14_images() -> None:
-    """默认模型超过 14 张参考图在请求前拒绝。"""
+    """5.0 超过 14 张参考图在请求前拒绝。"""
     client = SeedreamClient(_build_config())
     input_images = [f"https://example.com/{idx}.png" for idx in range(15)]
 
@@ -610,7 +679,7 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
     async def invoke(client: SeedreamClient) -> None:
         await client.sequential_generation(
             prompt="test",
-            max_images=3,
+            sequential_image_generation_options={"max_images": 3},
             image=["image-1", "image-2", "image-3"],
             size="2K",
         )
@@ -648,6 +717,25 @@ async def test_sequential_generation_without_max_images_uses_reference_aware_def
 
     assert captured_request["image"] == "prepared:image-1"
     assert captured_request["sequential_image_generation_options"]["max_images"] == 14
+
+
+async def test_sequential_generation_background_gated_by_model_capability() -> None:
+    """组图 background 由能力表门控：5.0 不支持透明通道，传入即报能力错误。
+
+    官方未声明组图与 background 相斥，参数面向支持两者的未来模型挂载；
+    当前模型不支持时报能力门控错误而非拒绝参数本身。
+    """
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError, match="不支持") as exc_info:
+        await client.sequential_generation(
+            prompt="test",
+            image=["image-1", "image-2"],
+            size="2K",
+            background="transparent",
+        )
+
+    assert exc_info.value.field == "background"
 
 
 def test_normalize_image_sequence_unwraps_str_input() -> None:
@@ -1057,7 +1145,7 @@ async def test_sequential_generation_invalid_image_type_raises_validation_error(
     with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表"):
         await client.sequential_generation(
             prompt="test",
-            max_images=2,
+            sequential_image_generation_options={"max_images": 2},
             image=123,  # type: ignore[arg-type]
             size="2K",
         )
@@ -1075,7 +1163,7 @@ async def test_sequential_generation_rejects_bytes_like_image(image_value: Any) 
     with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表"):
         await client.sequential_generation(
             prompt="test",
-            max_images=2,
+            sequential_image_generation_options={"max_images": 2},
             image=image_value,
             size="2K",
         )
@@ -1088,7 +1176,7 @@ async def test_sequential_generation_rejects_user_string_image() -> None:
     with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表") as excinfo:
         await client.sequential_generation(
             prompt="test",
-            max_images=2,
+            sequential_image_generation_options={"max_images": 2},
             image=UserString("http://example.com/a.png"),  # type: ignore[arg-type]
             size="2K",
         )
@@ -1108,12 +1196,42 @@ async def test_sequential_generation_rejects_int_sequence_image(image_value: Any
     with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表") as excinfo:
         await client.sequential_generation(
             prompt="test",
-            max_images=2,
+            sequential_image_generation_options={"max_images": 2},
             image=image_value,
             size="2K",
         )
 
     assert "image[" not in excinfo.value.message
+
+
+async def test_sequential_generation_rejects_non_dict_sequential_options() -> None:
+    """组图配置非对象时直连路径显式拒绝，不静默按缺省推导执行。"""
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        await client.sequential_generation(
+            prompt="test",
+            sequential_image_generation_options=4,  # type: ignore[arg-type]
+            size="2K",
+        )
+
+    assert excinfo.value.message == "sequential_image_generation_options 必须为对象"
+
+
+async def test_sequential_generation_rejects_unknown_keys_in_sequential_options() -> None:
+    """组图配置含拼错键时显式拒绝，未知键不被静默丢弃后按缺省执行。"""
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        await client.sequential_generation(
+            prompt="test",
+            sequential_image_generation_options={"max_imagess": 4},
+            size="2K",
+        )
+
+    assert excinfo.value.message == (
+        "sequential_image_generation_options 包含不支持的字段: ['max_imagess']"
+    )
 
 
 def _build_pro_config() -> SeedreamConfig:
@@ -1129,7 +1247,9 @@ async def test_sequential_generation_rejects_seedream_50_pro() -> None:
     client = SeedreamClient(_build_pro_config())
 
     with pytest.raises(SeedreamValidationError, match="不支持组图生成（sequential_generation）"):
-        await client.sequential_generation(prompt="test", max_images=3, size="2K")
+        await client.sequential_generation(
+            prompt="test", sequential_image_generation_options={"max_images": 3}, size="2K"
+        )
 
 
 async def test_text_to_image_rejects_stream_for_seedream_50_pro() -> None:
@@ -1150,8 +1270,8 @@ async def test_multi_image_fusion_omits_sequential_image_generation(
 ) -> None:
     """多图融合不传 sequential_image_generation，依赖服务端缺省 disabled。
 
-    官方口径该参数仅部分模型支持，全模型恒传会向能力表外模型发参；Pro 与默认
-    模型两条分支同守护。
+    官方口径该参数仅部分模型支持，全模型恒传会向能力表外模型发参；Pro 与锚定
+    5.0 两条分支同守护。
     """
     client = SeedreamClient(build_config())
     captured_request: dict[str, Any] = {}
@@ -1815,7 +1935,9 @@ async def test_sequential_generation_logs_warning_on_partial_response(
         }
 
     monkeypatch.setattr(client, "_call_api", fake_call_api)
-    await client.sequential_generation(prompt="p", max_images=2, size="2K")
+    await client.sequential_generation(
+        prompt="p", sequential_image_generation_options={"max_images": 2}, size="2K"
+    )
 
     assert any("组图输出任务部分完成" in message for message in fake_logger.warnings)
     # 部分完成结局日志携带失败项计数与首条原因
@@ -1938,7 +2060,7 @@ def test_outcome_log_failure_matches_shared_predicate(
 
 
 def test_public_generation_methods_keep_prompt_first() -> None:
-    """四个公开生成方法的 prompt 恒居首参，锁定外部位置调用方的参数含义。"""
+    """四个公开生成方法的 prompt 恒居首参且其余参数 keyword-only，位置错绑即刻 TypeError。"""
     import inspect
 
     from seedream_mcp.client import SeedreamClient
@@ -1949,8 +2071,10 @@ def test_public_generation_methods_keep_prompt_first() -> None:
         SeedreamClient.multi_image_fusion,
         SeedreamClient.sequential_generation,
     ):
-        parameter_names = list(inspect.signature(method).parameters)
-        assert parameter_names[1] == "prompt"
+        parameters = list(inspect.signature(method).parameters.values())
+        assert parameters[1].name == "prompt"
+        assert parameters[1].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert all(parameter.kind is inspect.Parameter.KEYWORD_ONLY for parameter in parameters[2:])
 
 
 def test_generation_method_docstrings_follow_capability_table() -> None:
@@ -1972,6 +2096,19 @@ def test_generation_method_docstrings_follow_capability_table() -> None:
     assert supported_family_display_names("supports_sequential_generation") in (
         SeedreamClient.sequential_generation.__doc__ or ""
     )
+
+
+def test_background_doc_variants_render_distinct_tails() -> None:
+    """background 段落双变体尾句各按场景渲染，拆分变体不残留基线尾句号。"""
+    base_tail = '与 output_format="jpeg" 互斥。'
+    for method in (SeedreamClient.text_to_image, SeedreamClient.multi_image_fusion):
+        assert base_tail in (method.__doc__ or ""), method.__name__
+
+    decomposition_doc = SeedreamClient.image_to_image.__doc__ or ""
+    assert '与 output_format="jpeg" 互斥，图层拆分' in decomposition_doc
+    assert "场景不支持该参数。" in decomposition_doc
+    # 基线尾句号残留在拆分变体中即构成回归（互斥。，图层拆分）
+    assert "互斥。，" not in decomposition_doc
 
 
 # ==================== 池关闭窗口的服务关闭错误呈现 ====================

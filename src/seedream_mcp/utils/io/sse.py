@@ -204,17 +204,15 @@ _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
 # 约 350-450 字节，取 448 字节为保守常量。条目上限按「该值 × 条数 ≤ 字节总量上限」
 # 从同一上限派生，口径对准解析产物内存：对抗性 64 字节量级的最小合法事件滴流撑满
 # 字节上限时产物被封在与上限同量级，而非按线上字节推导时放大一个数量级以上。合法
-# 批次至多 15 张图且单事件常在 KB 以上，远达不到该上限。
+# 满额随能力表派生且单事件常在 KB 以上，远达不到该上限。
 _SSE_ITEM_OVERHEAD_BYTES = 448
 
-# 解析条目数的绝对下限：组图单请求合法产出至多 15 张图片，总量上限极小的部署按
-# 单条产物开销推导会得到误伤合法批次的过小上限，绝对下限兜底。
-_SSE_MIN_ITEMS_LIMIT = 64
 
-
-def items_limit_for(total_bytes_limit: int) -> int:
-    """从响应体总量上限派生解析条目数硬上限。"""
-    return max(total_bytes_limit // _SSE_ITEM_OVERHEAD_BYTES, _SSE_MIN_ITEMS_LIMIT)
+# 条目下限经参数注入：utils.io 不依赖 utils.model，合法满额由调用方自能力表派生；
+# 极小总量上限的推导值低于合法满额时以其兜底，防误伤合法批次。
+def items_limit_for(total_bytes_limit: int, min_items: int) -> int:
+    """从响应体总量上限派生解析条目数硬上限，取值不低于注入的条目下限。"""
+    return max(total_bytes_limit // _SSE_ITEM_OVERHEAD_BYTES, min_items)
 
 
 # CRLF/CR 行尾的单遍归一化模式：一次扫描同时匹配两种行尾，避免两次 replace 全块扫描。
@@ -376,17 +374,22 @@ class _SSEItemCollector:
     """SSE 图片条目累计器：维护条目列表与按总量上限派生的条目硬上限。
 
     大量小事件在字节未超限时仍可放大解析产物内存，条目上界按单条解析产物的内存
-    开销估计从同一上限派生；触顶后终止读取，流末尾残留段不再解析。
+    开销估计从同一上限派生；条目数超上限后终止读取，流末尾残留段不再解析。
     """
 
-    def __init__(self, total_bytes_limit: int) -> None:
+    def __init__(self, total_bytes_limit: int, min_items: int) -> None:
         self.items: list[dict[str, Any]] = []
-        self.max_items = items_limit_for(total_bytes_limit)
+        self.max_items = items_limit_for(total_bytes_limit, min_items)
         self.capped = False
 
     def reached_cap(self) -> bool:
-        """条目数达到硬上限，调用方应终止解析。"""
-        return len(self.items) >= self.max_items
+        """条目数超过允许的最大条目数，调用方应终止解析。
+
+        第 max_items 条本身合法：等于上限不触发，合法满额批次的尾部完成事件
+        仍可解析，条目下限取合法满额即足；判定在条目入列之后，触发时首个
+        超额条目已在列表中。
+        """
+        return len(self.items) > self.max_items
 
 
 async def _close_stream_response(response: httpx.Response) -> None:
@@ -495,10 +498,10 @@ async def _drain_sse_complete_events(
     log: Logger,
     apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
 ) -> int:
-    """事件解析阶段：抽干缓冲内完整事件段并分类处理，条目触顶即停，返回丢失 data 负载的事件数。"""
-    # 先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件；条目触顶即时停止
+    """事件解析阶段：抽干缓冲内完整事件段并分类处理，条目超上限即停，返回丢失 data 负载的事件数。"""
+    # 先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件；条目超上限即时停止
     # 解析本 chunk 剩余事件，上限以事件为粒度精确生效，关闭响应与截断计数由
-    # 下方触顶块统一承担。
+    # 下方超上限块统一承担。
     lost_events = 0
     for seg_start, seg_end, dropped_remainder in frames.drain():
         event, error, lost_payload = await frames.parse_segment(seg_start, seg_end)
@@ -591,7 +594,7 @@ async def _consume_sse_chunks(
                 frames, collector, model_id=model_id, log=log, apply_completed=apply_completed
             )
 
-            # 条目数触顶：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
+            # 条目数超上限：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
             if collector.reached_cap():
                 log.warning(
                     "SSE 事件条目数超过上限 {}: 已累计 {} 条，终止解析",
@@ -702,6 +705,7 @@ async def parse_sse_response(
     buffer_max_size: int,
     event_truncate_threshold: int,
     total_bytes_limit: int,
+    min_items: int,
     log: Logger,
     deadline: float | None = None,
 ) -> dict[str, Any]:
@@ -720,6 +724,8 @@ async def parse_sse_response(
             超限时终止解析并关闭响应。单事件阈值拦不住大量小事件滴流的超限流。
             解析产物条目数另按该上限除以单条解析产物的内存开销估计派生独立硬上限，
             防止产物内存放大。
+        min_items: 条目数下限兜底，取单请求合法满额产图数（随能力表派生），极小
+            总量上限的推导上限不得误伤合法满额批次。
         log: loguru logger 实例，用于记录进度与告警。
         deadline: 解析全程的 time.monotonic 截止时间，None 表示不施加。
             读取超时按单次读操作计时，持续滴流时永不触发，截止时间封顶每次等块，
@@ -766,7 +772,7 @@ async def parse_sse_response(
             tools = evt_tools
 
     frames = _SSEFrameBuffer()
-    collector = _SSEItemCollector(total_bytes_limit)
+    collector = _SSEItemCollector(total_bytes_limit, min_items)
 
     truncated_events, deadline_exceeded = await _consume_sse_chunks(
         response,
@@ -781,7 +787,7 @@ async def parse_sse_response(
         apply_completed=apply_completed,
     )
 
-    # 条目数触顶时流已被终止，残留段不再解析；正常流结束才进入末尾残留处理。
+    # 条目数超上限时流已被终止，残留段不再解析；正常流结束才进入末尾残留处理。
     if not collector.capped:
         truncated_events += await _resolve_sse_trailing_segment(
             frames,

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ..config import SeedreamConfig
+from ..definitions.conventions import DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
 from .request_plan import _ACTIVE_REQUEST_PLAN, serialize_request_body
 from ..utils.core.executors import CpuOffloadPoolClosedError, load_json_bytes
 from ..utils.core.http_int import strict_http_int
@@ -60,6 +61,7 @@ from ..utils.io.stream import (
     item_has_image_payload,
     item_reports_failure,
 )
+from ..utils.model.capabilities import MAX_PER_REQUEST_IMAGE_COUNT, get_model_capabilities
 
 if TYPE_CHECKING:
     from loguru import Logger
@@ -83,6 +85,42 @@ _REQUEST_NESTING_DEPTH_LIMIT = 250
 
 # 深度探测的单次节点预算：极端宽载荷放弃遍历，探测失败不归因用户载荷。
 _REQUEST_DEPTH_PROBE_NODE_BUDGET = 1_000_000
+
+
+def _error_body_limit(total_limit: int) -> tuple[int, bool]:
+    """错误路径读体上限与超限消息是否提示环境变量调整。
+
+    生效上限取响应体总量上限与 4MB 独立上限的较小值；总量上限更低时调整
+    环境变量才有效，两者由同一次比较产出。
+    """
+    if total_limit < _ERROR_BODY_BYTE_LIMIT:
+        return total_limit, True
+    return _ERROR_BODY_BYTE_LIMIT, False
+
+
+def _response_image_count(request_data: dict[str, Any], model_id: str) -> int:
+    """从请求体推导单请求产图数上限，供响应体读取上限按请求形态投影。
+
+    组图取 sequential_image_generation_options.max_images；图层拆分取显式
+    max_images，未给时按官方服务端默认、不支持拆分配置的家族按能力表满额；
+    其余请求恒为单图。与 tools 层 per_request_image_count 的投影键推导同口径，
+    此处自最终请求体取值，口径对账由 tests/client/test_response_image_count.py 锁定。
+    """
+    sequential_options = request_data.get("sequential_image_generation_options")
+    if isinstance(sequential_options, dict):
+        max_images = sequential_options.get("max_images")
+        if isinstance(max_images, int):
+            return max_images
+    if request_data.get("layer_decomposition") is True:
+        caps = get_model_capabilities(model_id)
+        layer_options = request_data.get("layer_decomposition_options")
+        max_images = layer_options.get("max_images") if isinstance(layer_options, dict) else None
+        if isinstance(max_images, int):
+            return max_images
+        if caps.supports_layer_decomposition_options:
+            return DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
+        return caps.max_layer_decomposition_images
+    return 1
 
 
 def _bounded_error_text(value: Any, limit: int) -> str:
@@ -392,37 +430,25 @@ class _ClientHTTPMixin:
         retry_after = self._retry_after_or_none(status_code, headers)
         raise handle_api_error(status_code, error_data, retry_after=retry_after)
 
-    def _response_body_byte_limit(self) -> int:
-        """上游响应体读取总量上限，委托 config 的生效值单点。"""
-        return self.config.effective_response_body_limit()
-
-    def _error_body_limit(self) -> tuple[int, bool]:
-        """错误路径读体上限与超限消息是否提示环境变量调整。
-
-        生效上限取响应体总量上限与 4MB 独立上限的较小值；总量上限更低时调整
-        环境变量才有效，两者由同一次比较产出。
-        """
-        total_limit = self._response_body_byte_limit()
-        if total_limit < _ERROR_BODY_BYTE_LIMIT:
-            return total_limit, True
-        return _ERROR_BODY_BYTE_LIMIT, False
-
-    def _parsed_data_items_limit(self) -> int:
-        """成功 JSON 响应 data 条目数的硬上限，与 SSE 条目上限同口径从总量上限推导。"""
-        return items_limit_for(self._response_body_byte_limit())
+    def _response_body_byte_limit(self, request_data: dict[str, Any]) -> int:
+        """上游响应体读取总量上限：显式配置直接生效，未配置按请求形态投影。"""
+        return self.config.effective_response_body_limit(
+            response_format=request_data.get("response_format") or "url",
+            max_image_count=_response_image_count(request_data, self.config.model_id),
+        )
 
     async def _read_response_body_capped(
         self,
         response: httpx.Response,
         *,
-        max_bytes: int | None = None,
+        max_bytes: int,
         status_code: int | None = None,
         deadline: float | None = None,
         limit_adjustable: bool = True,
     ) -> bytearray:
         """流式读取响应体并施加总量与总时长上限，超限抛出对应异常。
 
-        max_bytes 缺省时取 _response_body_byte_limit，错误路径传入更小的独立上限。
+        max_bytes 为该次读取的总量上限，错误路径传入更小的独立上限。
         status_code 由错误路径传入，使超限异常沿用 429/5xx 可重试、4xx 立即失败的既有分类；
         成功路径不传，超限保持无状态码的立即失败。
         deadline 为 time.monotonic 截止时间，在等待下一块的路径与持续就绪流的
@@ -438,8 +464,6 @@ class _ClientHTTPMixin:
             SeedreamAPIError: 响应体超过 max_bytes，status_code 非空时携带该状态码。
             asyncio.TimeoutError: 提供 deadline 且读体中途超过截止时间。
         """
-        if max_bytes is None:
-            max_bytes = self._response_body_byte_limit()
         # 可调性由调用方声明，钳制决策与生效上限同处一方。
         adjust_hint = RESPONSE_BODY_LIMIT_HINT if limit_adjustable else ""
         retry_after = (
@@ -530,14 +554,18 @@ class _ClientHTTPMixin:
         return _decode_as_message()
 
     async def _raise_for_response_status(
-        self, response: httpx.Response, *, deadline: float | None = None
+        self,
+        response: httpx.Response,
+        *,
+        byte_limit: int,
+        deadline: float | None = None,
     ) -> None:
         """将非 200 状态码转换为统一 API 异常。"""
         if response.status_code == 200:
             return
 
         try:
-            error_limit, limit_adjustable = self._error_body_limit()
+            error_limit, limit_adjustable = _error_body_limit(byte_limit)
             raw_body = await self._read_response_body_capped(
                 response,
                 max_bytes=error_limit,
@@ -567,7 +595,7 @@ class _ClientHTTPMixin:
         self._raise_api_error_for(response.status_code, response.headers, error_data)
 
     async def _parse_json_success_response(
-        self, response: httpx.Response, deadline: float | None
+        self, response: httpx.Response, deadline: float | None, byte_limit: int
     ) -> dict[str, Any]:
         """读取 200 响应体并解析 JSON，归一化为统一结果结构。
 
@@ -575,7 +603,9 @@ class _ClientHTTPMixin:
         上抛；JSON 解析失败与 data 条目数超上限包装为无状态码的
         SeedreamAPIError，按不可重试处置。
         """
-        raw_body = await self._read_response_body_capped(response, deadline=deadline)
+        raw_body = await self._read_response_body_capped(
+            response, max_bytes=byte_limit, deadline=deadline
+        )
         try:
             payload = await load_json_bytes(raw_body)
         except CpuOffloadPoolClosedError:
@@ -588,7 +618,7 @@ class _ClientHTTPMixin:
         payload_dict = self._require_dict_payload(payload)
         # 大量小条目在字节未超限时仍可放大解析产物内存，与 SSE 条目硬上限同口径拒绝。
         data_count = len(data_items(payload_dict.get("data")))
-        max_data_items = self._parsed_data_items_limit()
+        max_data_items = items_limit_for(byte_limit, MAX_PER_REQUEST_IMAGE_COUNT)
         if data_count > max_data_items:
             raise SeedreamAPIError(
                 error_text(
@@ -629,7 +659,8 @@ class _ClientHTTPMixin:
         request_body: bytes,
         request_timeout: httpx.Timeout,
         attempt_timeout_seconds: float,
-        handle_response: Callable[[httpx.Response, float], Awaitable[dict[str, Any]]],
+        byte_limit: int,
+        handle_response: Callable[[httpx.Response, float, int], Awaitable[dict[str, Any]]],
     ) -> dict[str, Any]:
         """发送请求、检查状态码并委托回调解析响应。
 
@@ -637,23 +668,26 @@ class _ClientHTTPMixin:
         attempt_timeout_seconds 为本次尝试的总时长上限，
         响应头就绪与读体的截止约束经等待路径生效，到点已就绪的数据仍可交付；
         超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
+        byte_limit 为按请求形态投影的响应体读取总量上限，错误与成功路径共用。
         """
         deadline = time.monotonic() + attempt_timeout_seconds
         request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
         response = await self._send_with_header_deadline(client, request, attempt_timeout_seconds)
         try:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
-            await self._raise_for_response_status(response, deadline=deadline)
-            return await handle_response(response, deadline)
+            await self._raise_for_response_status(
+                response, byte_limit=byte_limit, deadline=deadline
+            )
+            return await handle_response(response, deadline, byte_limit)
         finally:
             await response.aclose()
 
     async def _handle_stream_response(
-        self, response: httpx.Response, deadline: float
+        self, response: httpx.Response, deadline: float, byte_limit: int
     ) -> dict[str, Any]:
         """把流式请求的 200 响应解析为统一结果结构，SSE 优先、JSON 兜底。"""
         if not is_sse_response(response):
-            return await self._parse_json_success_response(response, deadline)
+            return await self._parse_json_success_response(response, deadline, byte_limit)
 
         # truncated_events/deadline_exceeded 原样透传，results 侧提取器按值归一。
         return await parse_sse_response(
@@ -661,7 +695,8 @@ class _ClientHTTPMixin:
             model_id=self.config.model_id,
             buffer_max_size=self.config.stream_buffer_max_size,
             event_truncate_threshold=self.config.effective_sse_event_max_size(),
-            total_bytes_limit=self._response_body_byte_limit(),
+            total_bytes_limit=byte_limit,
+            min_items=MAX_PER_REQUEST_IMAGE_COUNT,
             log=self.logger,
             deadline=deadline,
         )
@@ -708,6 +743,8 @@ class _ClientHTTPMixin:
         total_attempts = max(1, self.config.max_retries + 1)
         single_attempt_timeout = float(self.config.api_timeout)
 
+        # 读体上限按本请求形态投影一次，重试各次与全部读取路径共用。
+        byte_limit = self._response_body_byte_limit(request_data)
         handle_response = (
             self._handle_stream_response
             if request_data.get("stream")
@@ -756,6 +793,7 @@ class _ClientHTTPMixin:
                     request_body=request_body,
                     request_timeout=request_timeout,
                     attempt_timeout_seconds=attempt_timeout,
+                    byte_limit=byte_limit,
                     handle_response=handle_response,
                 )
             except SeedreamAPIError as exc:

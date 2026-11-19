@@ -27,6 +27,7 @@ from seedream_mcp.utils.io.sse import (
     items_limit_for,
     parse_sse_response,
 )
+from seedream_mcp.utils.model.capabilities import max_per_request_image_count
 
 from _lib.client_fakes import _FakeLog, _FakeSSEResponse, _parse_sse
 from _lib.cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
@@ -856,6 +857,7 @@ async def test_parse_sse_response_terminates_on_total_bytes_limit() -> None:
             event_truncate_threshold=4096,
             # 上限设为两块体积，第三块接收后累计即超限。
             total_bytes_limit=len(chunk) * 2,
+            min_items=max_per_request_image_count(),
             log=_log(),
         )
 
@@ -867,7 +869,7 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
     """大量小事件字节未超限仍以条目数硬上限终止解析并标记 partial。
 
     512KB 限额按单条解析产物内存开销 448 字节派生 1170 条上限；供给 12000 个
-    53 字节事件共 636KB 线上字节，条目数在字节上限前先行触顶。
+    53 字节事件共 636KB 线上字节，条目数在字节上限前先行超上限。
     """
     event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
     assert len(event) == 53
@@ -888,13 +890,14 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
         model_id="m",
         buffer_max_size=4096,
         event_truncate_threshold=4096,
-        # 条目数在约 12 块处先行触顶，字节上限不触发。
+        # 条目数在约 12 块处先行超上限，字节上限不触发。
         total_bytes_limit=512 * 1024,
+        min_items=max_per_request_image_count(),
         log=_log(),
     )
 
-    # 条目数封顶：触顶判定以事件为粒度即时生效，已解析条目恰好等于上限。
-    assert len(result["data"]) == items_limit_for(512 * 1024)
+    # 条目数超上限：判定以事件为粒度即时生效，首个超额条目入列后终止。
+    assert len(result["data"]) == items_limit_for(512 * 1024, max_per_request_image_count()) + 1
     # 终止解析后停止读取：实际消费块数远小于供给。
     assert consumed < total_chunks
     # 与单事件截断同口径计数并标记 partial。
@@ -903,25 +906,91 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
 
 
 async def test_parse_sse_response_item_limit_floor_keeps_legal_batches() -> None:
-    """极小总量限额下条目上限取绝对下限兜底，合法小批次不被误截。
+    """极小总量限额下条目上限取注入的合法满额下限兜底，未达满额的合法批次不被误伤。
 
-    2048 字节限额按单条产物内存开销推导仅得 4 条上限，低于绝对下限 64；兜底后
-    33 个事件批次完整解析，不产生截断计数。
+    32768 字节限额按单条产物内存开销推导仅得 73 条上限，低于随能力表派生的
+    合法满额；兜底后 80 个事件的批次完整解析，不产生截断计数。
     """
-    event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
-    event_count = 33
-    # 33 × 53 = 1749 字节，未超 2048 字节总量限额，仅条目数维度可能触发。
-    assert event_count * len(event) < 2048
+    event = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
+    event_count = 80
+    total_bytes_limit = 32768
+    # 批次线上字节未超总量限额，且规模超过按字节推导的条目上限，仅下限兜底可容纳。
+    assert event_count * len(event) < total_bytes_limit
+    assert event_count > total_bytes_limit // sse_parser_module._SSE_ITEM_OVERHEAD_BYTES
     result = await parse_sse_response(
         _sse_response([event * event_count]),
         model_id="m",
         buffer_max_size=4096,
         event_truncate_threshold=4096,
-        total_bytes_limit=2048,
+        total_bytes_limit=total_bytes_limit,
+        min_items=max_per_request_image_count(),
         log=_log(),
     )
     assert len(result["data"]) == event_count
     assert result["truncated_events"] == 0
+
+
+async def test_parse_sse_response_legal_full_batch_not_capped() -> None:
+    """条目上限恰为合法满额（零裕量）时，满额批次连同尾部完成事件完整解析。
+
+    44800 字节限额按单条产物开销 448 字节推导恰得 100 条上限：满额 100 条
+    本身不触发，其后的 completed 事件仍被解析，不产生截断计数。
+    """
+    event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
+    completed = b'data: {"type":"image_generation.completed","usage":{"generated_images":100}}\n\n'
+    full_count = max_per_request_image_count()
+    # 零裕量边界：按字节推导的上限与下限兜底均恰为合法满额。
+    total_bytes_limit = sse_parser_module._SSE_ITEM_OVERHEAD_BYTES * full_count
+    assert items_limit_for(total_bytes_limit, full_count) == full_count
+    result = await parse_sse_response(
+        _sse_response([event * full_count, completed]),
+        model_id="m",
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=total_bytes_limit,
+        min_items=full_count,
+        log=_log(),
+    )
+    assert len(result["data"]) == full_count
+    assert result["truncated_events"] == 0
+    assert result["status"] == "completed"
+    assert result["usage"]["generated_images"] == 100
+
+
+async def test_parse_sse_response_first_item_beyond_legal_full_caps() -> None:
+    """合法满额后的首个超额条目触发终止：超额条目已入列、标记 partial 并停止读取。
+
+    上限同为合法满额 100（零裕量），第 101 条入列即终止解析，其后块的完成
+    事件不再消费。
+    """
+    event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
+    completed = b'data: {"type":"image_generation.completed","usage":{"generated_images":101}}\n\n'
+    full_count = max_per_request_image_count()
+    consumed = 0
+
+    class _CountingResponse(_FakeSSEResponse):
+        async def aiter_bytes(self) -> AsyncIterator[bytes]:
+            nonlocal consumed
+            for c in self._chunks:
+                consumed += 1
+                yield c
+
+    response = _CountingResponse([event * 50, event * 50, event, completed, event * 10])
+    result = await parse_sse_response(
+        cast(httpx.Response, response),
+        model_id="m",
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=sse_parser_module._SSE_ITEM_OVERHEAD_BYTES * full_count,
+        min_items=full_count,
+        log=_log(),
+    )
+    # 首个超额条目已入列；完成事件未解析（usage 保持空），供给未读完即停止。
+    assert len(result["data"]) == full_count + 1
+    assert result["truncated_events"] == 1
+    assert result["status"] == "partial"
+    assert result["usage"] == {}
+    assert consumed < 5
 
 
 async def test_parse_sse_response_terminates_on_deadline() -> None:
@@ -949,6 +1018,7 @@ async def test_parse_sse_response_terminates_on_deadline() -> None:
             buffer_max_size=4096,
             event_truncate_threshold=4096,
             total_bytes_limit=64 * 1024,
+            min_items=max_per_request_image_count(),
             log=_log(),
             # 截止时间已过，首次等块挂起即超时终止。
             deadline=time.monotonic() - 1.0,
@@ -990,6 +1060,7 @@ async def test_parse_sse_response_deadline_keeps_collected_results(
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
+        min_items=max_per_request_image_count(),
         log=_log(),
         # 截止值须落在假时钟两档（0.0 与 100.0）之间。
         deadline=time.monotonic() + 0.02,
@@ -1029,6 +1100,7 @@ async def test_parse_sse_response_straddling_deadline_chunk_still_parsed(
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
+        min_items=max_per_request_image_count(),
         log=_log(),
         deadline=time.monotonic() + 0.02,
     )
@@ -1066,6 +1138,7 @@ async def test_parse_sse_response_ready_stream_stops_after_deadline(
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
+        min_items=max_per_request_image_count(),
         log=_log(),
         deadline=time.monotonic() + 0.02,
     )
@@ -1286,6 +1359,7 @@ async def test_parse_sse_response_pool_closed_propagates_raw_pool_error() -> Non
                 buffer_max_size=256 * 1024,
                 event_truncate_threshold=256 * 1024,
                 total_bytes_limit=256 * 1024,
+                min_items=max_per_request_image_count(),
                 log=_log(),
             )
         )

@@ -26,13 +26,17 @@ from ..definitions.conventions import (
 from .request_plan import _ACTIVE_REQUEST_PLAN, _build_request_data
 from ..utils.core.errors import SeedreamValidationError, as_plain, error_text, raw_error_text
 from ..utils.core.logs import get_logger
+from ..utils.core.safety import resolve_safety_identifier
 from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+    get_model_capabilities,
+    layer_decomposition_layer_limits_text,
     layer_decomposition_presets_text,
     limited_reference_families_annotation,
     supported_family_display_names,
 )
 from ..utils.core.validators import (
+    VALID_BACKGROUND_MODES,
     ValidatedCommonParams,
     ensure_utf8_encodable,
     resolve_effective_generation_defaults,
@@ -40,24 +44,52 @@ from ..utils.core.validators import (
     validate_background,
     validate_common_generation_params,
     validate_layer_decomposition,
+    validate_layer_decomposition_options,
     validate_max_images,
     validate_reference_image_count,
     validate_sequential_generation_support,
+    validate_sequential_image_generation_options,
     validate_sequential_image_limit,
 )
 from ..utils.images.prepare import ImagePreparer
 
-# 生成方法 docstring 的家族清单、图层档位与参考图上限自能力表派生；
+# 生成方法 docstring 的家族清单、图层档位、图层数上限与参考图上限自能力表派生；
 # docstring 为字符串字面量（f-string 不能成为 __doc__），派生值经下方回填替换进入。
+# background 段落双变体：拆分子句仅图文生图可达，其余三方法无该场景；
+# 其家族清单在定义时内插（段落是替换值而非 docstring 字面量），值保持平文本，
+# 回填单遍替换即可完成。取值词表复用校验白名单（字母稳定序），新增模式随表更新。
+_BACKGROUND_MODE_VALUES = sorted(VALID_BACKGROUND_MODES)
+_BACKGROUND_MODES_DOC = (
+    "、".join(f'"{mode}"' for mode in _BACKGROUND_MODE_VALUES[:-1])
+    + f' 或 "{_BACKGROUND_MODE_VALUES[-1]}"'
+)
+_BACKGROUND_DOC_PREFIX = (
+    f"background: 图片透明通道，取值为 {_BACKGROUND_MODES_DOC}，\n"
+    "                可用取值以当前模型为准，仅 "
+    f"{supported_family_display_names('allowed_background_modes')}"
+    " 支持（transparent 在部分家族\n"
+    "                仅单参考图的图生场景可用）；transparent 生成透明背景图（部分模型\n"
+    '                要求输入图片带透明通道），与 output_format="jpeg" 互斥'
+)
+_BACKGROUND_DOC = _BACKGROUND_DOC_PREFIX + "。"
+_BACKGROUND_DOC_DECOMPOSITION = (
+    _BACKGROUND_DOC_PREFIX + "，图层拆分\n                场景不支持该参数。"
+)
+
 _DOCSTRING_HINT_PLACEHOLDERS = {
     "{output_format_families}": supported_family_display_names("supports_output_format"),
     "{stream_families}": supported_family_display_names("supports_stream"),
     "{tools_families}": supported_family_display_names("supports_tools"),
     "{sequential_families}": supported_family_display_names("supports_sequential_generation"),
     "{layer_families}": supported_family_display_names("supports_layer_decomposition"),
-    "{background_families}": supported_family_display_names("supports_background"),
+    "{layer_options_families}": supported_family_display_names(
+        "supports_layer_decomposition_options"
+    ),
+    "{background_doc}": _BACKGROUND_DOC,
+    "{background_doc_decomposition}": _BACKGROUND_DOC_DECOMPOSITION,
     "{reference_limit_annotation}": limited_reference_families_annotation(),
     "{layer_presets}": layer_decomposition_presets_text(),
+    "{layer_limits}": layer_decomposition_layer_limits_text(),
     "{max_reference_images}": str(SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES),
 }
 
@@ -81,6 +113,9 @@ class SeedreamClient(_ClientHTTPMixin):
     四个生成方法保持同构的显式模板而非抽象为公共骨架：方法签名是公共库 API 的
     直读契约，图片字段归一化与请求差异以平铺代码表达，引入间接层只会转移而不会
     消除复杂度。
+
+    仅模型支持时各生成请求自动附加 safety_identifier 终端用户标识，取值经部署方
+    显式配置或由系统派生，是否附加由配置开关决定。
 
     Attributes:
         config: 客户端配置对象。
@@ -121,55 +156,63 @@ class SeedreamClient(_ClientHTTPMixin):
 
     def _build_common_request(
         self,
+        validated: ValidatedCommonParams,
         *,
-        prompt: str | None,
-        size: str,
-        watermark: bool,
-        response_format: str,
-        output_format: str | None,
-        stream: bool,
-        tools: list[Any] | None,
-        validated_opts: dict[str, Any] | None,
+        background: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """构建各生成方法共享的请求参数基础字典，方法特有字段经 extra 并入。
 
-        prompt 为 None 时不写入该键，对应图层拆分场景的缺省提示词，由模型自动
-        识别拆分意图。
+        prompt 为 None 时不写入该键，
+        对应图层拆分场景的缺省提示词，由模型自动识别拆分意图。
         """
         request_data: dict[str, Any] = {
             "model": self.config.model_id,
         }
-        if prompt is not None:
-            request_data["prompt"] = prompt
-        if validated_opts:
-            request_data["optimize_prompt_options"] = validated_opts
+        # 仅能力声明支持的家族附加，避免向其余模型发参被 API 拒绝。
+        safety_identifier = resolve_safety_identifier(
+            enabled=self.config.safety_identifier_enabled,
+            explicit_identifier=self.config.safety_identifier,
+        )
+        if (
+            safety_identifier
+            and get_model_capabilities(self.config.model_id).supports_safety_identifier
+        ):
+            request_data["safety_identifier"] = safety_identifier
+        if validated.prompt is not None:
+            request_data["prompt"] = validated.prompt
+        if validated.optimize_prompt_options:
+            request_data["optimize_prompt_options"] = validated.optimize_prompt_options
         update_payload: dict[str, Any] = {
-            "size": size,
-            "watermark": watermark,
-            "response_format": response_format,
+            "size": validated.size,
+            "watermark": validated.watermark,
+            "response_format": validated.response_format,
         }
         if extra:
             update_payload.update(extra)
         request_data.update(update_payload)
-        if output_format is not None:
-            request_data["output_format"] = output_format
-        if stream:
+        if validated.output_format is not None:
+            request_data["output_format"] = validated.output_format
+        if validated.stream:
             request_data["stream"] = True
-        if tools:
-            request_data["tools"] = tools
+        if validated.tools:
+            request_data["tools"] = validated.tools
+        if background is not None:
+            request_data["background"] = background
         return request_data
 
     async def text_to_image(
         self,
         prompt: str | None = None,
+        *,
         optimize_prompt_options: dict[str, Any] | None = None,
         size: str | None = None,
+        background: str | None = None,
         watermark: bool | None = None,
-        response_format: str = "url",
-        output_format: str | None = None,
-        stream: bool = False,
         tools: list[dict[str, Any]] | None = None,
+        output_format: str | None = None,
+        response_format: str = "url",
+        stream: bool = False,
     ) -> dict[str, Any]:
         """生成符合文本描述的单张图片。
 
@@ -177,11 +220,12 @@ class SeedreamClient(_ClientHTTPMixin):
             prompt: 文本提示词，描述要生成的图像内容。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            {background_doc}
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
-            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
-            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
-            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
             tools: 模型工具配置，仅 {tools_families} 支持，如 [{"type": "web_search"}]。
+            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
+            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
+            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等。
@@ -193,43 +237,32 @@ class SeedreamClient(_ClientHTTPMixin):
             SeedreamNetworkError: 网络错误且重试次数耗尽。
             SeedreamConfigError: API 密钥为空。
         """
-        (
-            validated_prompt,
-            validated_opts,
-            size,
-            watermark,
-            response_format,
-            output_format,
-            stream,
-            tools,
-        ) = await self.prevalidate_common_generation_params(
+        validated = await self.prevalidate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
             watermark=watermark,
-            response_format=response_format,
-            output_format=output_format,
-            stream=stream,
             tools=tools,
+            output_format=output_format,
+            response_format=response_format,
+            stream=stream,
+        )
+        resolved_background = validate_background(
+            background,
+            self.config.model_id,
+            output_format=validated.output_format,
+            layer_decomposition=False,
+            image_count=0,
         )
 
         self.logger.opt(lazy=True).info(
             "开始文生图任务: prompt_meta={}, size={}",
-            lambda: self._summarize_prompt(validated_prompt),
-            lambda: size,
+            lambda: self._summarize_prompt(validated.prompt),
+            lambda: validated.size,
         )
 
         async def _build_request() -> dict[str, Any]:
-            return self._build_common_request(
-                prompt=validated_prompt,
-                size=size,
-                watermark=watermark,
-                response_format=response_format,
-                output_format=output_format,
-                stream=stream,
-                tools=tools,
-                validated_opts=validated_opts,
-            )
+            return self._build_common_request(validated=validated, background=resolved_background)
 
         try:
             request_data = await _build_request_data(
@@ -247,16 +280,18 @@ class SeedreamClient(_ClientHTTPMixin):
     async def image_to_image(
         self,
         prompt: str | None = None,
+        *,
         optimize_prompt_options: dict[str, Any] | None = None,
         image: str | None = None,
         layer_decomposition: bool | None = None,
-        background: str | None = None,
+        layer_decomposition_options: dict[str, Any] | None = None,
         size: str | None = None,
+        background: str | None = None,
         watermark: bool | None = None,
-        response_format: str = "url",
-        output_format: str | None = None,
-        stream: bool = False,
         tools: list[dict[str, Any]] | None = None,
+        output_format: str | None = None,
+        response_format: str = "url",
+        stream: bool = False,
     ) -> dict[str, Any]:
         """编辑已有图片，结合文字指令生成新图片。
 
@@ -266,19 +301,21 @@ class SeedreamClient(_ClientHTTPMixin):
             optimize_prompt_options: 提示词优化选项，可选配置字典。
             image: 输入图像的 URL、data URI（data:image/*;base64,...）或本地文件路径。
             layer_decomposition: 是否开启图层拆分，仅 {layer_families} 支持；开启后单张
-                输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层。
-            background: 图片透明通道，"transparent" 或 "opaque"，仅 {background_families}
-                支持；transparent 需输入单张带透明通道的图片，且与
-                output_format="jpeg" 互斥。
+                输入图拆解为 1 张底图与{layer_limits}带透明通道的 PNG 图层。
+            layer_decomposition_options: 图层拆分配置，仅 {layer_options_families} 支持
+                且仅在 layer_decomposition 开启时生效；可配 max_images（含底图的
+                产出总数上限，2-100）与 text_recognition（富文本 OCR 开关），
+                未给定的子字段由 API 按官方默认取值。
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或
                 "<宽>x<高>" 像素值；图层拆分场景仅支持 {layer_presets} 档位与
                 "auto"，且未传入时默认取 "auto"，其余场景未传入时默认取配置
                 default_size。
+            {background_doc_decomposition}
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
-            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
-            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
-            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
             tools: 模型工具配置，仅 {tools_families} 支持，如 [{"type": "web_search"}]。
+            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
+            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
+            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等。
@@ -294,34 +331,37 @@ class SeedreamClient(_ClientHTTPMixin):
         resolved_layer_decomposition = validate_layer_decomposition(
             layer_decomposition, self.config.model_id
         )
-        (
-            validated_prompt,
-            validated_opts,
-            size,
-            watermark,
-            response_format,
-            output_format,
-            stream,
-            tools,
-        ) = await self.prevalidate_common_generation_params(
+        validated = await self.prevalidate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
             watermark=watermark,
-            response_format=response_format,
-            output_format=output_format,
-            stream=stream,
             tools=tools,
+            output_format=output_format,
+            response_format=response_format,
+            stream=stream,
             layer_decomposition=resolved_layer_decomposition,
         )
         resolved_background = validate_background(
-            background, self.config.model_id, output_format=output_format
+            background,
+            self.config.model_id,
+            output_format=validated.output_format,
+            layer_decomposition=resolved_layer_decomposition,
+            image_count=1,
+        )
+        resolved_layer_options = validate_layer_decomposition_options(
+            layer_decomposition_options,
+            self.config.model_id,
+            layer_decomposition=resolved_layer_decomposition,
         )
 
+        # 图层拆分复用本方法请求流，任务标签按场景取值，日志归因不与图文生图混流。
+        task_label = "图层拆分" if resolved_layer_decomposition else "图文生图"
         self.logger.opt(lazy=True).info(
-            "开始图文生图任务: prompt_meta={}, size={}",
-            lambda: self._summarize_prompt(validated_prompt),
-            lambda: size,
+            "开始{}任务: prompt_meta={}, size={}",
+            lambda: task_label,
+            lambda: self._summarize_prompt(validated.prompt),
+            lambda: validated.size,
         )
 
         async def _build_request() -> dict[str, Any]:
@@ -329,18 +369,10 @@ class SeedreamClient(_ClientHTTPMixin):
             extra: dict[str, Any] = {"image": image_data}
             if resolved_layer_decomposition:
                 extra["layer_decomposition"] = True
-            if resolved_background is not None:
-                extra["background"] = resolved_background
+            if resolved_layer_options is not None:
+                extra["layer_decomposition_options"] = resolved_layer_options
             return self._build_common_request(
-                prompt=validated_prompt,
-                size=size,
-                watermark=watermark,
-                response_format=response_format,
-                output_format=output_format,
-                stream=stream,
-                tools=tools,
-                validated_opts=validated_opts,
-                extra=extra,
+                validated=validated, background=resolved_background, extra=extra
             )
 
         try:
@@ -350,23 +382,25 @@ class SeedreamClient(_ClientHTTPMixin):
 
             response = await self._call_api(IMAGE_TO_IMAGE_TOOL_NAME, request_data)
 
-            self._log_task_outcome("图文生图", response)
+            self._log_task_outcome(task_label, response)
             return response
 
         except Exception as e:
-            raise self._finalize_generation_error("图文生图", e)
+            raise self._finalize_generation_error(task_label, e)
 
     async def multi_image_fusion(
         self,
         prompt: str | None = None,
+        *,
         optimize_prompt_options: dict[str, Any] | None = None,
         image: list[str] | tuple[str, ...] | None = None,
         size: str | None = None,
+        background: str | None = None,
         watermark: bool | None = None,
-        response_format: str = "url",
-        output_format: str | None = None,
-        stream: bool = False,
         tools: list[dict[str, Any]] | None = None,
+        output_format: str | None = None,
+        response_format: str = "url",
+        stream: bool = False,
     ) -> dict[str, Any]:
         """融合多张参考图片的风格与元素生成新图像。
 
@@ -376,11 +410,12 @@ class SeedreamClient(_ClientHTTPMixin):
             image: 输入图像的 URL、data URI（data:image/*;base64,...）或本地文件路径
                 列表，数量范围为 2-{max_reference_images} 张{reference_limit_annotation}。
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            {background_doc}
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
-            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
-            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
-            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
             tools: 模型工具配置，仅 {tools_families} 支持，如 [{"type": "web_search"}]。
+            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
+            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
+            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等。
@@ -395,47 +430,38 @@ class SeedreamClient(_ClientHTTPMixin):
         image = self._normalize_image_sequence(
             image, min_count=2, model_id=self.config.model_id, field_name="image"
         )
-        (
-            validated_prompt,
-            validated_opts,
-            size,
-            watermark,
-            response_format,
-            output_format,
-            stream,
-            tools,
-        ) = await self.prevalidate_common_generation_params(
+        validated = await self.prevalidate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
             watermark=watermark,
-            response_format=response_format,
-            output_format=output_format,
-            stream=stream,
             tools=tools,
+            output_format=output_format,
+            response_format=response_format,
+            stream=stream,
+        )
+        resolved_background = validate_background(
+            background,
+            self.config.model_id,
+            output_format=validated.output_format,
+            layer_decomposition=False,
+            image_count=len(image),
         )
 
         self.logger.opt(lazy=True).info(
             "开始多图融合任务: prompt_meta={}, image_count={}, size={}",
-            lambda: self._summarize_prompt(validated_prompt),
+            lambda: self._summarize_prompt(validated.prompt),
             lambda: len(image),
-            lambda: size,
+            lambda: validated.size,
         )
 
         async def _build_request() -> dict[str, Any]:
             image_data_list = await self._prepare_images_in_parallel(image)
+            # sequential_image_generation 不显式传值：官方口径该参数仅部分模型
+            # 支持，服务端缺省即 disabled，全模型恒传会向能力表外模型发参。
+            extra: dict[str, Any] = {"image": image_data_list}
             return self._build_common_request(
-                prompt=validated_prompt,
-                size=size,
-                watermark=watermark,
-                response_format=response_format,
-                output_format=output_format,
-                stream=stream,
-                tools=tools,
-                validated_opts=validated_opts,
-                # sequential_image_generation 不显式传值：官方口径该参数仅部分模型
-                # 支持，服务端缺省即 disabled，全模型恒传会向能力表外模型发参。
-                extra={"image": image_data_list},
+                validated=validated, background=resolved_background, extra=extra
             )
 
         try:
@@ -454,15 +480,17 @@ class SeedreamClient(_ClientHTTPMixin):
     async def sequential_generation(
         self,
         prompt: str | None = None,
+        *,
         optimize_prompt_options: dict[str, Any] | None = None,
         image: str | list[str] | tuple[str, ...] | None = None,
+        sequential_image_generation_options: dict[str, Any] | None = None,
         size: str | None = None,
+        background: str | None = None,
         watermark: bool | None = None,
-        max_images: int | None = None,
-        response_format: str = "url",
-        output_format: str | None = None,
-        stream: bool = False,
         tools: list[dict[str, Any]] | None = None,
+        output_format: str | None = None,
+        response_format: str = "url",
+        stream: bool = False,
     ) -> dict[str, Any]:
         """生成漫画分镜、品牌视觉等一组内容关联的图片。
 
@@ -475,13 +503,16 @@ class SeedreamClient(_ClientHTTPMixin):
             image: 可选的参考图像，支持单张图像或多张图像列表，元素为 URL、
                 data URI（data:image/*;base64,...）或本地文件路径；参考图数量与
                 生成数量之和不超过 15。
+            sequential_image_generation_options: 组图配置，可选配置字典；可配
+                max_images（最大生成图像数量，1-15，未传入时无参考图默认 15，
+                有参考图时自动扣减以满足总量上限）。
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            {background_doc}
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
-            max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限。
-            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
-            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
-            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
             tools: 模型工具配置，仅 {tools_families} 支持，如 [{"type": "web_search"}]。
+            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
+            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
+            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等。
@@ -495,24 +526,15 @@ class SeedreamClient(_ClientHTTPMixin):
         """
         validate_sequential_generation_support(self.config.model_id)
 
-        (
-            validated_prompt,
-            validated_opts,
-            size,
-            watermark,
-            response_format,
-            output_format,
-            stream,
-            tools,
-        ) = await self.prevalidate_common_generation_params(
+        validated = await self.prevalidate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
             watermark=watermark,
-            response_format=response_format,
-            output_format=output_format,
-            stream=stream,
             tools=tools,
+            output_format=output_format,
+            response_format=response_format,
+            stream=stream,
         )
 
         reference_images: list[str] | None = None
@@ -524,19 +546,32 @@ class SeedreamClient(_ClientHTTPMixin):
                 field_name="image",
             )
 
-        resolved_max_images = resolve_sequential_max_images(max_images, len(reference_images or []))
-        resolved_max_images = validate_max_images(resolved_max_images)
+        reference_count = len(reference_images or [])
+        resolved_background = validate_background(
+            background,
+            self.config.model_id,
+            output_format=validated.output_format,
+            layer_decomposition=False,
+            image_count=reference_count,
+        )
+
+        explicit_max_images = validate_sequential_image_generation_options(
+            sequential_image_generation_options
+        )
+        resolved_max_images = validate_max_images(
+            resolve_sequential_max_images(reference_count, explicit_max_images)
+        )
 
         if reference_images is not None:
             validate_sequential_image_limit(
-                resolved_max_images, reference_images, self.config.model_id
+                reference_images, resolved_max_images, self.config.model_id
             )
 
         self.logger.opt(lazy=True).info(
             "开始组图输出任务: prompt_meta={}, max_images={}, size={}",
-            lambda: self._summarize_prompt(validated_prompt),
+            lambda: self._summarize_prompt(validated.prompt),
             lambda: resolved_max_images,
-            lambda: size,
+            lambda: validated.size,
         )
 
         async def _build_request() -> dict[str, Any]:
@@ -554,15 +589,7 @@ class SeedreamClient(_ClientHTTPMixin):
             if processed_image is not None:
                 extra["image"] = processed_image
             return self._build_common_request(
-                prompt=validated_prompt,
-                size=size,
-                watermark=watermark,
-                response_format=response_format,
-                output_format=output_format,
-                stream=stream,
-                tools=tools,
-                validated_opts=validated_opts,
-                extra=extra,
+                validated=validated, background=resolved_background, extra=extra
             )
 
         try:
@@ -585,10 +612,10 @@ class SeedreamClient(_ClientHTTPMixin):
         optimize_prompt_options: dict[str, Any] | None,
         size: str | None,
         watermark: bool | None,
-        response_format: str,
-        output_format: str | None,
-        stream: bool,
         tools: list[dict[str, Any]] | None,
+        output_format: str | None,
+        response_format: str,
+        stream: bool,
         layer_decomposition: bool = False,
     ) -> ValidatedCommonParams:
         """集中校验生成类工具的公共参数并返回校验后的各值。
@@ -611,10 +638,10 @@ class SeedreamClient(_ClientHTTPMixin):
             optimize_prompt_options,
             resolved_size,
             resolved_watermark,
-            response_format,
-            output_format,
-            stream,
             tools,
+            output_format,
+            response_format,
+            stream,
             layer_decomposition,
         )
 
@@ -625,10 +652,10 @@ class SeedreamClient(_ClientHTTPMixin):
                 optimize_prompt_options=optimize_prompt_options,
                 size=resolved_size,
                 watermark=resolved_watermark,
-                response_format=response_format,
-                output_format=output_format,
-                stream=stream,
                 tools=tools,
+                output_format=output_format,
+                response_format=response_format,
+                stream=stream,
                 model_id=self.config.model_id,
                 layer_decomposition=layer_decomposition,
             )

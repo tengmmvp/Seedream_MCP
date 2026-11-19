@@ -47,7 +47,7 @@ async def test_call_api_selects_response_callback_by_stream_flag(
 ) -> None:
     """stream 标志选择响应处理回调：流式取 _handle_stream_response，非流式取 _parse_json_success_response。"""
     config = SeedreamConfig(api_key="k", max_retries=0)
-    captured: list[Callable[[httpx.Response, float], Awaitable[dict[str, Any]]]] = []
+    captured: list[Callable[[httpx.Response, float, int], Awaitable[dict[str, Any]]]] = []
     fake_send, _ = _make_send_request_fake(_SUCCESS_RESULT, callbacks=captured)
 
     async with SeedreamClient(config) as client:
@@ -332,8 +332,9 @@ async def test_standard_request_rejects_oversized_content_length(
 ) -> None:
     """非流式路径：Content-Length 声明超过总量上限的响应在读取前即拒绝。
 
-    上限为 auto_save_max_file_size × 20，默认 1GB，此处压缩配置为 1024×20 字节以便
-    测试；伪造远超实际 body 的 Content-Length 模拟被污染上游的巨型响应声明。
+    上限为 b64_json 单图 base64 最坏展开（4×⌈1024/3⌉=1368 字节），此处压缩
+    auto_save_max_file_size 以便测试；伪造远超实际 body 的 Content-Length 模拟
+    被污染上游的巨型响应声明。
     """
     config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
     attempts = 0
@@ -352,7 +353,7 @@ async def test_standard_request_rejects_oversized_content_length(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p", "response_format": "b64_json"})
 
         # 无状态码的超限错误不可重试，避免对非幂等生成 API 重复请求
         assert exc_info.value.status_code is None
@@ -377,8 +378,8 @@ async def test_standard_request_rejects_chunked_body_over_limit(
         attempts += 1
 
         async def _stream() -> AsyncIterator[bytes]:
-            # 上限 1024×20=20480 字节，共送出 40KB 确保跨过上限
-            for _ in range(40):
+            # b64_json 单图上限 4×⌈1024/3⌉=1368 字节，共送出 144KB 确保跨过上限。
+            for _ in range(144):
                 yield b"x" * 1024
 
         return httpx.Response(200, content=_stream())
@@ -387,7 +388,7 @@ async def test_standard_request_rejects_chunked_body_over_limit(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p", "response_format": "b64_json"})
 
         # 错误消息携带实际读取字节数，且无状态码不可重试
         assert "已读取" in exc_info.value.message
