@@ -34,9 +34,9 @@
 2. **拼接生图 prompt**。把 `scenes_detail` 数组按序连成一个字符串，开头补用户的原始主题，末尾补 `最后，为故事书创作一个封面。再检查所有图片，去除图片中的文字。`
 
 3. **调用 `sequential_generation`**。要点：
-   - 服务器保持默认 5.0 配置即可；风格偏卡通的场景可由部署方切换为 4.0
-   - `max_images` 对齐分镜数加封面，注意"参考图数量 + 生成数量 ≤ 15"的总额约束
+   - 组图需当前模型支持，默认 5.5 不支持，部署方需切换为 5.0/4.5/4.0（风格偏卡通可选 4.0）
    - 有角色设定参考图时传入 `image`，保持人物形象一致
+   - `sequential_image_generation_options.max_images` 对齐分镜数加封面，注意"参考图数量 + 生成数量 ≤ 15"的总额约束
 
 4. **按序拼装**。生成结果的图片顺序与分镜顺序一致，逐镜配 `scenes` 文案即得整本内容。
 
@@ -44,12 +44,12 @@
 
 把一张图拆成可编辑的透明图层，再按需重组：
 
-1. **拆分**：`image_to_image`，`layer_decomposition=true`（需当前模型支持）。`size` 仅接受 `1K/1.5K/2K` 档位或 `auto`；需要透明底图时配 `background="transparent"`，此时需输入 png 等带透明通道的单张图片
-2. **结果结构**：1 张底图 + 至多 16 张透明 PNG 图层，每张图层带 `z_index`、`name`、`description`、`bounding_box` 元数据，图层始终为 PNG
+1. **拆分**：`layer_decompose`（需当前模型支持），`prompt` 可缺省由模型自动拆分。需要控制产出数量或识别文字时配 `layer_decomposition_options`（`max_images` 含底图 2-100、`text_recognition` 富文本 OCR，仅 Seedream 5.5）；`size` 仅接受 `1K/1.5K/2K` 档位或 `auto`（默认）
+2. **结果结构**：1 张底图 + 多张透明 PNG 图层（Seedream 5.5 至多 99 张、5.0 Pro 与 5.0 Flash 至多 16 张），每张图层带 `z_index`、`name`、`description`、`bounding_box` 元数据，图层始终为 PNG
 3. **再合成路径**：
    - 替换/修改某元素：把目标图层 PNG 作为 `image` 参数再过一次 `image_to_image`
    - 多图层重组：把多张图层 PNG 传给 `multi_image_fusion`，在 prompt 中用"图1/图2"分别指定各层的新内容
-4. **配额提示**：图层拆分每次请求预扣 17 IPM（按底图 + 16 图层满额预留），完成后按实际数量返还
+4. **配额提示**：Seedream 5.5 按 `layer_decomposition_options.max_images` 预扣 IPM（默认 30），5.0 Pro 与 5.0 Flash 每次请求预扣 17 IPM；全部生成后按实际数量返还
 5. **失败语义**：单个请求内任一图层生成失败则该请求整体报错，无部分产物可回收；`request_count` 并行多请求时其余成功请求的图层照常返回并保存。提示词要求的拆分数量超过上限时可能丢失部分图层
 
 ## 迭代与风格一致性
