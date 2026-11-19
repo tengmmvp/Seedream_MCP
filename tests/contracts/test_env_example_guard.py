@@ -190,6 +190,78 @@ def test_compose_env_defaults_match_config_defaults() -> None:
     assert not mismatches, f"compose 默认值与 config 不一致: {mismatches}"
 
 
+def _example_group_titles() -> list[str]:
+    """提取 .env.example 的组标题：上下均为分隔线的独立注释行。"""
+    lines = _example_path().read_text(encoding="utf-8").splitlines()
+    return [
+        line.removeprefix("# ").strip()
+        for index, line in enumerate(lines)
+        if line.startswith("# ")
+        and line != "# ================================"
+        and 0 < index < len(lines) - 1
+        and lines[index - 1].startswith("# ===")
+        and lines[index + 1].startswith("# ===")
+    ]
+
+
+def _compose_group_titles() -> list[str]:
+    """提取 compose environment 段内的组间导航注释。
+
+    environment 的条目与注释均缩进 6 空格，缩进收窄（如 4 空格的 volumes:）
+    即段结束，防止扫入后续段的部署注释。
+    """
+    titles: list[str] = []
+    in_environment = False
+    for line in (_repo_root() / "docker-compose.yml").read_text(encoding="utf-8").splitlines():
+        if line.strip() == "environment:":
+            in_environment = True
+            continue
+        if not in_environment:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("#") and stripped != "#":
+            titles.append(stripped.lstrip("#").strip())
+            continue
+        if _COMPOSE_ENV_ENTRY_PATTERN.match(line):
+            continue
+        if not line.startswith("      "):
+            break
+    return titles
+
+
+def test_compose_group_titles_match_example_groups() -> None:
+    """compose 组间注释与 .env.example 组标题逐一对应（顺序与文本一致）。
+
+    compose 的 environment 只保留组间导航注释，逐键语义以 .env.example 为
+    单一来源；组名漂移（新增组、改名、错序）会使两侧对照断裂，在此失败。
+    """
+    assert _compose_group_titles() == _example_group_titles(), (
+        f"compose 组注释与 .env.example 组标题不一致: "
+        f"compose={_compose_group_titles()} example={_example_group_titles()}"
+    )
+
+
+# .env.example 赋值行键形态，按文件序提取即组间组内全序的基准。
+_EXAMPLE_ASSIGNMENT_KEY_PATTERN = re.compile(r"^((?:SEEDREAM|ARK)_[A-Z0-9_]+)=", re.MULTILINE)
+
+
+def test_compose_entry_order_matches_example_order() -> None:
+    """compose 条目顺序与 .env.example 赋值行顺序全序一致（组间组内同构）。
+
+    默认值一致性经 ENV_DEFAULTS 两段传递链锁定（compose 条目内嵌回退与
+    .env.example「默认：」标注各自对账 ENV_DEFAULTS，部署专属值豁免登记），
+    顺序在此补齐：任何一侧增删或挪动键而另一侧未同步即红。
+    """
+    example_keys = _EXAMPLE_ASSIGNMENT_KEY_PATTERN.findall(
+        _example_path().read_text(encoding="utf-8")
+    )
+    compose_keys = list(_compose_env_entries())
+
+    assert compose_keys == example_keys, (
+        f"compose 条目顺序与 .env.example 不一致: " f"compose={compose_keys} example={example_keys}"
+    )
+
+
 def _example_model_id_comment_block() -> str:
     """收集 .env.example 中 SEEDREAM_MODEL_ID 赋值行上方的连续注释块。"""
     lines = _example_path().read_text(encoding="utf-8").splitlines()

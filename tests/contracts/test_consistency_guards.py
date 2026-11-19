@@ -33,12 +33,15 @@ from conftest import HOST_ENV_SCRUB_PREFIXES
 from seedream_mcp.tools.schemas import (
     BackgroundMode,
     GenerationToolType,
+    LayerDecompositionOptions,
     OptimizePromptOptions,
     OutputFormat,
     ResponseFormat,
+    SequentialImageGenerationOptions,
 )
 from seedream_mcp.tools.handlers._metadata import (
     IMAGE_TO_IMAGE,
+    LAYER_DECOMPOSE,
     MULTI_IMAGE_FUSION,
     SEQUENTIAL_GENERATION,
     TEXT_TO_IMAGE,
@@ -46,6 +49,8 @@ from seedream_mcp.tools.handlers._metadata import (
 from seedream_mcp.definitions import conventions
 from seedream_mcp.definitions.conventions import MAX_SEQUENTIAL_TOTAL_IMAGES
 from seedream_mcp.utils.core.validators import (
+    LAYER_DECOMPOSITION_OPTION_FIELDS,
+    SEQUENTIAL_OPTION_FIELDS,
     VALID_BACKGROUND_MODES,
     VALID_GENERATION_TOOL_TYPES,
     VALID_OPTIMIZE_MODES,
@@ -61,6 +66,7 @@ _GENERATION_TOOL_METADATA = (
     IMAGE_TO_IMAGE,
     MULTI_IMAGE_FUSION,
     SEQUENTIAL_GENERATION,
+    LAYER_DECOMPOSE,
 )
 
 # 环境键读取豁免只收真实旁路：动态键站点解不出静态文本，收录模块相对路径加调用原文。
@@ -257,6 +263,16 @@ def test_optimize_mode_literal_matches_validator_whitelist() -> None:
     assert literal_values == set(VALID_OPTIMIZE_MODES)
 
 
+def test_layer_decomposition_option_fields_match_schema() -> None:
+    """LayerDecompositionOptions 字段集与校验器允许键集一致，新增子字段须两侧同步。"""
+    assert frozenset(LayerDecompositionOptions.model_fields) == LAYER_DECOMPOSITION_OPTION_FIELDS
+
+
+def test_sequential_option_fields_match_schema() -> None:
+    """SequentialImageGenerationOptions 字段集与校验器允许键集一致，新增子字段须两侧同步。"""
+    assert frozenset(SequentialImageGenerationOptions.model_fields) == SEQUENTIAL_OPTION_FIELDS
+
+
 def test_unknown_family_presets_match_validator_whitelist() -> None:
     """unknown 家族的档位全集与 VALID_SIZE_PRESETS 一致，新增档位须两侧同步。"""
     from seedream_mcp.utils.model.capabilities import (
@@ -281,6 +297,26 @@ def test_family_reference_caps_fit_sequential_total_images() -> None:
         f"家族参考图上限须不超过 {MAX_SEQUENTIAL_TOTAL_IMAGES - 1}（总数上限 "
         f"{MAX_SEQUENTIAL_TOTAL_IMAGES} 须留出至少一张生成位）: {offenders}"
     )
+
+
+def test_background_form_derivations_in_sync() -> None:
+    """background 调用形态单点派生：classify 返回值域与场景表一致，新增形态须两侧同步。"""
+    from typing import get_args, get_type_hints
+
+    from seedream_mcp.utils.core.validators import classify_background_form
+    from seedream_mcp.utils.model.capabilities import BACKGROUND_FORM_SCENES
+
+    declared_returns = {
+        value
+        for value in get_args(get_type_hints(classify_background_form)["return"])
+        if isinstance(value, str)
+    }
+    assert declared_returns == set(BACKGROUND_FORM_SCENES), (
+        f"classify_background_form 返回值域 {sorted(declared_returns)} 偏离场景表 "
+        f"{sorted(BACKGROUND_FORM_SCENES)}，新增形态须两侧同步"
+    )
+    # 行为口径：参考图 0/1/2 张覆盖三形态。
+    assert {classify_background_form(count) for count in range(3)} == set(BACKGROUND_FORM_SCENES)
 
 
 async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
@@ -478,7 +514,9 @@ def test_start_log_placeholders_match_builder_arity() -> None:
     故按个数锁定并实际执行一次格式化兜底。
     """
     # sequential 的 max_images 取非 None 值，覆盖 builder 读取的全部上下文字段
-    context = make_generation_context(prompt="生成提示词", max_images=4)
+    context = make_generation_context(
+        prompt="生成提示词", sequential_image_generation_options={"max_images": 4}
+    )
 
     for metadata in _GENERATION_TOOL_METADATA:
         values = metadata.start_log_values_builder(context)
@@ -932,13 +970,11 @@ _INLINE_JOINER_EXEMPTIONS = frozenset(
     {
         "server/cli.py: 模型别名；完整 Model ID 或 Endpoint ID 经 SEEDREAM_MODEL_ID 环境变量传入；",
         "tools/handlers/get_model_info.py: ；像素总量 ",
-        "tools/schemas.py: 图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词；",
         "tools/schemas.py:  张，部分模型上限更低；",
         "tools/schemas.py:  张；",
-        "tools/schemas.py: 是否开启图层拆分，需当前模型支持；",
+        "tools/schemas.py: 图层拆分意图，建议不超过300个汉字或600个英文单词；",
         "tools/schemas.py: 图片透明通道，需当前模型支持；",
-        "tools/schemas.py: 生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值，需当前模型支持；",
-        "tools/schemas.py:  档位或 auto，未提供时默认 auto；",
+        "tools/schemas.py: ，需当前模型支持；",
         "tools/schemas.py: ；",
         "tools/schemas.py: 并行度上限（1-10），不得超过 request_count；",
         "utils/core/logs.py: 标准库日志未被 loguru 拦截，也不经控制字符防护；",
@@ -1221,18 +1257,21 @@ def test_style_prompt_prefix_names_registered_tools() -> None:
 
 
 def test_context_probe_keys_match_schema_fields() -> None:
-    """context 的工具特有探测键须为某输入模型的真字段或声明的 property 访问器。"""
+    """context 的工具特有探测键须为某输入模型的真字段或声明的 property/ClassVar。"""
+    from typing import ClassVar, get_origin, get_type_hints
+
     from seedream_mcp.tools.pipeline import context as context_module
     from seedream_mcp.tools.schemas import (
         ImageToImageInput,
+        LayerDecomposeInput,
         MultiImageFusionInput,
         SequentialGenerationInput,
         TextToImageInput,
     )
 
     source = Path(context_module.__file__).read_text(encoding="utf-8")
+    # 字段名嗅探已按类声明派发消除；探测点重现时守护继续校验键的合法性。
     probed = set(re.findall(r'(?:getattr|hasattr)\(params, "([a-z_]+)"', source))
-    assert probed, "context 未解析到字段探测点，探测形态可能已变"
 
     declared: set[str] = set()
     for model in (
@@ -1240,9 +1279,15 @@ def test_context_probe_keys_match_schema_fields() -> None:
         ImageToImageInput,
         MultiImageFusionInput,
         SequentialGenerationInput,
+        LayerDecomposeInput,
     ):
         declared |= set(model.model_fields)
         declared |= {name for name, member in vars(model).items() if isinstance(member, property)}
+        declared |= {
+            name
+            for name, annotation in get_type_hints(model).items()
+            if get_origin(annotation) is ClassVar
+        }
 
     assert (
         not probed - declared
@@ -1263,6 +1308,20 @@ def _opens_call_id_scope(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return False
 
 
+def _enters_entry_call_scopes(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """判定函数体是否以 with/async with 进入 _entry_call_scopes 入口作用域。"""
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            continue
+        if any(
+            isinstance(item.context_expr, ast.Call)
+            and _call_tail_name(item.context_expr) == "_entry_call_scopes"
+            for item in node.items
+        ):
+            return True
+    return False
+
+
 def _delegates_generation_tool(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """判定函数体是否经 _run_generation_tool 委托。"""
     return any(
@@ -1273,10 +1332,11 @@ def _delegates_generation_tool(func: ast.FunctionDef | ast.AsyncFunctionDef) -> 
 
 
 def test_run_tool_entries_open_call_id_scope() -> None:
-    """runners 的每个 run_* 公开入口直接或经 _run_generation_tool 进入调用关联作用域。
+    """runners 的每个 run_* 公开入口直接或经共享入口作用域进入调用关联作用域。
 
     名单由 AST 直接发现，新增 run_* 忘开作用域即红。
-    委托形态以 _run_generation_tool 自身包裹为前提，一并断言。
+    委托形态以 _run_generation_tool 自身经 _entry_call_scopes 包裹为前提；
+    _entry_call_scopes 的定义须真的开启 call_id_scope，间接形态不空心化。
     """
     tree = _cached_parse(_SRC_ROOT / "tools" / "runners.py")
     functions = {
@@ -1285,16 +1345,22 @@ def test_run_tool_entries_open_call_id_scope() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
+    entry = functions.get("_entry_call_scopes")
+    assert entry is not None and _opens_call_id_scope(
+        entry
+    ), "_entry_call_scopes 未开启调用关联作用域，共享入口随之失守"
+
     delegate = functions.get("_run_generation_tool")
-    assert delegate is not None and _opens_call_id_scope(
+    assert delegate is not None and _enters_entry_call_scopes(
         delegate
-    ), "_run_generation_tool 未开启调用关联作用域，委托形态入口随之失守"
+    ), "_run_generation_tool 未进入入口作用域，委托形态入口随之失守"
 
     offenders = sorted(
         name
         for name, node in functions.items()
         if name.startswith("run_")
         and not _opens_call_id_scope(node)
+        and not _enters_entry_call_scopes(node)
         and not _delegates_generation_tool(node)
     )
     assert offenders == [], f"run_* 入口未进入调用关联作用域: {offenders}"
@@ -1416,11 +1482,13 @@ _FACADE_ALL_SNAPSHOTS = {
         "run_browse_images",
         "run_get_model_info",
         "run_image_to_image",
+        "run_layer_decompose",
         "run_multi_image_fusion",
         "run_sequential_generation",
         "run_text_to_image",
         "BrowseImagesInput",
         "ImageToImageInput",
+        "LayerDecomposeInput",
         "MultiImageFusionInput",
         "SequentialGenerationInput",
         "TextToImageInput",

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -35,12 +36,13 @@ from seedream_mcp.server import mcp
 from seedream_mcp.tools.schemas import (
     BrowseImagesInput,
     ImageToImageInput,
+    LayerDecomposeInput,
     MultiImageFusionInput,
     SequentialGenerationInput,
     TextToImageInput,
 )
 from seedream_mcp.utils.io.storage import FileManager
-from seedream_mcp.utils.model.capabilities import MODEL_CAPABILITIES
+from seedream_mcp.utils.model.capabilities import MODEL_CAPABILITIES, ModelCapabilities
 
 # 工具名到输入模型的映射，镜像 server/_registration.py 平铺签名组装各工具时使用的输入模型。
 _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
@@ -48,6 +50,7 @@ _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "image_to_image": ImageToImageInput,
     "multi_image_fusion": MultiImageFusionInput,
     "sequential_generation": SequentialGenerationInput,
+    "layer_decompose": LayerDecomposeInput,
     "browse_images": BrowseImagesInput,
 }
 
@@ -77,13 +80,17 @@ _CAPABILITY_COLUMN_FAMILIES = tuple(family for family in MODEL_CAPABILITIES if f
 # 尺寸档位 token：形如 1K / 1.5K 的数字（可带小数）加大写 K。
 _PRESET_TOKEN_PATTERN = re.compile(r"\d+(?:\.\d+)?K")
 
-# 布尔能力行标签关键字到 ModelCapabilities 属性名的映射。
-_CAPABILITY_BOOL_ROWS = {
-    "组图生成": "supports_sequential_generation",
-    "联网搜索": "supports_tools",
-    "流式输出": "supports_stream",
-    "图层拆分": "supports_layer_decomposition",
-    "透明背景": "supports_background",
+# 布尔能力行标签关键字到能力声明判定式的映射；集合字段以派生布尔对账
+# （透明背景取集合真值，文生透明图取 text 形态可用）。
+_CAPABILITY_BOOL_ROWS: dict[str, Callable[[ModelCapabilities], bool]] = {
+    "组图生成": lambda caps: caps.supports_sequential_generation,
+    "联网搜索": lambda caps: caps.supports_tools,
+    "流式输出": lambda caps: caps.supports_stream,
+    "图层拆分": lambda caps: caps.supports_layer_decomposition,
+    "富文本 OCR": lambda caps: caps.supports_layer_decomposition_options,
+    "透明背景": lambda caps: bool(caps.allowed_background_modes),
+    "文生透明图": lambda caps: "text" in caps.allowed_background_forms,
+    "终端用户标识": lambda caps: caps.supports_safety_identifier,
 }
 
 # 值行的标签关键字到 (能力声明字段, 支持态取值, 不支持态取值) 映射。
@@ -98,6 +105,12 @@ _CAPABILITY_NUMBER_ROW_LABELS = ("分辨率档位", "参考图上限")
 # 不参与对账的能力表行及理由。
 _CAPABILITY_EXEMPT_ROWS = {
     "文生图": "全家族支持的基础生成能力，能力表无对应声明字段",
+    "原生 RGBA": (
+        "官方教程矩阵与 API 参考冲突（教程对 5.0 Pro/Flash 标 ✓，仅限单张透明 PNG 图生图），"
+        "按参数级权威 Seedream-API-Reference 裁决为 5.5 专有；"
+        "无独立能力字段，由能力表 allowed_background_modes 的 auto 取值专属性间接锚定"
+    ),
+    "提示词语言": "官方提示词语言矩阵，无代码消费面，不对账",
 }
 
 
@@ -265,8 +278,8 @@ def test_capability_table_reference_image_limits_match() -> None:
 
 
 def test_capability_table_boolean_rows_match_capabilities() -> None:
-    """能力差异表布尔行的 ✓ 与 ✗/暂不支持 标记与对应能力声明字段一致。"""
-    for label_keyword, attribute in _CAPABILITY_BOOL_ROWS.items():
+    """能力差异表布尔行的 ✓ 与 ✗/暂不支持 标记与对应能力声明判定式一致。"""
+    for label_keyword, is_supported in _CAPABILITY_BOOL_ROWS.items():
         cells = _capability_row(BASE_README, label_keyword)
         for family, cell in zip(_CAPABILITY_COLUMN_FAMILIES, cells[1:]):
             marked_supported = "✓" in cell
@@ -274,10 +287,10 @@ def test_capability_table_boolean_rows_match_capabilities() -> None:
             assert (
                 marked_supported != marked_unsupported
             ), f"{label_keyword} 行 {family} 列应恰含一个 ✓/✗/暂不支持 标记: {cell!r}"
-            assert marked_supported == getattr(MODEL_CAPABILITIES[family], attribute), (
-                f"{label_keyword} 行 {family} 列文档 {marked_supported} != 代码 "
-                f"{getattr(MODEL_CAPABILITIES[family], attribute)}"
-            )
+            supported = is_supported(MODEL_CAPABILITIES[family])
+            assert (
+                marked_supported == supported
+            ), f"{label_keyword} 行 {family} 列文档 {marked_supported} != 代码 {supported}"
 
 
 def test_capability_table_value_rows_match_capabilities() -> None:
