@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any, Literal, NamedTuple
 
 from ...definitions.conventions import (
+    DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES,
     LAYER_DECOMPOSITION_MAX_IMAGES,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
@@ -30,6 +31,12 @@ SEEDREAM_1K_MIN_SIZE_PIXELS = 1280 * 720
 SEEDREAM_2K_4K_MIN_SIZE_PIXELS = 2560 * 1440
 SEEDREAM_1K_2K_MAX_SIZE_PIXELS = 4624220  # 官方 2048x2048x1.1025 的像素乘积上限
 SEEDREAM_4K_MAX_SIZE_PIXELS = 4096 * 4096
+
+# RGBA 每像素字节数，输出图未压缩大小的基数。
+_RGBA_BYTES_PER_PIXEL = 4
+# 不可压缩 RGBA 图编码为 PNG 时文件大于像素乘 4 的未压缩字节数：
+# deflate 静态 Huffman 块膨胀约 5.5%，逐行滤波字节与分块头不足 0.25%，故留 1/16 余量。
+_PNG_EXPANSION_MARGIN_DENOMINATOR = 16
 
 # background 调用形态的文案场景名，新增形态须在此登记场景标签。
 BACKGROUND_FORM_SCENES: Mapping[str, str] = MappingProxyType(
@@ -112,7 +119,7 @@ class ModelCapabilities:
 
     @property
     def allowed_background_forms(self) -> frozenset[str]:
-        """transparent 取值的形态白名单，快照布尔与模型清单载荷的既有呈现投影。"""
+        """transparent 取值的形态白名单，能力快照的 full_form_transparency 据此派生。"""
         return self.background_forms_by_mode.get("transparent", frozenset())
 
 
@@ -391,12 +398,45 @@ def get_max_reference_images(model_id: str) -> int:
 
 
 def max_per_request_image_count() -> int:
-    """返回单请求合法满额产图数，响应体上限推导与解析条目下限的单一取值点。"""
+    """返回单请求合法满额产图数，作条目上限的注入下限。"""
     # 组图总数为跨家族协议常量、拆分满额随能力表声明，家族配额以能力表为唯一来源。
     return max(
         MAX_SEQUENTIAL_TOTAL_IMAGES,
         max(caps.max_layer_decomposition_images for caps in MODEL_CAPABILITIES.values()),
     )
+
+
+def layer_decomposition_image_count(layer_max_images: int | None, model_id: str) -> int:
+    """图层拆分场景的单请求产图数投影：显式值 → 官方默认 → 能力表满额。
+
+    支持拆分配置的家族缺省取官方服务端默认，其余家族取能力表值（不支持拆分者为 0）。
+    tools 层投影与 client 请求装配共用此单点。
+    """
+    caps = get_model_capabilities(model_id)
+    if caps.supports_layer_decomposition_options:
+        if layer_max_images is not None:
+            return layer_max_images
+        return DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
+    return caps.max_layer_decomposition_images
+
+
+# 已声明像素上限的家族中的最大像素数，随能力表导入期绑定一次，供未识别家族兜底。
+_KNOWN_MAX_SIZE_PIXELS = max(
+    caps.max_size_pixels for caps in MODEL_CAPABILITIES.values() if caps.max_size_pixels is not None
+)
+
+
+def max_single_image_bytes(model_id: str) -> int:
+    """返回模型家族单图最坏字节数：像素上限乘 RGBA 每像素字节数再加编码膨胀余量。
+
+    未识别家族不声明像素上限，取已知家族的最大像素数。
+    b64_json 响应体上限与 SSE 单事件阈值以此为单图基准。
+    """
+    max_pixels = get_model_capabilities(model_id).max_size_pixels
+    if max_pixels is None:
+        max_pixels = _KNOWN_MAX_SIZE_PIXELS
+    raw_bytes = max_pixels * _RGBA_BYTES_PER_PIXEL
+    return raw_bytes + raw_bytes // _PNG_EXPANSION_MARGIN_DENOMINATOR
 
 
 # 能力表为静态数据，导入期绑定一次供请求热路径直用；需随能力表活算的场合（如测试）走函数。
@@ -486,26 +526,29 @@ def preset_numeric_sort_key(preset: str) -> tuple[float, str]:
         return (float("inf"), preset)
 
 
+def background_forms_by_mode_lists(caps: ModelCapabilities) -> dict[str, list[str]]:
+    """各取值的形态白名单归一为字典，值为排序列表，供 JSON 下发。"""
+    return {mode: sorted(forms) for mode, forms in caps.background_forms_by_mode.items()}
+
+
 def model_payloads() -> list[dict[str, object]]:
     """按 MODEL_ALIASES 顺序产出各模型的能力展示载荷。
 
-    每条目含 alias 与 model_id 及 asdict 展开的能力字段；集合型字段归一为
-    有序列表保证 JSON 可序列化，能力表新增字段自动进入载荷，消费方无需手工
-    同步字段清单。background_forms_by_mode 例外：换出为既有
-    allowed_background_forms 呈现键（transparent 形态投影），不新增载荷维度。
+    每条目含 alias、model_id 与能力声明的全部字段，
+    能力表新增字段自动进入载荷，消费方无需手工同步字段清单。
+    集合型字段归一为排序列表，各取值的形态白名单归一为字典且值为排序列表，
+    保证 JSON 可序列化。
     """
     # 集合字段的归一排序表：(字段名, 排序键) 对，排序键 None 为纯字典序。
     set_field_sort_keys: tuple[tuple[str, Callable[[str], Any] | None], ...] = (
         ("allowed_presets", preset_numeric_sort_key),
         ("allowed_background_modes", None),
-        ("allowed_background_forms", None),
     )
     payloads: list[dict[str, object]] = []
     for alias, model_id in MODEL_ALIASES.items():
         caps = get_model_capabilities(model_id)
         capabilities = asdict(caps)
-        del capabilities["background_forms_by_mode"]
-        capabilities["allowed_background_forms"] = sorted(caps.allowed_background_forms)
+        capabilities["background_forms_by_mode"] = background_forms_by_mode_lists(caps)
         for field, sort_key in set_field_sort_keys:
             value = capabilities.get(field)
             if isinstance(value, (set, frozenset, list)):

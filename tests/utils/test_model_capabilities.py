@@ -3,10 +3,13 @@
 重点守护 5.0 Pro / Flash 须先于 5.0 Lite 解析的顺序，避免含 "5-0" 子串的 ID 被误判。
 """
 
+import io
+import os
 from dataclasses import asdict
 from typing import cast, get_origin, get_type_hints
 
 import pytest
+from PIL import Image
 
 from seedream_mcp.definitions.conventions import LAYER_DECOMPOSITION_MAX_IMAGES
 from seedream_mcp.utils.model.capabilities import (
@@ -20,9 +23,12 @@ from seedream_mcp.utils.model.capabilities import (
     MODEL_FAMILY_50_LITE,
     MODEL_FAMILY_50_PRO,
     MODEL_FAMILY_UNKNOWN,
+    SEEDREAM_1K_2K_MAX_SIZE_PIXELS,
+    SEEDREAM_4K_MAX_SIZE_PIXELS,
     ModelCapabilities,
     _resolve_model_family,
     get_model_capabilities,
+    max_single_image_bytes,
     model_payloads,
     preset_numeric_sort_key,
     supported_family_display_names,
@@ -159,10 +165,7 @@ def test_model_payloads_entries_match_alias_table() -> None:
 
     assert len(payloads) == len(MODEL_ALIASES)
     assert [entry["alias"] for entry in payloads] == list(MODEL_ALIASES)
-    # 绑定映射换出为既有 allowed_background_forms 呈现键，载荷维度不变。
-    expected_fields = (
-        set(ModelCapabilities.__dataclass_fields__) - {"background_forms_by_mode"}
-    ) | {"allowed_background_forms"}
+    expected_fields = set(ModelCapabilities.__dataclass_fields__)
     for entry in payloads:
         assert set(entry) == {"alias", "model_id"} | expected_fields, entry["alias"]
         assert entry["model_id"] == MODEL_ALIASES[cast(str, entry["alias"])]
@@ -181,17 +184,36 @@ def test_model_payloads_allowed_presets_are_sorted_lists() -> None:
     assert by_alias["doubao-seedream-4.5"]["allowed_presets"] == ["2K", "4K"]
 
 
+def test_model_payloads_background_forms_by_mode_are_sorted_lists() -> None:
+    """background_forms_by_mode 归一为字典，值为排序列表，能力表的 frozenset 形态不进入载荷。"""
+    payloads = model_payloads()
+
+    for entry in payloads:
+        forms_by_mode = entry["background_forms_by_mode"]
+        assert isinstance(forms_by_mode, dict), entry["alias"]
+        for forms in forms_by_mode.values():
+            assert isinstance(forms, list), entry["alias"]
+            assert forms == sorted(forms), entry["alias"]
+    by_alias = {entry["alias"]: entry for entry in payloads}
+    assert by_alias["doubao-seedream-5.0-pro"]["background_forms_by_mode"] == {
+        "opaque": ["multi", "single", "text"],
+        "transparent": ["single"],
+    }
+    assert by_alias["doubao-seedream-5.0"]["background_forms_by_mode"] == {}
+
+
 def test_model_payloads_capability_values_match_asdict() -> None:
-    """条目能力取值与 asdict 全等，三个集合字段归一为排序列表。"""
+    """条目能力取值与 asdict 全等，集合字段归一为排序列表，各取值的形态白名单同归一。"""
     for entry in model_payloads():
         caps = get_model_capabilities(cast(str, entry["model_id"]))
         expected = asdict(caps)
-        del expected["background_forms_by_mode"]
         expected["allowed_presets"] = sorted(
             expected["allowed_presets"], key=preset_numeric_sort_key
         )
         expected["allowed_background_modes"] = sorted(expected["allowed_background_modes"])
-        expected["allowed_background_forms"] = sorted(caps.allowed_background_forms)
+        expected["background_forms_by_mode"] = {
+            mode: sorted(forms) for mode, forms in caps.background_forms_by_mode.items()
+        }
         assert {key: entry[key] for key in expected} == expected, entry["alias"]
 
 
@@ -242,3 +264,53 @@ def test_capability_labels_map_unique_capability_fields() -> None:
     assert set(capabilities) <= bool_fields | set_fields | derived_fields
     payload_keys = [entry.payload_key for entry in CAPABILITY_LABELS]
     assert len(set(payload_keys)) == len(payload_keys)
+
+
+# ==================== 单图最坏字节数 ====================
+
+
+def test_max_single_image_bytes_follows_family_pixels_with_margin() -> None:
+    """单图最坏字节数为家族像素上限乘 4 字节再加 1/16 余量，未识别家族回退已知最大像素。"""
+    two_k_raw = SEEDREAM_1K_2K_MAX_SIZE_PIXELS * 4
+    four_k_raw = SEEDREAM_4K_MAX_SIZE_PIXELS * 4
+    two_k_family = ("doubao-seedream-5.5", "doubao-seedream-5.0-pro", "doubao-seedream-5.0-flash")
+    four_k_family = (
+        "doubao-seedream-5.0",
+        "doubao-seedream-4.5",
+        "doubao-seedream-4.0",
+        "ep-2024xxxxxxxx-xxxxx",
+    )
+    for model_id in two_k_family:
+        assert max_single_image_bytes(model_id) == two_k_raw + two_k_raw // 16, model_id
+    for model_id in four_k_family:
+        assert max_single_image_bytes(model_id) == four_k_raw + four_k_raw // 16, model_id
+
+
+@pytest.mark.parametrize(
+    ("model_id", "side"),
+    [
+        pytest.param("doubao-seedream-5.5", 2150, id="2k-family"),
+        pytest.param("doubao-seedream-4.0", 4096, marks=pytest.mark.slow, id="4k-family"),
+    ],
+)
+@pytest.mark.parametrize("compress_level", [1, 6])
+def test_max_single_image_bytes_covers_incompressible_png(
+    model_id: str, side: int, compress_level: int
+) -> None:
+    """家族最大像素数的不可压缩 RGBA 图编码为 PNG 后不超过单图最坏字节数。
+
+    像素乘 4 不是严格上界，余量须覆盖逐行滤波字节、分块头与 deflate 膨胀。
+    随机噪声不可压缩，deflate 取存储块或静态 Huffman 块，后者膨胀约 5.5%，
+    低压缩级别下也会出现，故两个级别都取。
+    边长取不超过家族像素上限的最大正方形。
+    """
+    max_pixels = get_model_capabilities(model_id).max_size_pixels
+    assert max_pixels is not None
+    assert side * side <= max_pixels < (side + 1) * (side + 1)
+    image = Image.frombytes("RGBA", (side, side), os.urandom(side * side * 4))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", compress_level=compress_level)
+
+    png_bytes = len(buffer.getvalue())
+    assert png_bytes > side * side * 4
+    assert png_bytes <= max_single_image_bytes(model_id)
