@@ -112,7 +112,7 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 
 The service listens on container port `8000` via the streamable-http transport and serves the MCP endpoint at `/mcp`; `SEEDREAM_HTTP_PORT` controls the host-side mapping, defaulting to 8000. The mapping binds to the loopback address `127.0.0.1` by default; for direct connections from other machines, change it in docker-compose.yml to `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` or a specific host interface address. Once the mapping becomes `0.0.0.0`, the service is exposed to the network and `SEEDREAM_HTTP_AUTH_TOKEN` travels over plaintext HTTP; the deployment must then sit behind a TLS reverse proxy, or receive TLS certificate arguments in the container via `SEEDREAM_EXTRA_CLI_ARGS`. Never expose the service without TLS.
 
-The terminal-user identifier is derived from the machine name by default and drifts whenever the container is recreated; set `SEEDREAM_SAFETY_IDENTIFIER` in `.env` to pin it (see `.env.example`).
+The terminal-user identifier is derived from the machine name and username by default and drifts whenever the container is recreated; set `SEEDREAM_SAFETY_IDENTIFIER` in `.env` to pin it (see `.env.example`).
 
 Client configuration below uses Claude Desktop as the example; other streamable-http clients are analogous:
 
@@ -491,7 +491,7 @@ Query a capability snapshot of the currently configured model to check parameter
 - `model_id` - Currently configured model ID
 - `display_name` - Family display name; `null` when the family is unrecognized
 - `aliases` - All available aliases of the current model
-- `family` - Model family; `unknown` for unrecognized models, whose capabilities fall back to allow-all
+- `family` - Model family; `unknown` for unrecognized models, whose generation-parameter capabilities fall back to allow-all
 - `capabilities` - Optimize prompt modes, reference image limit, layer decomposition, layer decomposition config and rich-text OCR, transparent background, transparency modes, size presets and pixel range, and support status of `output_format`, `stream`, `web_search`, `sequential_generation`, `safety_identifier`
 
 **Call examples:**

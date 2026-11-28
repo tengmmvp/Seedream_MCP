@@ -112,7 +112,7 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 
 服务以 streamable-http 传输监听容器内 `8000` 端口，MCP 端点路径为 `/mcp`；宿主机映射端口由 `SEEDREAM_HTTP_PORT` 控制，默认 8000。端口映射默认仅绑定回环地址 `127.0.0.1`，需从其他设备直连时，把 docker-compose.yml 改为 `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` 或指定宿主机网卡地址。映射一旦改为 `0.0.0.0`，服务即暴露给网络，`SEEDREAM_HTTP_AUTH_TOKEN` 会以明文 HTTP 在网络上传输；此时必须将服务置于 TLS 反向代理之后，或经 `SEEDREAM_EXTRA_CLI_ARGS` 向容器提供 TLS 证书参数，无 TLS 禁止对外暴露。
 
-终端用户标识默认按机器名派生，容器部署下会随容器重建漂移；需要固定标识时在 `.env` 中设置 `SEEDREAM_SAFETY_IDENTIFIER`（见 `.env.example`）。
+终端用户标识默认按机器名与用户名派生，容器部署下会随容器重建漂移；需要固定标识时在 `.env` 中设置 `SEEDREAM_SAFETY_IDENTIFIER`（见 `.env.example`）。
 
 客户端接入配置以 Claude Desktop 为例，其他支持 streamable-http 的客户端同理：
 
@@ -491,7 +491,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 - `model_id` - 当前配置的模型 ID
 - `display_name` - 家族展示名，未识别家族时为 null
 - `aliases` - 当前模型的全部可用别名
-- `family` - 模型家族；未识别的模型为 `unknown`，能力按全放行兜底
+- `family` - 模型家族；未识别的模型为 `unknown`，生成参数能力按全放行兜底
 - `capabilities` - 提示词优化档位、参考图上限、图层拆分、图层拆分配置与富文本 OCR、透明背景、透明通道取值、尺寸档位与像素区间，以及 `output_format`、`stream`、`web_search`、`sequential_generation`、`safety_identifier` 各项支持情况
 
 **调用示例：**
