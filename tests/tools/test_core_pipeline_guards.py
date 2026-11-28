@@ -274,7 +274,9 @@ async def test_sse_request_level_error_event_not_retried(no_sleep: None) -> None
     client = await _client_with_mock_transport(_handler)
     try:
         with pytest.raises(SeedreamAPIError) as excinfo:
-            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+            await client._call_api(
+                "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+            )
     finally:
         await client.close()
 
@@ -294,7 +296,7 @@ async def test_http_400_api_error_not_retried(no_sleep: None) -> None:
     client = await _client_with_mock_transport(_handler)
     try:
         with pytest.raises(SeedreamAPIError) as excinfo:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
     finally:
         await client.close()
 

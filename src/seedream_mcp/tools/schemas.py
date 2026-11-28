@@ -19,17 +19,21 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 
 from ..definitions.conventions import (
-    DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES,
+    IMAGE_TO_IMAGE_TOOL_NAME,
+    LAYER_DECOMPOSE_TOOL_NAME,
     LAYER_DECOMPOSITION_MAX_IMAGES,
     LAYER_DECOMPOSITION_MIN_IMAGES,
     MAX_IMAGES_MIN,
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
+    MULTI_IMAGE_FUSION_TOOL_NAME,
+    SEQUENTIAL_GENERATION_TOOL_NAME,
 )
 from ..utils.core.errors import (
     ErrorText,
@@ -43,6 +47,7 @@ from ..utils.images.validation import MAX_IMAGE_FILE_SIZE
 from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
     get_model_capabilities,
+    layer_decomposition_image_count,
     layer_decomposition_presets_text,
 )
 from ..utils.core.validators import (
@@ -130,23 +135,33 @@ LAYER_DECOMPOSE_PROMPT_DESCRIPTION = (
 OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION = (
     "提示词优化配置，仅支持 standard 或 fast，fast 需当前模型支持。"
 )
-SINGLE_IMAGE_DESCRIPTION = (
-    "参考图片，支持图像 URL、本地文件路径或 Base64 图片数据。"
-    "本地文件路径须在读取范围内，越界会被拒绝。"
-    "其中相对路径仅限图片保存目录内。"
-    "例如：https://example.com/a.png 或 2026-08-15/image_to_image/b.jpeg。"
+
+# 本地路径读取规则，参考图与浏览目录的字段描述共用。
+_LOCAL_PATH_READ_RULE = "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
+
+
+def _image_description(head: str, tool_name: str) -> str:
+    """拼出参考图字段描述，示例路径落在该工具的保存子目录。"""
+    return (
+        f"{head}{_LOCAL_PATH_READ_RULE}"
+        f"例如：https://example.com/a.png 或 2026-08-15/{tool_name}/b.jpeg。"
+    )
+
+
+_SINGLE_IMAGE_HEAD = "参考图片，支持图像 URL、本地文件路径或 Base64 图片数据。"
+SINGLE_IMAGE_DESCRIPTION = _image_description(_SINGLE_IMAGE_HEAD, IMAGE_TO_IMAGE_TOOL_NAME)
+LAYER_DECOMPOSE_IMAGE_DESCRIPTION = _image_description(
+    _SINGLE_IMAGE_HEAD, LAYER_DECOMPOSE_TOOL_NAME
 )
-MULTI_IMAGE_DESCRIPTION = (
+MULTI_IMAGE_DESCRIPTION = _image_description(
     f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张，部分模型上限更低；"
-    "每张支持图像 URL、本地文件路径或 Base64 图片数据。"
-    "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
-    "例如：https://example.com/a.png 或 2026-08-15/multi_image_fusion/b.jpeg。"
+    "每张支持图像 URL、本地文件路径或 Base64 图片数据。",
+    MULTI_IMAGE_FUSION_TOOL_NAME,
 )
-SEQUENTIAL_IMAGE_DESCRIPTION = (
+SEQUENTIAL_IMAGE_DESCRIPTION = _image_description(
     f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张；"
-    "每张支持图像 URL、本地文件路径或 Base64 图片数据。"
-    "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
-    "例如：https://example.com/a.png 或 2026-08-15/sequential_generation/b.jpeg。"
+    "每张支持图像 URL、本地文件路径或 Base64 图片数据。",
+    SEQUENTIAL_GENERATION_TOOL_NAME,
 )
 # 组图与图层拆分的规则文本：容器字段描述与嵌套字段描述同源引用，约束调整单点维护。
 _MAX_IMAGES_RULE = (
@@ -205,9 +220,7 @@ CUSTOM_NAME_DESCRIPTION = "自定义文件名前缀，未提供时根据提示�
 # 浏览工具字段的描述。
 DIRECTORY_DESCRIPTION = (
     "要浏览的目录路径，默认浏览图片保存目录。"
-    "本地文件路径须在读取范围内，越界会被拒绝。"
-    "其中相对路径仅限图片保存目录内。"
-    "返回的条目为本地文件路径，可直接填入参考图参数。"
+    f"{_LOCAL_PATH_READ_RULE}返回的条目为本地文件路径，可直接填入参考图参数。"
 )
 RECURSIVE_DESCRIPTION = "是否递归查找子目录。"
 MAX_DEPTH_DESCRIPTION = "递归查找的最大深度（1-10）。"
@@ -306,16 +319,18 @@ class GenerationTool(BaseModel):
     normalize_type = _enum_normalizer(_GENERATION_TOOL_TYPE_ALLOWED, "type")
 
 
-def _reject_bool_max_images(value: object) -> object:
-    """max_images 拒绝布尔的 before-validator：布尔是 int 子类，pydantic 宽松模式会静默强转（True→1）。"""
+def _reject_bool_integer(value: object, info: ValidationInfo) -> object:
+    """整数字段拒绝布尔的 before-validator：布尔是 int 子类，pydantic 宽松模式会静默强转为整数。"""
 
     if isinstance(value, bool):
-        raise ValueError(raw_error_text(INTEGER_REQUIRED_TEMPLATE, field=as_plain("max_images")))
+        raise ValueError(raw_error_text(INTEGER_REQUIRED_TEMPLATE, field=as_plain(info.field_name)))
     return value
 
 
-# 两处同名 max_images 字段共享的值类型声明。
-_MaxImagesValue = Annotated[int | None, BeforeValidator(_reject_bool_max_images)]
+# 整数字段的类型别名，输入模型与平铺签名共用。
+# 可空形态整体包裹联合类型，校验器落在联合成员内会使 Field 约束以 ge/le 原名进入 JSON schema。
+IntegerType = Annotated[int, BeforeValidator(_reject_bool_integer)]
+NullableIntegerType = Annotated[int | None, BeforeValidator(_reject_bool_integer)]
 
 
 class SequentialImageGenerationOptions(BaseModel):
@@ -326,7 +341,7 @@ class SequentialImageGenerationOptions(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_images: _MaxImagesValue = Field(
+    max_images: NullableIntegerType = Field(
         default=None,
         ge=MAX_IMAGES_MIN,
         le=MAX_SEQUENTIAL_TOTAL_IMAGES,
@@ -342,7 +357,7 @@ class LayerDecompositionOptions(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_images: _MaxImagesValue = Field(
+    max_images: NullableIntegerType = Field(
         default=None,
         ge=LAYER_DECOMPOSITION_MIN_IMAGES,
         le=LAYER_DECOMPOSITION_MAX_IMAGES,
@@ -612,13 +627,13 @@ class _ResponseAndExecutionInput(BaseModel):
         default=False,
         description=STREAM_DESCRIPTION,
     )
-    request_count: int = Field(
+    request_count: IntegerType = Field(
         default=1,
         ge=REQUEST_COUNT_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
         description=REQUEST_COUNT_DESCRIPTION,
     )
-    parallelism: int | None = Field(
+    parallelism: NullableIntegerType = Field(
         default=None,
         ge=PARALLELISM_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
@@ -691,31 +706,25 @@ class BaseGenerationInput(BaseModel):
     def per_request_image_count(
         cls,
         *,
-        max_images: int | None,
         image_count: int,
+        max_images: int | None,
         model_id: str,
         layer_max_images: int | None = None,
     ) -> int:
         """单请求产图数：按场景定义 option mixin 的组合单点派生产图形态，子类不覆写。
 
-        入参为请求体字段的投影值，供不经模型实例化的调用方消费；核心投影键
-        均必传，漏接调用点即刻 TypeError 而非静默按缺省档低估，layer_max_images
-        为可选投影。
-        派发随 option mixin：混入 _LayerOptionsInput 者按模型能力与显式配置取值
-        （支持拆分配置的模型显式给定 layer_max_images 时取该值，缺省取官方默认；
-        其余家族取能力表值，不支持拆分者为 0），
-        混入 _SequentialOptionsInput 者先能力门控（不支持家族产 0，与拆分投影
-        对称，调用点免做外层判断）再与 effective_max_images 共用同一推导函数，
+        入参为请求体字段的投影值，供不经模型实例化的调用方消费。
+        核心投影键均必传，漏接调用点即刻 TypeError 而非静默按缺省档低估，
+        layer_max_images 为可选投影。
+        派发随 option mixin：混入 _LayerOptionsInput 者
+        经 layer_decomposition_image_count 单点投影（显式值 → 官方默认 → 能力表满额，不支持拆分者为 0），
+        混入 _SequentialOptionsInput 者先能力门控（不支持家族产 0，与拆分投影对称，
+        调用点免做外层判断）再与 effective_max_images 共用同一推导函数，
         未混入者恒产一图。
         产图数值与流水线真实形态的逐值对账由 webapp parity 守护锁定。
         """
         if issubclass(cls, _LayerOptionsInput):
-            caps = get_model_capabilities(model_id)
-            if caps.supports_layer_decomposition_options:
-                if layer_max_images is not None:
-                    return layer_max_images
-                return DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
-            return caps.max_layer_decomposition_images
+            return layer_decomposition_image_count(layer_max_images, model_id)
         if issubclass(cls, _SequentialOptionsInput):
             if not get_model_capabilities(model_id).supports_sequential_generation:
                 return 0
@@ -733,20 +742,20 @@ class BaseGenerationInput(BaseModel):
         """
         if issubclass(cls, _LayerOptionsInput):
             return cls.per_request_image_count(
-                max_images=None,
                 image_count=0,
+                max_images=None,
                 model_id=model_id,
                 layer_max_images=LAYER_DECOMPOSITION_MAX_IMAGES,
             )
         if issubclass(cls, _SequentialOptionsInput):
             return cls.per_request_image_count(
-                max_images=MAX_SEQUENTIAL_TOTAL_IMAGES,
                 image_count=0,
+                max_images=MAX_SEQUENTIAL_TOTAL_IMAGES,
                 model_id=model_id,
             )
         return cls.per_request_image_count(
-            max_images=None,
             image_count=0,
+            max_images=None,
             model_id=model_id,
         )
 
@@ -846,7 +855,7 @@ class SequentialGenerationInput(
 
     # 覆盖共享基类的 request_count 描述：单次请求产出一组图片而非单张，共享描述的
     # 「每次各产出一张图」在本工具不成立；覆盖声明不改变字段顺序。
-    request_count: int = Field(
+    request_count: IntegerType = Field(
         default=1,
         ge=REQUEST_COUNT_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
@@ -900,6 +909,12 @@ class LayerDecomposeInput(
         description=LAYER_DECOMPOSE_PROMPT_DESCRIPTION,
     )
 
+    # 覆盖共享基类的 image 描述以给出图层结果的保存子目录，覆盖声明不改变字段顺序。
+    image: str = Field(
+        ...,
+        description=LAYER_DECOMPOSE_IMAGE_DESCRIPTION,
+    )
+
     # 覆盖共享基类的 size 描述以表达档位与 auto 语义，覆盖声明不改变字段顺序。
     size: str | None = Field(
         default=None,
@@ -908,7 +923,7 @@ class LayerDecomposeInput(
 
     # 覆盖共享基类的 request_count 描述：单次请求产出一组「底图与图层」而非单张，
     # 共享描述的「每次各产出一张图」在本工具不成立；覆盖声明不改变字段顺序。
-    request_count: int = Field(
+    request_count: IntegerType = Field(
         default=1,
         ge=REQUEST_COUNT_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
@@ -961,19 +976,19 @@ class BrowseImagesInput(BaseModel):
         default=DEFAULT_RECURSIVE,
         description=RECURSIVE_DESCRIPTION,
     )
-    max_depth: int = Field(
+    max_depth: IntegerType = Field(
         default=DEFAULT_MAX_DEPTH,
         ge=MAX_DEPTH_MIN,
         le=MAX_DEPTH_MAX,
         description=MAX_DEPTH_DESCRIPTION,
     )
-    limit: int = Field(
+    limit: IntegerType = Field(
         default=DEFAULT_LIMIT,
         ge=LIMIT_MIN,
         le=LIMIT_MAX,
         description=LIMIT_DESCRIPTION,
     )
-    offset: int = Field(
+    offset: IntegerType = Field(
         default=DEFAULT_OFFSET,
         ge=OFFSET_MIN,
         le=OFFSET_MAX,

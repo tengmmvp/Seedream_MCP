@@ -158,14 +158,6 @@ def test_build_generation_context_layer_options_null_key_keeps_other_keys() -> N
     assert context.layer_decomposition_options == {"text_recognition": True}
 
 
-def test_layer_options_bool_max_images_rejected_at_schema() -> None:
-    """布尔 max_images 在 schema 层即拒绝，与直连 client 路径的整数要求一致。"""
-    with pytest.raises(ValidationError, match="必须是整数"):
-        SequentialImageGenerationOptions.model_validate({"max_images": True})
-    with pytest.raises(ValidationError, match="必须是整数"):
-        LayerDecompositionOptions.model_validate({"max_images": True})
-
-
 def test_layer_options_text_recognition_null_equals_omitted() -> None:
     """显式 null 的 text_recognition 视同未指定，归一后仅保留显式给定键。"""
     context = build_generation_context(

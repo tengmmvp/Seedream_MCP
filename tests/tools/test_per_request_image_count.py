@@ -40,7 +40,7 @@ from seedream_mcp.utils.model.capabilities import (
     SEEDREAM_LEGACY_LAYER_DECOMPOSITION_MAX_IMAGES,
 )
 
-_REQUIRED_PROJECTION_KEYS = ("max_images", "image_count", "model_id")
+_REQUIRED_PROJECTION_KEYS = ("image_count", "max_images", "model_id")
 # 缺省时取官方默认。
 _OPTIONAL_PROJECTION_KEYS = ("layer_max_images",)
 
@@ -98,19 +98,19 @@ def test_per_request_image_count_capability_gates_symmetric() -> None:
     """组图与拆分投影均自门控：不支持家族产 0，webapp 调用点免做外层能力判断。"""
     assert (
         SequentialGenerationInput.per_request_image_count(
-            max_images=None, image_count=0, model_id="doubao-seedream-5-5-261028"
+            image_count=0, max_images=None, model_id="doubao-seedream-5-5-261028"
         )
         == 0
     ), "5.5 家族不支持组图，组图投影应自门控归零"
     assert (
         LayerDecomposeInput.per_request_image_count(
-            max_images=None, image_count=0, model_id="doubao-seedream-5-0-260128"
+            image_count=0, max_images=None, model_id="doubao-seedream-5-0-260128"
         )
         == 0
     ), "5.0 家族不支持拆分，拆分投影应自门控归零"
     assert (
         SequentialGenerationInput.per_request_image_count(
-            max_images=None, image_count=0, model_id="doubao-seedream-5-0-260128"
+            image_count=0, max_images=None, model_id="doubao-seedream-5-0-260128"
         )
         == 15
     ), "支持组图的家族缺省投影应为无参考图推导值"
@@ -160,15 +160,15 @@ def test_worst_case_projection_dominates_projection_domain(model_id: str) -> Non
         worst = model.worst_case_projection(model_id=model_id)
         for layer_max_images in _LAYER_MAX_IMAGES_DOMAIN:
             assert worst >= model.per_request_image_count(
-                max_images=None,
                 image_count=0,
+                max_images=None,
                 model_id=model_id,
                 layer_max_images=layer_max_images,
             ), f"{model.__name__} layer_max_images={layer_max_images}: 最坏投影欠计"
         for max_images in _SEQUENTIAL_MAX_IMAGES_DOMAIN:
             for image_count in range(SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES + 1):
                 assert worst >= model.per_request_image_count(
-                    max_images=max_images,
                     image_count=image_count,
+                    max_images=max_images,
                     model_id=model_id,
                 ), f"{model.__name__} max_images={max_images} image_count={image_count}: 最坏投影欠计"

@@ -42,7 +42,7 @@ _CAPS_FIELD_TO_PAYLOAD_KEYS = {
 # 供拆分预算推导与图层数上限文案取值、不进能力快照的能力表字段。
 _NON_SNAPSHOT_CAPS_FIELDS = frozenset({"max_layer_decomposition_images"})
 
-# 能力开关字段全集，未识别模型的全放行兜底断言遍历此集；safety_identifier 因
+# 能力开关字段全集，未知模型的全放行兜底断言遍历此集；safety_identifier 因
 # 服务器主动附加而从紧，是该兜底的唯一例外。
 _CAPABILITY_SWITCH_KEYS = (
     "output_format",
@@ -176,7 +176,7 @@ def test_payload_for_pro_model() -> None:
 
 
 def test_payload_for_unrecognized_model_falls_back_to_allow_all() -> None:
-    """未识别模型的快照声明兜底语义：family 为 unknown、display_name 缺省、全放行。"""
+    """未知模型的快照声明兜底语义：family 为 unknown、display_name 缺省，生成参数能力全放行、终端用户标识例外。"""
     payload = build_model_info_payload(SeedreamConfig(api_key="k", model_id="ep-20260101-test"))
 
     assert payload["family"] == "unknown"
@@ -192,7 +192,7 @@ def test_payload_for_unrecognized_model_falls_back_to_allow_all() -> None:
 
 
 def test_text_summary_renders_capability_lines() -> None:
-    """文本摘要含模型标识、档位、像素区间与支持/不支持两行。"""
+    """文本摘要含模型标识、档位、透明通道取值、像素区间与支持/不支持两行。"""
     payload = build_model_info_payload(SeedreamConfig(api_key="k"))
     text = build_model_info_text(payload)
 
@@ -201,6 +201,8 @@ def test_text_summary_renders_capability_lines() -> None:
     assert "尺寸档位：1K/1.5K/2K；像素总量 921600-4624220" in text
     assert "参考图上限：10 张" in text
     assert "提示词优化：standard" in text
+    assert "透明通道取值：auto/opaque/transparent" in text
+    assert text.index("参考图上限：") < text.index("透明通道取值：") < text.index("尺寸档位：")
     assert (
         "支持：图层拆分（layer_decomposition）、"
         "图层拆分配置与富文本 OCR（layer_decomposition_options）、"
@@ -213,12 +215,63 @@ def test_text_summary_renders_capability_lines() -> None:
     )
 
 
+# 取值段标签到摘要行首的映射，行首是渲染处的手写文案，不能自标签派生。
+_VALUE_LABEL_TO_SUMMARY_LINE_PREFIX = {
+    "提示词优化档位": "提示词优化：",
+    "参考图上限": "参考图上限：",
+    "透明通道取值": "透明通道取值：",
+    "尺寸档位与像素区间": "尺寸档位：",
+}
+
+
+def test_text_summary_renders_every_value_field_label() -> None:
+    """取值段每个标签在文本摘要中都有对应行，新增标签漏渲染即摘要静默缺行。"""
+    payload = build_model_info_payload(SeedreamConfig(api_key="k"))
+    lines = build_model_info_text(payload).splitlines()
+
+    labels = {label for label, _ in _VALUE_FIELD_LABELS}
+    assert set(_VALUE_LABEL_TO_SUMMARY_LINE_PREFIX) == labels
+    for label, line_prefix in _VALUE_LABEL_TO_SUMMARY_LINE_PREFIX.items():
+        assert any(line.startswith(line_prefix) for line in lines), label
+
+
+def test_text_summary_renders_partial_background_modes() -> None:
+    """5.0 Pro 的摘要只列出其实际支持的透明通道取值，auto 不在其中。"""
+    payload = build_model_info_payload(
+        SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0-pro")
+    )
+
+    text = build_model_info_text(payload)
+
+    assert "透明通道取值：opaque/transparent" in text
+
+
+def test_text_summary_declares_absent_background_modes() -> None:
+    """doubao-seedream-5.0 所属的 5.0 Lite 家族不支持透明通道。
+
+    摘要取值行如实显示无，不支持行列出透明背景。
+    """
+    payload = build_model_info_payload(SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0"))
+
+    caps = payload["capabilities"]
+    assert caps["transparent_background"] is False
+    assert caps["background_modes"] == []
+    text = build_model_info_text(payload)
+    assert "透明通道取值：无" in text
+    assert (
+        "不支持：图层拆分（layer_decomposition）、"
+        "图层拆分配置与富文本 OCR（layer_decomposition_options）、"
+        "透明背景（background）、透明通道全形态（background）、"
+        "终端用户标识（safety_identifier）"
+    ) in text
+
+
 def test_text_summary_for_unrecognized_model_declares_fallback() -> None:
-    """未识别模型的文本摘要声明全放行兜底，仅主动附加的终端用户标识例外。"""
+    """未知模型的文本摘要首行声明生成参数能力全放行兜底，终端用户标识列入不支持。"""
     payload = build_model_info_payload(SeedreamConfig(api_key="k", model_id="ep-20260101-test"))
     text = build_model_info_text(payload)
 
-    assert "当前模型：ep-20260101-test（未识别家族，能力按全放行兜底）" in text
+    assert "当前模型：ep-20260101-test（未识别家族，生成参数能力按全放行兜底）" in text
     assert "不支持：终端用户标识（safety_identifier）" in text
 
 
@@ -287,7 +340,8 @@ _MODEL_INFO_DESCRIPTION_LOCKED = (
     "透明背景（background）、透明通道全形态（background）、输出格式（output_format）、流式输出（stream）、"
     "联网搜索（tools）、组图生成（sequential_generation）、"
     "终端用户标识（safety_identifier）的支持情况。\n"
-    "生成工具的模型相关参数是否可用以本工具结果为准；不支持时生成工具会报错并附支持该能力的模型清单。\n"
+    "生成工具的模型相关参数是否可用以本工具结果为准。不支持时生成工具会报错并附支持该能力的模型清单。"
+    "终端用户标识由服务器自动附加，不支持时不附加。\n"
     "模型由服务器配置决定，更换模型请告知用户调整服务器配置。"
 )
 

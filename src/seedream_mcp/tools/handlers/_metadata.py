@@ -1,10 +1,10 @@
 """生成类工具 handlers 共享的工具元数据常量与开始日志参数构造。
 
 五个生成 handler 传给 ``execute_generation_handler`` 的元数据高度同构，
-收敛为不可变的 ``ToolMetadata`` 常量；
+收敛为不可变的 ``ToolMetadata`` 常量。
 数据类定义于 pipeline 域，依赖方向保持 pipeline <- handlers。
 工具名常量定义于 definitions/conventions，Web 装配同源引用。
-组图输出的开始日志须携带运行时 max_images，经独立回调从执行上下文读取。
+组图输出与图层拆分的开始日志须携带各自的配置取值，经独立回调从执行上下文读取。
 """
 
 from __future__ import annotations
@@ -44,6 +44,22 @@ def _sequential_start_log_values(
     return (
         len(context.prompt or ""),
         (context.sequential_image_generation_options or {}).get("max_images"),
+        context.size,
+        context.stream,
+        context.request_count,
+        context.parallelism,
+    )
+
+
+def _layer_decompose_start_log_values(
+    context: "GenerationExecutionContext",
+) -> tuple[Any, ...]:
+    """构造图层拆分开始日志参数元组，携带显式给定的 max_images 与 text_recognition。"""
+    layer_options = context.layer_decomposition_options or {}
+    return (
+        len(context.prompt or ""),
+        layer_options.get("max_images"),
+        layer_options.get("text_recognition"),
         context.size,
         context.stream,
         context.request_count,
@@ -97,7 +113,8 @@ LAYER_DECOMPOSE = ToolMetadata(
     completion_title="图层拆分任务完成",
     failure_prefix="图层拆分",
     start_log_message=(
-        "图层拆分开始: prompt_len={}, size={}, stream={}, request_count={}, parallelism={}"
+        "图层拆分开始: prompt_len={}, max_images={}, text_recognition={}, size={}, "
+        "stream={}, request_count={}, parallelism={}"
     ),
-    start_log_values_builder=_default_start_log_values,
+    start_log_values_builder=_layer_decompose_start_log_values,
 )

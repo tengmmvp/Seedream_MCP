@@ -98,7 +98,8 @@ def build_model_info_description() -> str:
         "\n"
         f"返回当前模型 ID、别名与能力字段：{value_fields}，\n"
         f"以及{capabilities}的支持情况。\n"
-        "生成工具的模型相关参数是否可用以本工具结果为准；不支持时生成工具会报错并附支持该能力的模型清单。\n"
+        "生成工具的模型相关参数是否可用以本工具结果为准。不支持时生成工具会报错并附支持该能力的模型清单。"
+        "终端用户标识由服务器自动附加，不支持时不附加。\n"
         "模型由服务器配置决定，更换模型请告知用户调整服务器配置。"
     )
 
@@ -107,13 +108,15 @@ def build_model_info_text(payload: dict[str, Any]) -> str:
     """将能力快照渲染为模型可读的中文摘要。"""
     caps: dict[str, Any] = payload["capabilities"]
     if payload["family"] == MODEL_FAMILY_UNKNOWN:
-        lines = [f"当前模型：{payload['model_id']}（未识别家族，能力按全放行兜底）"]
+        lines = [f"当前模型：{payload['model_id']}（未识别家族，生成参数能力按全放行兜底）"]
     else:
         lines = [f"当前模型：{payload['display_name']}（{payload['model_id']}）"]
     if payload["aliases"]:
         lines.append(f"别名：{'、'.join(payload['aliases'])}")
     lines.append(f"提示词优化：{'、'.join(caps['optimize_prompt_modes'])}")
     lines.append(f"参考图上限：{caps['max_reference_images']} 张")
+    background_modes = "/".join(caps["background_modes"]) or "无"
+    lines.append(f"透明通道取值：{background_modes}")
     lines.append(f"尺寸档位：{'/'.join(caps['size_presets'])}；像素总量 {_pixel_range_text(caps)}")
     supported = [entry.label for entry in CAPABILITY_LABELS if caps[entry.payload_key]]
     unsupported = [entry.label for entry in CAPABILITY_LABELS if not caps[entry.payload_key]]

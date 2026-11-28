@@ -5,6 +5,7 @@
 一侧改动未同步即失败。另锁定封闭性：顶层 additionalProperties 为 false、拼错
 参数在运行时被 ToolError 拒绝。等价性延伸到描述维度：逐字段 description 非空
 且镜像模型字段描述，嵌套 $defs 全等，描述文案的数值区间与默认值同实际约束一致。
+校验器不进入 schema，整数字段拒绝布尔与参考图计数界在两侧各自独立锁定。
 """
 
 from __future__ import annotations
@@ -22,6 +23,11 @@ from pydantic.fields import FieldInfo
 from _lib.generation_payloads import GENERATION_BASE_PAYLOADS
 from _lib.no_param_tools import NO_PARAM_TOOLS
 
+from seedream_mcp.definitions.conventions import (
+    MAX_IMAGES_MIN,
+    MAX_PARALLEL_REQUEST_COUNT,
+    MAX_SEQUENTIAL_TOTAL_IMAGES,
+)
 from seedream_mcp.server._registration import (
     _MULTI_IMAGE_FLAT_TYPE,
     _SEQUENTIAL_IMAGE_FLAT_TYPE,
@@ -33,14 +39,17 @@ from seedream_mcp.tools.schemas import (
     FORMAT_FILTER_ITEM_MAX_LENGTH,
     ImageToImageInput,
     LayerDecomposeInput,
+    LayerDecompositionOptions,
     _MULTI_IMAGE_MODEL_TYPE,
     MULTI_IMAGE_MIN_ITEMS,
     MultiImageFusionInput,
     OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
     OUTPUT_FORMAT_DESCRIPTION,
     _SEQUENTIAL_IMAGE_MODEL_TYPE,
+    PARALLELISM_MIN,
     SEQUENTIAL_IMAGE_MIN_ITEMS,
     SequentialGenerationInput,
+    SequentialImageGenerationOptions,
     SIZE_DESCRIPTION,
     SIZE_WITH_AUTO_DESCRIPTION,
     STREAM_DESCRIPTION,
@@ -461,6 +470,38 @@ def test_flat_schema_description_tokens_match_model_constraints() -> None:
             )
 
 
+# 本地路径读取规则的文案，参考图与浏览目录的字段描述逐字同源。
+_LOCAL_PATH_READ_RULE_TEXT = (
+    "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
+)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "field"),
+    [
+        ("image_to_image", "image"),
+        ("layer_decompose", "image"),
+        ("multi_image_fusion", "image"),
+        ("sequential_generation", "image"),
+        ("browse_images", "directory"),
+    ],
+)
+async def test_local_path_descriptions_share_rule_and_tool_save_subfolder(
+    tool_name: str, field: str
+) -> None:
+    """参考图与浏览目录的描述逐字携带本地路径读取规则。
+
+    参考图描述的示例路径落在该工具的保存子目录。
+    """
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+    description = by_name[tool_name].input_schema["properties"][field]["description"]
+
+    assert _LOCAL_PATH_READ_RULE_TEXT in description, (tool_name, field)
+    if field == "image":
+        assert f"2026-08-15/{tool_name}/b.jpeg" in description, tool_name
+
+
 # ==================== 平铺 inputSchema 封闭性 ====================
 
 
@@ -668,6 +709,134 @@ async def test_image_count_validator_shared_by_flat_signature_and_model(
                 count_validator([f"img{i}" for i in range(count)])
 
 
+# ==================== 整数字段拒绝布尔 ====================
+
+# 多图融合的合法载荷，两张参考图满足计数下限。
+_FUSION_BASE_ARGS = {
+    "prompt": "a cat",
+    "image": ["https://example.com/a.png", "https://example.com/b.png"],
+}
+# 顶层整数字段清单：(工具名, 输入模型, 其余必填字段的合法载荷, 字段)。
+# 新增整数字段须同步扩充，任一侧漏挂校验器即失败。
+_INTEGER_FIELDS = [
+    ("text_to_image", TextToImageInput, {"prompt": "a cat"}, "request_count"),
+    ("text_to_image", TextToImageInput, {"prompt": "a cat"}, "parallelism"),
+    (
+        "image_to_image",
+        ImageToImageInput,
+        {"prompt": "a cat", "image": "https://example.com/a.png"},
+        "request_count",
+    ),
+    (
+        "image_to_image",
+        ImageToImageInput,
+        {"prompt": "a cat", "image": "https://example.com/a.png"},
+        "parallelism",
+    ),
+    ("multi_image_fusion", MultiImageFusionInput, _FUSION_BASE_ARGS, "request_count"),
+    ("multi_image_fusion", MultiImageFusionInput, _FUSION_BASE_ARGS, "parallelism"),
+    ("sequential_generation", SequentialGenerationInput, {"prompt": "a cat"}, "request_count"),
+    ("sequential_generation", SequentialGenerationInput, {"prompt": "a cat"}, "parallelism"),
+    (
+        "layer_decompose",
+        LayerDecomposeInput,
+        {"image": "https://example.com/a.png"},
+        "request_count",
+    ),
+    ("layer_decompose", LayerDecomposeInput, {"image": "https://example.com/a.png"}, "parallelism"),
+    ("browse_images", BrowseImagesInput, {}, "max_depth"),
+    ("browse_images", BrowseImagesInput, {}, "limit"),
+    ("browse_images", BrowseImagesInput, {}, "offset"),
+]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "model_cls", "field"),
+    [(tool_name, model_cls, field) for tool_name, model_cls, _, field in _INTEGER_FIELDS],
+)
+def test_integer_field_bool_validator_mounted_once_on_flat_signature_and_model(
+    tool_name: str, model_cls: type[BaseModel], field: str
+) -> None:
+    """整数字段拒绝布尔的 before-validator 在平铺签名与输入模型两侧各恰挂载一个。
+
+    BeforeValidator 不进入 JSON schema，等价性镜像断言对其不可见。
+    挂载情况须直接检视两侧字段元数据才能发现。
+    """
+    tool = mcp._tool_manager.get_tool(tool_name)
+    assert tool is not None
+    for info in (tool.fn_metadata.arg_model.model_fields[field], model_cls.model_fields[field]):
+        mounted = [m for m in info.metadata if isinstance(m, BeforeValidator)]
+        assert len(mounted) == 1, (tool_name, field)
+
+
+@pytest.mark.parametrize("bool_value", [True, False])
+@pytest.mark.parametrize(("tool_name", "model_cls", "base_args", "field"), _INTEGER_FIELDS)
+async def test_integer_fields_reject_bool_on_flat_signature_and_model(
+    tool_name: str,
+    model_cls: type[BaseModel],
+    base_args: dict[str, Any],
+    field: str,
+    bool_value: bool,
+) -> None:
+    """整数字段在平铺签名与输入模型两侧均拒绝布尔，文案以字段名开头。"""
+    message = f"{field} 必须是整数"
+    with pytest.raises(ToolError, match=message):
+        await mcp.call_tool(tool_name, {**base_args, field: bool_value})
+    with pytest.raises(ValidationError, match=message):
+        model_cls.model_validate({**base_args, field: bool_value})
+
+
+@pytest.mark.parametrize("bool_value", [True, False])
+@pytest.mark.parametrize(
+    ("tool_name", "base_args", "options_field", "options_model"),
+    [
+        (
+            "sequential_generation",
+            {"prompt": "a cat"},
+            "sequential_image_generation_options",
+            SequentialImageGenerationOptions,
+        ),
+        (
+            "layer_decompose",
+            {"image": "https://example.com/a.png"},
+            "layer_decomposition_options",
+            LayerDecompositionOptions,
+        ),
+    ],
+)
+async def test_options_max_images_reject_bool_on_flat_signature_and_model(
+    tool_name: str,
+    base_args: dict[str, Any],
+    options_field: str,
+    options_model: type[BaseModel],
+    bool_value: bool,
+) -> None:
+    """嵌套配置的 max_images 在两侧均拒绝布尔，与直连 client 路径的整数要求一致。"""
+    with pytest.raises(ToolError, match="max_images 必须是整数"):
+        await mcp.call_tool(tool_name, {**base_args, options_field: {"max_images": bool_value}})
+    with pytest.raises(ValidationError, match="max_images 必须是整数"):
+        options_model.model_validate({"max_images": bool_value})
+
+
+async def test_nullable_integer_fields_publish_standard_bounds() -> None:
+    """可空整数字段的数值界以 minimum/maximum 发布，不因校验器挂载形态泄漏为 ge/le。"""
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+    flat_parallelism = by_name["text_to_image"].input_schema["properties"]["parallelism"]
+    model_parallelism = TextToImageInput.model_json_schema()["properties"]["parallelism"]
+    model_max_images = SequentialImageGenerationOptions.model_json_schema()["properties"][
+        "max_images"
+    ]
+    for prop, bounds in (
+        (flat_parallelism, (PARALLELISM_MIN, MAX_PARALLEL_REQUEST_COUNT)),
+        (model_parallelism, (PARALLELISM_MIN, MAX_PARALLEL_REQUEST_COUNT)),
+        (model_max_images, (MAX_IMAGES_MIN, MAX_SEQUENTIAL_TOTAL_IMAGES)),
+    ):
+        integer_branch = next(branch for branch in prop["anyOf"] if branch.get("type") == "integer")
+        assert (integer_branch["minimum"], integer_branch["maximum"]) == bounds
+        assert not {"ge", "le"} & integer_branch.keys()
+
+
 # ==================== 浏览后缀单项上限的 schema 层声明 ====================
 
 
@@ -735,7 +904,7 @@ _CAPABILITY_DESCRIPTION_SOURCES = {
 def test_capability_descriptions_use_static_hint_without_family_enumeration(
     capability: str,
 ) -> None:
-    """能力相关参数描述以静态提示声明模型门控，不枚举家族清单。
+    """能力相关参数描述以静态提示声明能力门控，不枚举家族清单。
 
     调用者无法行动于可变模型枚举，支持模型由 get_model_info 工具与校验报错提供。
     """

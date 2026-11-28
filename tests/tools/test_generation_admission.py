@@ -84,7 +84,9 @@ async def test_generation_admission_caps_inflight_api_requests(
     """_call_api 层的准入信号量约束同时在途的生成 API 请求数，超限排队。"""
     clients, stats = _instrumented_admission_clients(monkeypatch, 1)
 
-    await asyncio.gather(*(clients[0]._call_api("t2i", {"prompt": "p"}) for _ in range(6)))
+    await asyncio.gather(
+        *(clients[0]._call_api("t2i", {"prompt": "p"}, per_request_image_count=1) for _ in range(6))
+    )
 
     assert stats["peak"] == 2
 
@@ -96,7 +98,11 @@ async def test_generation_admission_shared_across_client_instances(
     clients, stats = _instrumented_admission_clients(monkeypatch, 2)
 
     await asyncio.gather(
-        *(client._call_api("t2i", {"prompt": "p"}) for client in clients for _ in range(3))
+        *(
+            client._call_api("t2i", {"prompt": "p"}, per_request_image_count=1)
+            for client in clients
+            for _ in range(3)
+        )
     )
 
     assert stats["peak"] == 2
