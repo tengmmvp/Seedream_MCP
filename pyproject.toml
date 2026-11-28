@@ -141,4 +141,4 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 # 挂起保护：超时 dump 线程栈定位卡点；300s 留足慢测余量，仅捕挂死。
 timeout = 300
-markers = ["slow: 真实端口与线程的端到端冒烟"]
+markers = ["slow: 真实端口与线程的端到端冒烟与耗时的大图编解码"]
