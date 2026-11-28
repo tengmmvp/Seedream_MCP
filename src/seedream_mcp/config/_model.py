@@ -64,6 +64,7 @@ from ..utils.io.path import reject_unc_declaration
 from ..utils.model.capabilities import (
     MODEL_ALIASES,
     DEPRECATED_MODEL_TOKENS,
+    max_single_image_bytes,
 )
 
 LIFESPAN_KEY_CONFIG = "config"
@@ -84,7 +85,15 @@ _AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS = 720
 _B64_WORST_CASE_NUMERATOR = 4
 # SSE 单事件阈值的信封余量：data: 前缀等开销。
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
-# response_body_limit 缺省时 url 响应格式的结构性读取上限：响应仅含 JSON 框架
+# b64_json 响应体投影的每图 JSON 信封余量，为有界字段集与无上界字段的近似档：
+# 前者含 {"b64_json":""} 对象框、分隔逗号与 size/output_format/z_index/bounding_box
+# 等图级元数据，后者为 text_recognition 富文本与 name/description。
+# 与 _SSE_EVENT_ENVELOPE_MARGIN 对同一每图 JSON 对象的预算同口径。
+_B64_JSON_PER_IMAGE_ENVELOPE = 4 * 1024
+# b64_json 响应体投影的响应级总信封余量：data 数组框架与 model/created/usage
+# 等字段，量级与 _SSE_EVENT_ENVELOPE_MARGIN 一致。
+_B64_JSON_RESPONSE_ENVELOPE_MARGIN = 4 * 1024
+# response_body_limit 缺省时 url 响应格式的结构性读取上限：响应仅含 JSON 信封
 # 与产图 URL 数组，满额百张签名 URL 也只数百 KB 量级，4MB 封顶留一个数量级余量。
 _URL_RESPONSE_BODY_LIMIT = 4 * 1024 * 1024
 # safety_identifier 显式配置值的长度上限：官方 API Reference 约束不超过 64 字符。
@@ -163,8 +172,8 @@ class SeedreamConfig:
         sse_event_max_size: 单个 SSE 事件的截断阈值字节数；None 时按缓冲区上限与
             单图 base64 最坏展开二者的较大值推导。
         response_body_limit: 上游响应体读取总量上限字节数；None 时按请求形态
-            投影——b64_json 按产图数上限乘单图 base64 最坏展开推导，url 取
-            结构性固定上限。
+            投影——b64_json 按产图数上限乘「单图 base64 最坏展开加每图 JSON 信封余量」、
+            另加响应级总信封余量，url 取结构性固定上限。
         image_prepare_concurrency: 参考图预处理并发上限。
         prepare_cache_max: 参考图预处理结果 LRU 缓存的条目数上限。
         prepare_cache_max_bytes: 参考图预处理结果缓存的累计字节上限。
@@ -567,9 +576,11 @@ class SeedreamConfig:
         ):
             raise SeedreamConfigError(
                 _config_error(
-                    "sse_event_max_size不能低于单图 base64 最坏展开推导值，"
+                    "sse_event_max_size不能低于推导值 {derived} 字节"
+                    "（缓冲区上限与单图 base64 最坏展开二者的较大值），"
                     "过小会截断合法图片事件{suffix}",
                     "sse_event_max_size",
+                    derived=as_plain(self.derived_sse_event_max_size()),
                 )
             )
         if self.response_body_limit is not None and self.response_body_limit <= 0:
@@ -578,8 +589,12 @@ class SeedreamConfig:
             )
 
     def _single_image_b64_worst_size(self) -> int:
-        """单图 base64 最坏展开字节数：n 字节图片经编码最长 4*ceil(n/3) 字符。"""
-        return _B64_WORST_CASE_NUMERATOR * ((self.auto_save_max_file_size + 2) // 3)
+        """单图 base64 最坏展开字节数：家族单图最坏字节数经编码最长 4*ceil(n/3) 字符。"""
+        return _B64_WORST_CASE_NUMERATOR * ((max_single_image_bytes(self.model_id) + 2) // 3)
+
+    def _b64_json_per_image_budget(self) -> int:
+        """b64_json 投影的单图预算：单图 base64 最坏展开加每图 JSON 信封余量。"""
+        return self._single_image_b64_worst_size() + _B64_JSON_PER_IMAGE_ENVELOPE
 
     def derived_sse_event_max_size(self) -> int:
         """单事件阈值的推导下界：缓冲区上限与单图 base64 最坏展开二者的较大值。
@@ -603,14 +618,20 @@ class SeedreamConfig:
     def effective_response_body_limit(self, *, response_format: str, max_image_count: int) -> int:
         """响应体读取总量上限的生效值：显式配置直接生效，未配置按请求形态投影。
 
-        b64_json 按产图数上限乘单图 base64 最坏展开推导——满额响应中途中止时
-        计费已发生且图片不可恢复，投影须覆盖合法最坏；url 响应仅含 JSON 框架
-        与 URL 数组，取结构性固定上限。消费方（客户端读体上限）统一取此单点。
+        b64_json 按产图数上限乘「单图 base64 最坏展开加每图 JSON 信封余量」、
+        另加响应级总信封余量——满额响应中途中止时计费已发生且图片不可恢复，
+        投影须覆盖合法最坏。url 响应仅含 JSON 信封与 URL 数组，取结构性固定上限。
+        text_recognition 等无上界字段超出近似档时依赖单图基准相对真实图大小的富余，
+        严格覆盖须显式配置 response_body_limit。
+        消费方（客户端读体上限）统一取此单点。
         """
         if self.response_body_limit is not None:
             return self.response_body_limit
         if response_format == "b64_json":
-            return max_image_count * self._single_image_b64_worst_size()
+            return (
+                max_image_count * self._b64_json_per_image_budget()
+                + _B64_JSON_RESPONSE_ENVELOPE_MARGIN
+            )
         return _URL_RESPONSE_BODY_LIMIT
 
     def response_body_limit_log_text(self) -> str:
@@ -619,7 +640,9 @@ class SeedreamConfig:
             return str(self.response_body_limit)
         return (
             f"auto(url={_URL_RESPONSE_BODY_LIMIT},"
-            f"b64_json={self._single_image_b64_worst_size()}×N)"
+            f"b64_json=({self._single_image_b64_worst_size()}"
+            f"+{_B64_JSON_PER_IMAGE_ENVELOPE})×N"
+            f"+{_B64_JSON_RESPONSE_ENVELOPE_MARGIN})"
         )
 
     def _validate_prepare_cache_bounds(self) -> None:

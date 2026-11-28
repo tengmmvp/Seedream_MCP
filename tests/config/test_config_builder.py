@@ -1,6 +1,7 @@
 """配置构建器测试：多层优先级、别名解析、env 文件合并与不污染 os.environ。"""
 
 import inspect
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,10 @@ from seedream_mcp.config._builder import _active_pool_concurrency
 from seedream_mcp.config._model import _first_invalid_request_state_key_message
 from seedream_mcp.config.sources import _BUILD_WARNINGS
 from seedream_mcp.utils.core.errors import SeedreamConfigError
+from seedream_mcp.utils.model.capabilities import (
+    MAX_PER_REQUEST_IMAGE_COUNT,
+    SEEDREAM_1K_2K_MAX_SIZE_PIXELS,
+)
 
 # monkeypatch 与 conftest 的 autouse 隔离改写模块全局，须以模块对象为 target。
 import seedream_mcp.config.sources as config_sources
@@ -1385,11 +1390,14 @@ def test_seedream_config_rejects_non_string_default_size() -> None:
 
 def test_seedream_config_rejects_sse_event_size_below_derived_floor() -> None:
     """sse_event_max_size 低于单图 base64 最坏展开推导值时拒绝，防止合法图片事件被截断。"""
-    # 12MB 高于默认缓冲区 10MB 但远低于 50MB 单图的最坏展开约 66.7MB
-    with pytest.raises(
-        SeedreamConfigError, match="sse_event_max_size不能低于单图 base64 最坏展开推导值"
-    ):
+    # 12MB 高于默认缓冲区 10MB 但低于默认 5.5 家族单图的最坏展开约 25MB
+    derived_floor = SeedreamConfig(api_key="k").derived_sse_event_max_size()
+
+    with pytest.raises(SeedreamConfigError, match="sse_event_max_size不能低于推导值") as exc_info:
         SeedreamConfig(api_key="k", sse_event_max_size=12 * 1024 * 1024)
+
+    # 消息携带推导下界，显式值低于下界的部署据此知道该调到多少。
+    assert str(derived_floor) in exc_info.value.message
 
 
 def test_seedream_config_accepts_sse_event_size_above_derived_floor() -> None:
@@ -1799,7 +1807,7 @@ def test_build_config_loads_response_body_limit(
 def test_build_config_response_body_limit_defaults_to_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未设置时 response_body_limit 为 None，生效值由 effective_response_body_limit 推导。"""
+    """未设置时 response_body_limit 为 None，由 effective_response_body_limit 按请求形态投影。"""
     monkeypatch.delenv("SEEDREAM_RESPONSE_BODY_LIMIT", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\n")
@@ -1836,28 +1844,122 @@ def test_effective_response_body_limit_prefers_explicit_value() -> None:
 
 
 def test_effective_response_body_limit_projects_b64_by_image_count() -> None:
-    """未配置时 b64_json 按产图数上限乘单图 base64 最坏展开投影。"""
-    config = SeedreamConfig(api_key="k", auto_save_max_file_size=50 * 1024 * 1024)
+    """未配置时 b64_json 按产图数上限乘「单图最坏展开加每图信封余量」、再加总信封余量投影。"""
+    config = SeedreamConfig(api_key="k")
 
-    single = 4 * ((50 * 1024 * 1024 + 2) // 3)
+    # 默认模型 5.5 家族：像素上限乘 4 字节加 1/16 余量后取 base64 最坏展开。
+    single_image_bytes = SEEDREAM_1K_2K_MAX_SIZE_PIXELS * 4
+    single_image_bytes += single_image_bytes // 16
+    per_image = 4 * ((single_image_bytes + 2) // 3) + 4 * 1024
     assert (
         config.effective_response_body_limit(response_format="b64_json", max_image_count=1)
-        == single
+        == per_image + 4 * 1024
     )
     assert (
         config.effective_response_body_limit(response_format="b64_json", max_image_count=100)
-        == 100 * single
+        == 100 * per_image + 4 * 1024
+    )
+
+
+def test_effective_response_body_limit_covers_worst_case_b64_response() -> None:
+    """单图载荷恰达最坏展开的满额 b64_json 响应（含全量 JSON 信封）不超投影上限。
+
+    图级元数据字段取官方拆分响应示例（bounding_box/name/description/
+    text_recognition 等）。100 为能力表拆分满额。
+    空载荷物化满额信封后按载荷差值折算最坏总体积，避免物化百张最坏图的巨型字符串。
+    """
+    config = SeedreamConfig(api_key="k")
+    image_count = 100
+    envelope = json.dumps(
+        {
+            "model": "doubao-seedream-5-0-pro-260628",
+            "created": 1784696685,
+            "data": [
+                {
+                    "b64_json": "",
+                    "size": "2048x2048",
+                    "output_format": "jpeg",
+                    "z_index": 0,
+                    "bounding_box": {
+                        "absolute": [383, 120, 1655, 384],
+                        "normalized": [187, 59, 808, 188],
+                    },
+                    "name": "左上角标语文字",
+                    "description": "白色两行文字内容为EXPLORE THE WILD, INSPIRE THE SOUL.",
+                    "text_recognition": {"text": "", "lines": []},
+                }
+            ]
+            * image_count,
+            "usage": {
+                "input_images": 1,
+                "generated_images": 8,
+                "output_tokens": 23107,
+                "total_tokens": 23107,
+            },
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    single_image_bytes = SEEDREAM_1K_2K_MAX_SIZE_PIXELS * 4
+    single_image_bytes += single_image_bytes // 16
+    worst_b64 = 4 * ((single_image_bytes + 2) // 3)
+    worst_body_bytes = len(envelope) + image_count * worst_b64
+
+    assert worst_body_bytes <= config.effective_response_body_limit(
+        response_format="b64_json", max_image_count=image_count
     )
 
 
 def test_effective_response_body_limit_uses_structural_url_cap() -> None:
-    """未配置时 url 响应取与产图数、文件上限无关的结构性固定上限。"""
-    config = SeedreamConfig(api_key="k", auto_save_max_file_size=50 * 1024 * 1024)
+    """未配置时 url 响应取与产图数无关的结构性固定上限。"""
+    config = SeedreamConfig(api_key="k")
 
     assert (
         config.effective_response_body_limit(response_format="url", max_image_count=100)
         == 4 * 1024 * 1024
     )
+
+
+def test_response_limits_independent_of_auto_save_max_file_size() -> None:
+    """b64_json 读体上限与 SSE 单事件推导阈值不随 auto_save_max_file_size 变化。"""
+    small = SeedreamConfig(api_key="k", auto_save_max_file_size=1024 * 1024)
+    large = SeedreamConfig(api_key="k", auto_save_max_file_size=50 * 1024 * 1024)
+
+    assert small.effective_response_body_limit(
+        response_format="b64_json", max_image_count=30
+    ) == large.effective_response_body_limit(response_format="b64_json", max_image_count=30)
+    assert small.derived_sse_event_max_size() == large.derived_sse_event_max_size()
+
+
+def test_response_limits_follow_model_family_pixels() -> None:
+    """单图基准按模型家族像素上限派生：2K 家族低于 4K 家族，未识别家族回退已知最大像素。"""
+    family_2k = SeedreamConfig(api_key="k", model_id="doubao-seedream-5.5")
+    family_4k = SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0")
+    unknown = SeedreamConfig(api_key="k", model_id="ep-2024xxxxxxxx-xxxxx")
+
+    limit_2k = family_2k.effective_response_body_limit(
+        response_format="b64_json", max_image_count=1
+    )
+    limit_4k = family_4k.effective_response_body_limit(
+        response_format="b64_json", max_image_count=1
+    )
+    limit_unknown = unknown.effective_response_body_limit(
+        response_format="b64_json", max_image_count=1
+    )
+    assert limit_2k < limit_4k
+    assert limit_unknown == limit_4k
+    assert unknown.derived_sse_event_max_size() == family_4k.derived_sse_event_max_size()
+    assert family_2k.derived_sse_event_max_size() < family_4k.derived_sse_event_max_size()
+
+
+def test_default_model_hundred_image_b64_limit_under_two_and_half_gib() -> None:
+    """默认 5.5 家族满额 100 图的 b64_json 投影不超过 2.5GiB，约束百层请求的读体内存量级。"""
+    config = SeedreamConfig(api_key="k")
+
+    limit = config.effective_response_body_limit(
+        response_format="b64_json", max_image_count=MAX_PER_REQUEST_IMAGE_COUNT
+    )
+    assert limit <= int(2.5 * 1024**3)
 
 
 def test_effective_sse_event_max_size_prefers_explicit_value() -> None:
