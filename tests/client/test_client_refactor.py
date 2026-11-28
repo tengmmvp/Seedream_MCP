@@ -209,11 +209,7 @@ async def test_text_to_image_log_does_not_include_prompt_plaintext(
     fake_logger = RecordingLogger()
     monkeypatch.setattr(client, "logger", fake_logger)
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint, request_data
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api({}))
 
     prompt = "top secret prompt content"
     await client.text_to_image(prompt=prompt, size="2K")
@@ -221,6 +217,48 @@ async def test_text_to_image_log_does_not_include_prompt_plaintext(
     joined_logs = "\n".join(fake_logger.info_messages)
     assert "prompt_meta=" in joined_logs
     assert prompt not in joined_logs
+
+
+@pytest.mark.parametrize(
+    ("extra_kwargs", "expected_start_log"),
+    [
+        (
+            {
+                "layer_decomposition": True,
+                "layer_decomposition_options": {"max_images": 5, "text_recognition": True},
+            },
+            "开始图层拆分任务: prompt_meta={prompt_meta}, max_images=5, "
+            "text_recognition=True, size=auto",
+        ),
+        (
+            {"layer_decomposition": True},
+            "开始图层拆分任务: prompt_meta={prompt_meta}, max_images=None, "
+            "text_recognition=None, size=auto",
+        ),
+        (
+            {"size": "2K"},
+            "开始图文生图任务: prompt_meta={prompt_meta}, size=2K",
+        ),
+    ],
+)
+async def test_image_to_image_start_log_fields_by_scenario(
+    extra_kwargs: dict[str, Any], expected_start_log: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """图层拆分开始日志记所传的 max_images 与 text_recognition，未传子字段为 None。
+
+    普通图文生图开始日志不带拆分字段。
+    """
+    client = SeedreamClient(SeedreamConfig(api_key="k", max_retries=1))
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api({}))
+
+    await client.image_to_image(prompt="test", image="https://example.com/ref.png", **extra_kwargs)
+
+    start_logs = [message for message in fake_logger.info_messages if message.startswith("开始")]
+    assert start_logs == [
+        expected_start_log.format(prompt_meta=SeedreamClient._summarize_prompt("test"))
+    ]
 
 
 async def test_generation_methods_synthesize_defaults_from_config(
@@ -425,7 +463,9 @@ async def test_call_api_parses_non_stream_response() -> None:
         )
 
     async with _client_with_mock_transport(handler) as client:
-        result = await client._call_api("text_to_image", {"prompt": "hello"})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "hello"}, per_request_image_count=1
+        )
 
     assert result["success"] is True
     assert result["status"] == "succeeded"
@@ -454,7 +494,9 @@ async def test_call_api_success_body_parse_runs_in_cpu_pool(
         )
 
     async with _client_with_mock_transport(handler) as client:
-        result = await client._call_api("text_to_image", {"prompt": "hello"})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "hello"}, per_request_image_count=1
+        )
 
     assert result["success"] is True
     spy.assert_ran_in_cpu_pool()
@@ -463,7 +505,7 @@ async def test_call_api_success_body_parse_runs_in_cpu_pool(
 async def test_call_api_small_body_parse_runs_outside_cpu_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """低于下沉阈值的 200 响应体在事件循环线程同步解析，不付线程往返开销。"""
+    """低于卸载阈值的 200 响应体在事件循环线程同步解析，不付线程往返开销。"""
     spy = CpuOffloadSpy(json.loads)
 
     monkeypatch.setattr(json, "loads", spy)
@@ -480,7 +522,9 @@ async def test_call_api_small_body_parse_runs_outside_cpu_pool(
         )
 
     async with _client_with_mock_transport(handler) as client:
-        result = await client._call_api("text_to_image", {"prompt": "hello"})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "hello"}, per_request_image_count=1
+        )
 
     assert result["success"] is True
     spy.assert_ran_outside_cpu_pool()
@@ -497,20 +541,13 @@ async def test_text_to_image_rejects_output_format_for_seedream_45_before_api_ca
             max_retries=1,
         )
     )
-    api_called = False
-
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        nonlocal api_called
-        del endpoint, request_data
-        api_called = True
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured))
 
     with pytest.raises(SeedreamValidationError, match="不支持输出格式（output_format）"):
         await client.text_to_image(prompt="test", size="2K", output_format="png")
 
-    assert api_called is False
+    assert captured == {}
 
 
 async def test_call_api_parses_sse_response() -> None:
@@ -530,7 +567,9 @@ async def test_call_api_parses_sse_response() -> None:
         )
 
     async with _client_with_mock_transport(handler) as client:
-        result = await client._call_api("text_to_image", {"prompt": "hello", "stream": True})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "hello", "stream": True}, per_request_image_count=1
+        )
 
     assert result["success"] is True
     assert result["status"] == "completed"
@@ -557,7 +596,9 @@ async def test_call_api_parses_sse_partial_failed_event() -> None:
         )
 
     async with _client_with_mock_transport(handler) as client:
-        result = await client._call_api("text_to_image", {"prompt": "hello", "stream": True})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "hello", "stream": True}, per_request_image_count=1
+        )
 
     assert result["success"] is True
     assert result["status"] == "partial"
@@ -1018,15 +1059,8 @@ async def test_image_to_image_invalid_data_uri_fails_before_api_call(
 ) -> None:
     """非法 base64 的 Data URI 在预处理阶段拒绝，不触达 API。"""
     client = SeedreamClient(_build_config())
-    api_called = False
-
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        nonlocal api_called
-        del endpoint, request_data
-        api_called = True
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured))
 
     with pytest.raises(SeedreamValidationError, match="Base64 解码失败|Data URI"):
         await client.image_to_image(
@@ -1035,7 +1069,7 @@ async def test_image_to_image_invalid_data_uri_fails_before_api_call(
             size="2K",
         )
 
-    assert api_called is False
+    assert captured == {}
 
 
 async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
@@ -1043,19 +1077,12 @@ async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
 ) -> None:
     """超限 Data URI 在预处理阶段拒绝，不触达 API。
 
-    大小上限经 monkeypatch 缩到 KB 级触发同一条超限分支；上限读取的是
+    大小上限经 monkeypatch 缩到 KB 级触发同一条超限分支。上限读取的是
     validation 命名空间内的 MAX_IMAGE_FILE_SIZE，patch 目标据此确定。
     """
     client = SeedreamClient(_build_config())
-    api_called = False
-
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        nonlocal api_called
-        del endpoint, request_data
-        api_called = True
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured))
     monkeypatch.setattr(image_validation_module, "MAX_IMAGE_FILE_SIZE", 64 * 1024)
 
     oversized_b64 = base64.b64encode(b"a" * (96 * 1024)).decode("ascii")
@@ -1068,7 +1095,7 @@ async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
             size="2K",
         )
 
-    assert api_called is False
+    assert captured == {}
 
 
 async def _invoke_multi_image_fusion(client: SeedreamClient, image: Sequence[str]) -> None:
@@ -1624,7 +1651,7 @@ def test_build_api_result_passes_through_tools_on_request_failure() -> None:
 async def test_stream_request_non_sse_json_error_body_marks_failure() -> None:
     """stream=true 时上游以 200 加非 SSE JSON 错误体响应：结果为失败并透传错误码。
 
-    上游仅收到一次请求；错误经结果结构表达而非异常，调用方可取回真实错误码。
+    上游仅收到一次请求。错误经结果结构表达而非异常，调用方可取回真实错误码。
     """
     upstream_calls = 0
 
@@ -1637,7 +1664,9 @@ async def test_stream_request_non_sse_json_error_body_marks_failure() -> None:
         )
 
     async with _client_with_mock_transport(handler) as client:
-        result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+        )
 
     assert result["success"] is False
     assert result["status"] == "failed"
@@ -1673,7 +1702,7 @@ async def test_call_api_non_dict_json_payload_raises_format_error(
 
     async with _client_with_mock_transport(handler) as client:
         with pytest.raises(SeedreamAPIError) as excinfo:
-            await client._call_api("text_to_image", {"prompt": "hello"})
+            await client._call_api("text_to_image", {"prompt": "hello"}, per_request_image_count=1)
 
     assert "响应格式错误" in excinfo.value.message
     assert expected_type in excinfo.value.message
@@ -1702,7 +1731,9 @@ async def test_stream_request_non_dict_json_payload_raises_format_error(
 
     async with _client_with_mock_transport(handler) as client:
         with pytest.raises(SeedreamAPIError) as excinfo:
-            await client._call_api("text_to_image", {"prompt": "hello", "stream": True})
+            await client._call_api(
+                "text_to_image", {"prompt": "hello", "stream": True}, per_request_image_count=1
+            )
 
     assert "响应格式错误" in excinfo.value.message
     assert expected_type in excinfo.value.message
@@ -1821,15 +1852,11 @@ async def test_parallel_batch_validates_common_params_once(
 async def test_direct_client_calls_validate_common_params_per_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """未绑定共享计划的直连调用保持逐次校验，公共 API 行为不变。"""
+    """未绑定共享计划的直连调用逐次校验公共参数。"""
     calls = _install_validate_common_spy(monkeypatch)
     client = SeedreamClient(_build_config())
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint, request_data
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api({}))
 
     await client.text_to_image(prompt="first")
     await client.text_to_image(prompt="second")
@@ -1848,16 +1875,13 @@ async def test_text_to_image_logs_info_completion_on_success(
     fake_logger = RecordingLogger()
     monkeypatch.setattr(client, "logger", fake_logger)
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint, request_data
-        return {
-            "success": True,
-            "data": [{"url": "https://example.com/1.png"}],
-            "usage": {},
-            "status": "completed",
-        }
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    outcome = {
+        "success": True,
+        "data": [{"url": "https://example.com/1.png"}],
+        "usage": {},
+        "status": "completed",
+    }
+    monkeypatch.setattr(client, "_call_api", _capture_call_api({}, outcome=outcome))
     await client.text_to_image(prompt="p", size="2K")
 
     assert any("文生图任务完成" in message for message in fake_logger.info_messages)
@@ -1888,7 +1912,7 @@ async def test_multi_image_fusion_logs_error_on_soft_failure_response(
 ) -> None:
     """200 加顶层 error 的软失败经结果结构返回时落 error 级任务失败日志。
 
-    success=False 不抛异常，完成日志曾与失败结果并存。
+    success=False 不抛异常，失败只能由结局日志报出。
     """
     client = SeedreamClient(_build_config())
     fake_logger = RecordingLogger()
@@ -1897,18 +1921,16 @@ async def test_multi_image_fusion_logs_error_on_soft_failure_response(
     async def fake_prepare_images_in_parallel(images: list[str]) -> list[str]:
         return [f"prepared:{item}" for item in images]
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint, request_data
-        return {
-            "success": False,
-            "data": [],
-            "usage": {},
-            "status": "failed",
-            "error": {"code": "E", "message": "boom"},
-        }
+    outcome = {
+        "success": False,
+        "data": [],
+        "usage": {},
+        "status": "failed",
+        "error": {"code": "E", "message": "boom"},
+    }
 
     monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api({}, outcome=outcome))
     await client.multi_image_fusion(prompt="p", image=["i1", "i2"], size="2K")
 
     assert any("多图融合任务失败" in message for message in fake_logger.errors)
@@ -1920,21 +1942,18 @@ async def test_multi_image_fusion_logs_error_on_soft_failure_response(
 async def test_sequential_generation_logs_warning_on_partial_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """status=partial 的部分完成结果落 warning 级日志，不再谎报完成。"""
+    """status=partial 的部分完成结果落 warning 级日志而非完成日志。"""
     client = SeedreamClient(_build_config())
     fake_logger = RecordingLogger()
     monkeypatch.setattr(client, "logger", fake_logger)
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint, request_data
-        return {
-            "success": True,
-            "data": [{"error": {"code": "E", "message": "blocked"}}],
-            "usage": {},
-            "status": "partial",
-        }
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    outcome = {
+        "success": True,
+        "data": [{"error": {"code": "E", "message": "blocked"}}],
+        "usage": {},
+        "status": "partial",
+    }
+    monkeypatch.setattr(client, "_call_api", _capture_call_api({}, outcome=outcome))
     await client.sequential_generation(
         prompt="p", sequential_image_generation_options={"max_images": 2}, size="2K"
     )
@@ -1949,22 +1968,19 @@ async def test_sequential_generation_logs_warning_on_partial_response(
 async def test_text_to_image_logs_warning_when_success_carries_top_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """success=True 但携带顶层 error 键的结果降级 warning，不再落纯完成日志。"""
+    """success=True 但携带顶层 error 键的结果落 warning 级日志而非完成日志。"""
     client = SeedreamClient(_build_config())
     fake_logger = RecordingLogger()
     monkeypatch.setattr(client, "logger", fake_logger)
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint, request_data
-        return {
-            "success": True,
-            "data": [{"url": "https://example.com/1.png"}],
-            "usage": {},
-            "status": "completed",
-            "error": {"code": "PartialWarn", "message": "quota near limit"},
-        }
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    outcome = {
+        "success": True,
+        "data": [{"url": "https://example.com/1.png"}],
+        "usage": {},
+        "status": "completed",
+        "error": {"code": "PartialWarn", "message": "quota near limit"},
+    }
+    monkeypatch.setattr(client, "_call_api", _capture_call_api({}, outcome=outcome))
     await client.text_to_image(prompt="p", size="2K")
 
     assert any("文生图任务完成但携带错误" in message for message in fake_logger.warnings)
@@ -1985,16 +2001,13 @@ async def test_text_to_image_logs_error_on_failed_status_response(
     fake_logger = RecordingLogger()
     monkeypatch.setattr(client, "logger", fake_logger)
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint, request_data
-        return {
-            "success": True,
-            "data": [{"error": {"code": "E", "message": "boom"}}],
-            "usage": {},
-            "status": "failed",
-        }
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    outcome = {
+        "success": True,
+        "data": [{"error": {"code": "E", "message": "boom"}}],
+        "usage": {},
+        "status": "failed",
+    }
+    monkeypatch.setattr(client, "_call_api", _capture_call_api({}, outcome=outcome))
     await client.text_to_image(prompt="p", size="2K")
 
     assert any("文生图任务失败" in message for message in fake_logger.errors)
@@ -2149,7 +2162,9 @@ async def test_call_api_pool_closed_during_serialization_reports_shutdown() -> N
     async with _client_with_mock_transport(handler) as client:
         async with saturate_cpu_offload_pool() as saturated:
             task = asyncio.ensure_future(
-                client._call_api("text_to_image", {"prompt": oversized_prompt})
+                client._call_api(
+                    "text_to_image", {"prompt": oversized_prompt}, per_request_image_count=1
+                )
             )
             await saturated.wait_queued()
             shutdown_cpu_offload_executor()
@@ -2181,7 +2196,9 @@ async def test_call_api_pool_closed_during_json_parse_reports_shutdown() -> None
         )
 
     async with _client_with_mock_transport(handler) as client:
-        task = asyncio.ensure_future(client._call_api("text_to_image", {"prompt": "p"}))
+        task = asyncio.ensure_future(
+            client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
+        )
         await asyncio.wait_for(handler_entered.wait(), timeout=5)
         async with saturate_cpu_offload_pool() as saturated:
             response_gate.set()
@@ -2218,7 +2235,9 @@ async def test_call_api_pool_closed_during_sse_parse_reports_shutdown() -> None:
 
     async with _client_with_mock_transport(handler) as client:
         task = asyncio.ensure_future(
-            client._call_api("text_to_image", {"prompt": "p", "stream": True})
+            client._call_api(
+                "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+            )
         )
         await asyncio.wait_for(handler_entered.wait(), timeout=5)
         async with saturate_cpu_offload_pool() as saturated:
@@ -2238,7 +2257,7 @@ async def test_call_api_pool_closed_during_error_body_parse_reports_shutdown() -
     handler_entered = asyncio.Event()
     response_gate = asyncio.Event()
     handler_calls = 0
-    # 恰达 _ERROR_JSON_PARSE_LIMIT（与卸载阈值同值）的错误体：进入 dict 解析且走池。
+    # _ERROR_JSON_PARSE_LIMIT 与卸载阈值同值：恰达该上限的错误体进入 dict 解析且走池。
     envelope = json.dumps({"message": ""}).encode()
     error_body = json.dumps({"message": "x" * (_ERROR_JSON_PARSE_LIMIT - len(envelope))}).encode()
     assert len(error_body) == _ERROR_JSON_PARSE_LIMIT
@@ -2252,7 +2271,9 @@ async def test_call_api_pool_closed_during_error_body_parse_reports_shutdown() -
         return httpx.Response(500, content=error_body)
 
     async with _client_with_mock_transport(handler) as client:
-        task = asyncio.ensure_future(client._call_api("text_to_image", {"prompt": "p"}))
+        task = asyncio.ensure_future(
+            client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
+        )
         await asyncio.wait_for(handler_entered.wait(), timeout=5)
         async with saturate_cpu_offload_pool() as saturated:
             response_gate.set()

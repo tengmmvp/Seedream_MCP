@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ..config import SeedreamConfig
-from ..definitions.conventions import DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
 from .request_plan import _ACTIVE_REQUEST_PLAN, serialize_request_body
 from ..utils.core.executors import CpuOffloadPoolClosedError, load_json_bytes
 from ..utils.core.http_int import strict_http_int
@@ -61,7 +60,7 @@ from ..utils.io.stream import (
     item_has_image_payload,
     item_reports_failure,
 )
-from ..utils.model.capabilities import MAX_PER_REQUEST_IMAGE_COUNT, get_model_capabilities
+from ..utils.model.capabilities import MAX_PER_REQUEST_IMAGE_COUNT
 
 if TYPE_CHECKING:
     from loguru import Logger
@@ -96,31 +95,6 @@ def _error_body_limit(total_limit: int) -> tuple[int, bool]:
     if total_limit < _ERROR_BODY_BYTE_LIMIT:
         return total_limit, True
     return _ERROR_BODY_BYTE_LIMIT, False
-
-
-def _response_image_count(request_data: dict[str, Any], model_id: str) -> int:
-    """从请求体推导单请求产图数上限，供响应体读取上限按请求形态投影。
-
-    组图取 sequential_image_generation_options.max_images；图层拆分取显式
-    max_images，未给时按官方服务端默认、不支持拆分配置的家族按能力表满额；
-    其余请求恒为单图。与 tools 层 per_request_image_count 的投影键推导同口径，
-    此处自最终请求体取值，口径对账由 tests/client/test_response_image_count.py 锁定。
-    """
-    sequential_options = request_data.get("sequential_image_generation_options")
-    if isinstance(sequential_options, dict):
-        max_images = sequential_options.get("max_images")
-        if isinstance(max_images, int):
-            return max_images
-    if request_data.get("layer_decomposition") is True:
-        caps = get_model_capabilities(model_id)
-        layer_options = request_data.get("layer_decomposition_options")
-        max_images = layer_options.get("max_images") if isinstance(layer_options, dict) else None
-        if isinstance(max_images, int):
-            return max_images
-        if caps.supports_layer_decomposition_options:
-            return DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
-        return caps.max_layer_decomposition_images
-    return 1
 
 
 def _bounded_error_text(value: Any, limit: int) -> str:
@@ -430,11 +404,13 @@ class _ClientHTTPMixin:
         retry_after = self._retry_after_or_none(status_code, headers)
         raise handle_api_error(status_code, error_data, retry_after=retry_after)
 
-    def _response_body_byte_limit(self, request_data: dict[str, Any]) -> int:
-        """上游响应体读取总量上限：显式配置直接生效，未配置按请求形态投影。"""
+    def _response_body_byte_limit(
+        self, request_data: dict[str, Any], *, per_request_image_count: int
+    ) -> int:
+        """上游响应体读取上限：显式配置直接生效，未配置按请求形态投影。"""
         return self.config.effective_response_body_limit(
             response_format=request_data.get("response_format") or "url",
-            max_image_count=_response_image_count(request_data, self.config.model_id),
+            max_image_count=per_request_image_count,
         )
 
     async def _read_response_body_capped(
@@ -616,7 +592,7 @@ class _ClientHTTPMixin:
             # 解析完成后立即释放原始缓冲，避免与 b64 解码产物双驻留。
             del raw_body
         payload_dict = self._require_dict_payload(payload)
-        # 大量小条目在字节未超限时仍可放大解析产物内存，与 SSE 条目硬上限同口径拒绝。
+        # 大量小条目在字节未超限时仍可放大解析产物内存，与 SSE 条目上限同口径拒绝。
         data_count = len(data_items(payload_dict.get("data")))
         max_data_items = items_limit_for(byte_limit, MAX_PER_REQUEST_IMAGE_COUNT)
         if data_count > max_data_items:
@@ -664,11 +640,11 @@ class _ClientHTTPMixin:
     ) -> dict[str, Any]:
         """发送请求、检查状态码并委托回调解析响应。
 
-        以流式发送实施总量上限，避免 client.post 先全量缓冲使 Content-Length 预检失效。
+        以流式发送实施读体上限，避免 client.post 先全量缓冲使 Content-Length 预检失效。
         attempt_timeout_seconds 为本次尝试的总时长上限，
-        响应头就绪与读体的截止约束经等待路径生效，到点已就绪的数据仍可交付；
+        响应头就绪与读体的截止约束经等待路径生效，到点已就绪的数据仍可交付。
         超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
-        byte_limit 为按请求形态投影的响应体读取总量上限，错误与成功路径共用。
+        byte_limit 为生效的响应体读取上限，错误与成功路径共用。
         """
         deadline = time.monotonic() + attempt_timeout_seconds
         request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
@@ -685,7 +661,10 @@ class _ClientHTTPMixin:
     async def _handle_stream_response(
         self, response: httpx.Response, deadline: float, byte_limit: int
     ) -> dict[str, Any]:
-        """把流式请求的 200 响应解析为统一结果结构，SSE 优先、JSON 兜底。"""
+        """把流式请求的 200 响应解析为统一结果结构，SSE 优先、JSON 兜底。
+
+        SSE 路径的 byte_limit 只约束保留事件的累计字节，渐进帧与未知类型事件不计。
+        """
         if not is_sse_response(response):
             return await self._parse_json_success_response(response, deadline, byte_limit)
 
@@ -695,18 +674,26 @@ class _ClientHTTPMixin:
             model_id=self.config.model_id,
             buffer_max_size=self.config.stream_buffer_max_size,
             event_truncate_threshold=self.config.effective_sse_event_max_size(),
-            total_bytes_limit=byte_limit,
+            retained_bytes_limit=byte_limit,
             min_items=MAX_PER_REQUEST_IMAGE_COUNT,
             log=self.logger,
             deadline=deadline,
         )
 
-    async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
+    async def _call_api(
+        self,
+        endpoint: str,
+        request_data: dict[str, Any],
+        *,
+        per_request_image_count: int,
+    ) -> dict[str, Any]:
         """调用 Seedream API。
 
         进程级生成准入约束同时在途的生成 API 请求数，覆盖 MCP 工具与 Web 生成入口；
         准入在请求构建完成后获取，构建期不占进程级并发容量，重试期间保持占槽。
         按 request_data 是否含 stream 标志选择流式或非流式的响应处理回调。
+        per_request_image_count 为本请求产图数，供响应体读取上限按请求形态投影。
+        必传，漏接调用点即刻 TypeError 而非静默按单图低估。
         失败时按错误类型分类：非 200 响应中仅 429 与 5xx 可重试，其余状态码立即抛出；
         超时与网络错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的 Seedream 异常。
         单次尝试时限取单次 api_timeout 与剩余总预算的较小值。
@@ -714,7 +701,9 @@ class _ClientHTTPMixin:
         """
         async with loop_bound_semaphore(self.config.generate_concurrency, key="generate_admission"):
             try:
-                return await self._call_api_admitted(endpoint, request_data)
+                return await self._call_api_admitted(
+                    endpoint, request_data, per_request_image_count=per_request_image_count
+                )
             except CpuOffloadPoolClosedError as exc:
                 self.logger.warning("{} API 调用因服务正在关闭中止: {}", endpoint, exc)
                 raise SeedreamMCPError(
@@ -724,7 +713,11 @@ class _ClientHTTPMixin:
                 ) from exc
 
     async def _call_api_admitted(
-        self, endpoint: str, request_data: dict[str, Any]
+        self,
+        endpoint: str,
+        request_data: dict[str, Any],
+        *,
+        per_request_image_count: int,
     ) -> dict[str, Any]:
         """准入槽内执行 API 调用，分发与重试语义见 _call_api。"""
         await self._ensure_client()
@@ -743,8 +736,10 @@ class _ClientHTTPMixin:
         total_attempts = max(1, self.config.max_retries + 1)
         single_attempt_timeout = float(self.config.api_timeout)
 
-        # 读体上限按本请求形态投影一次，重试各次与全部读取路径共用。
-        byte_limit = self._response_body_byte_limit(request_data)
+        # 读体上限按请求计算一次，重试各次与全部读取路径共用。
+        byte_limit = self._response_body_byte_limit(
+            request_data, per_request_image_count=per_request_image_count
+        )
         handle_response = (
             self._handle_stream_response
             if request_data.get("stream")
@@ -935,12 +930,13 @@ class _ClientHTTPMixin:
         return "<local_image_path>"
 
     def _sanitize_request_for_logging(self, request_data: dict[str, Any]) -> dict[str, Any]:
-        """对请求体做日志脱敏：浅拷贝后替换 prompt 与 image 字段，其余原样引用。"""
+        """对请求体做日志脱敏：浅拷贝后替换 prompt、safety_identifier 与 image 字段，其余原样引用。"""
         safe_data = dict(request_data)
-        prompt = safe_data.get("prompt")
-        if prompt is not None:
-            prompt_length = len(prompt) if isinstance(prompt, str) else 0
-            safe_data["prompt"] = f"<redacted:{prompt_length} chars>"
+        for field in ("prompt", "safety_identifier"):
+            value = safe_data.get(field)
+            if value is not None:
+                value_length = len(value) if isinstance(value, str) else 0
+                safe_data[field] = f"<redacted:{value_length} chars>"
         image = safe_data.get("image")
         if image is not None:
             safe_data["image"] = self._summarize_image_field(image)

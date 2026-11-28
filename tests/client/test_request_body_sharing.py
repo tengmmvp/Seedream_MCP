@@ -204,7 +204,7 @@ async def test_direct_path_large_body_serialization_runs_in_cpu_pool(
 
     large_payload = {"prompt": "A" * (4 * 1024 * 1024)}
     async with SeedreamClient(_build_config()) as client:
-        result = await client._call_api("text_to_image", large_payload)
+        result = await client._call_api("text_to_image", large_payload, per_request_image_count=1)
 
     assert result["success"] is True
     assert len(sent_bodies) == 1
@@ -221,7 +221,7 @@ async def test_direct_path_cjk_body_over_byte_threshold_runs_in_cpu_pool(
 
     cjk_payload = {"prompt": "汉" * 40_000}
     async with SeedreamClient(_build_config()) as client:
-        result = await client._call_api("text_to_image", cjk_payload)
+        result = await client._call_api("text_to_image", cjk_payload, per_request_image_count=1)
 
     assert result["success"] is True
     assert len(sent_bodies) == 1
@@ -239,7 +239,9 @@ async def test_shared_plan_large_body_serialization_runs_in_cpu_pool(
     large_payload = {"prompt": "B" * (4 * 1024 * 1024)}
     async with SeedreamClient(_build_config()) as client:
         with shared_request_plan_scope():
-            result = await client._call_api("text_to_image", large_payload)
+            result = await client._call_api(
+                "text_to_image", large_payload, per_request_image_count=1
+            )
 
     assert result["success"] is True
     assert len(sent_bodies) == 1
@@ -249,13 +251,15 @@ async def test_shared_plan_large_body_serialization_runs_in_cpu_pool(
 async def test_direct_path_small_body_serialization_runs_outside_cpu_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """低于下沉阈值的出站序列化在调用线程同步完成，不付线程往返开销。"""
+    """低于卸载阈值的出站序列化在调用线程同步完成，不付线程往返开销。"""
     spy = _install_serialize_thread_spy(monkeypatch)
     sent_bodies: list[bytes] = []
     _install_send_capture(monkeypatch, sent_bodies)
 
     async with SeedreamClient(_build_config()) as client:
-        result = await client._call_api("text_to_image", {"prompt": "small"})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "small"}, per_request_image_count=1
+        )
 
     assert result["success"] is True
     assert len(sent_bodies) == 1

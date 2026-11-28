@@ -11,7 +11,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from ..core.errors import (
     SeedreamAPIError,
@@ -196,23 +196,23 @@ def _log_segment_parse_failure(log: Logger, error: str, segment_len: int) -> Non
     log.debug("SSE事件原始段长度: {} bytes", segment_len)
 
 
-# 处理进度 debug 日志的最小字节间隔：累计字节每跨过该值输出一次，记录频次不随
-# 网络交付块粒度漂移。
+# 处理进度 debug 日志的最小字节间隔：累计接收字节每跨过该值输出一次，记录频次
+# 不随网络交付块粒度漂移。
 _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
 
 # 单条解析产物的内存开销估计：事件 dict 本体、键字符串与内层 dict 等解析产物实测
-# 约 350-450 字节，取 448 字节为保守常量。条目上限按「该值 × 条数 ≤ 字节总量上限」
+# 约 350-450 字节，取 448 字节为保守常量。条目上限按「该值 × 条数 ≤ 保留字节上限」
 # 从同一上限派生，口径对准解析产物内存：对抗性 64 字节量级的最小合法事件滴流撑满
-# 字节上限时产物被封在与上限同量级，而非按线上字节推导时放大一个数量级以上。合法
-# 满额随能力表派生且单事件常在 KB 以上，远达不到该上限。
+# 保留字节上限时产物被封在与上限同量级，而非按线路字节推导时放大一个数量级以上。
+# 合法满额随能力表派生且单事件常在 KB 以上，远达不到该上限。
 _SSE_ITEM_OVERHEAD_BYTES = 448
 
 
-# 条目下限经参数注入：utils.io 不依赖 utils.model，合法满额由调用方自能力表派生；
-# 极小总量上限的推导值低于合法满额时以其兜底，防误伤合法批次。
-def items_limit_for(total_bytes_limit: int, min_items: int) -> int:
-    """从响应体总量上限派生解析条目数硬上限，取值不低于注入的条目下限。"""
-    return max(total_bytes_limit // _SSE_ITEM_OVERHEAD_BYTES, min_items)
+# 条目下限经参数注入：utils.io 不依赖 utils.model，合法满额由调用方自能力表派生。
+# 极小保留字节上限的推导值低于合法满额时以其兜底，防误伤合法批次。
+def items_limit_for(retained_bytes_limit: int, min_items: int) -> int:
+    """从保留字节上限派生解析条目上限，取值不低于注入的条目下限。"""
+    return max(retained_bytes_limit // _SSE_ITEM_OVERHEAD_BYTES, min_items)
 
 
 # CRLF/CR 行尾的单遍归一化模式：一次扫描同时匹配两种行尾，避免两次 replace 全块扫描。
@@ -261,7 +261,7 @@ class _SSEFrameBuffer:
         self._dropping_event = False
 
     def extend(self, chunk: bytes) -> int:
-        """归一化行尾后追加块到缓冲，返回追加前的原始块长度供字节总量计账。
+        """归一化行尾后追加块到缓冲，返回追加前的原始块长度供进度日志计账。
 
         悬置 \r 前置拼回本块头部一并归一化，块尾新出现的孤立 \r 撤出继续悬置；
         仅在含 \r 时才分配替换副本，LF-only 常态下退化为一次包含扫描，避免每块
@@ -370,16 +370,17 @@ class _SSEFrameBuffer:
         return _parse_tail_with_lost_flag(self._buffer[self._offset :], log)
 
 
-class _SSEItemCollector:
-    """SSE 图片条目累计器：维护条目列表与按总量上限派生的条目硬上限。
+class _SSECollector:
+    """SSE 保留内容累计器：维护保留事件字节数、条目列表与条目上限。
 
-    大量小事件在字节未超限时仍可放大解析产物内存，条目上界按单条解析产物的内存
-    开销估计从同一上限派生；条目数超上限后终止读取，流末尾残留段不再解析。
+    条目上限按单条解析产物的内存开销估计从保留字节上限派生，防大量小事件
+    在字节未超限时放大解析产物内存。条目数超上限后终止读取，流末尾残留段不再解析。
     """
 
-    def __init__(self, total_bytes_limit: int, min_items: int) -> None:
+    def __init__(self, retained_bytes_limit: int, min_items: int) -> None:
         self.items: list[dict[str, Any]] = []
-        self.max_items = items_limit_for(total_bytes_limit, min_items)
+        self.retained_bytes = 0
+        self.max_items = items_limit_for(retained_bytes_limit, min_items)
         self.capped = False
 
     def reached_cap(self) -> bool:
@@ -425,24 +426,51 @@ async def _terminate_sse_stream_on_deadline(
     raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
 
 
+async def _terminate_sse_stream_on_retained_bytes_limit(
+    response: httpx.Response,
+    collector: _SSECollector,
+    *,
+    retained_bytes_limit: int,
+    log: Logger,
+) -> NoReturn:
+    """保留事件字节超过上限时关闭响应并抛无状态码的 SeedreamAPIError，已收集条目随之丢弃。"""
+    log.warning(
+        "SSE 响应流保留事件字节超限: 已累计 {} 字节，上限 {} 字节",
+        collector.retained_bytes,
+        retained_bytes_limit,
+    )
+    await _close_stream_response(response)
+    raise SeedreamAPIError(
+        error_text(
+            "SSE 响应流保留事件字节超限: 已累计 {retained} 字节，超过上限 {limit} 字节{hint}",
+            retained=as_plain(collector.retained_bytes),
+            limit=as_plain(retained_bytes_limit),
+            hint=as_plain(RESPONSE_BODY_LIMIT_HINT),
+        )
+    )
+
+
 def _classify_sse_event(
     event: dict[str, Any],
     model_id: str,
-    items: list[dict[str, Any]],
+    collector: _SSECollector,
     log: Logger,
     segment_len: int,
 ) -> tuple[bool, dict[str, Any] | None, list[dict[str, Any]] | None]:
-    """分类单个 SSE 事件：追加图片项或返回完成元信息；请求级错误抛 SeedreamAPIError。
+    """分类单个 SSE 事件并累计保留字节：产出图片项或完成元信息，请求级错误抛 SeedreamAPIError。
 
-    主循环与流末尾残留处理共用此函数，避免事件分支逻辑重复。未识别 type 的事件丢弃
-    并记录 debug 日志，携带事件 type 与事件段字节规模，便于排查上游新增事件形态。
+    主循环与流末尾残留处理共用此函数，避免事件分支逻辑重复。
+    产出图片项、完成元信息或请求级错误的事件为保留事件，段长计入保留字节。
+    渐进帧与未知类型事件丢弃且字节不计。
+    未知类型事件记录携带事件 type 与事件段字节规模的 debug 日志，
+    便于排查上游新增事件形态。
 
     Args:
         event: 已解析的 SSE 事件对象。
         model_id: 模型标识，用于图片项缺省值。
-        items: 图片项累计列表，成功与失败事件直接追加至此。
+        collector: 保留内容累计器，成功与失败事件直接追加至其条目列表。
         log: loguru logger 实例。
-        segment_len: 事件段字节规模，用于未知类型事件的排查日志。
+        segment_len: 事件段字节规模，保留事件计入保留字节，忽略事件仅用于排查日志。
 
     Returns:
         (completed, usage, tools) — completed 为 True 时 usage/tools 有效。
@@ -455,10 +483,11 @@ def _classify_sse_event(
     # 请求级错误事件：无 type 且顶层含 error 键。本质为 4xx，标记 status_code=400 使上层判定不可重试。
     if event_type is None and isinstance(event.get("error"), dict):
         err = event["error"]
-        if items:
+        if collector.items:
             # 已有产出时保留已计费的部分结果，与非流式部分成功口径一致；错误经
             # format_sse_failed_event 构造失败项，不覆盖先到的 usage 与 status。
-            items.append(format_sse_failed_event({"error": err}, model_id))
+            collector.retained_bytes += segment_len
+            collector.items.append(format_sse_failed_event({"error": err}, model_id))
             return False, None, None
         message_fragment = upstream_message_fragment(err.get("message"))
         raise SeedreamAPIError(
@@ -473,10 +502,13 @@ def _classify_sse_event(
             error_code=normalized_upstream_error_code(err.get("code")),
         )
     if event_type == "image_generation.partial_succeeded":
-        items.append(format_sse_success_event(event, model_id))
+        collector.retained_bytes += segment_len
+        collector.items.append(format_sse_success_event(event, model_id))
     elif event_type == "image_generation.partial_failed":
-        items.append(format_sse_failed_event(event, model_id))
+        collector.retained_bytes += segment_len
+        collector.items.append(format_sse_failed_event(event, model_id))
     elif event_type == "image_generation.completed":
+        collector.retained_bytes += segment_len
         return True, event.get("usage", {}) or {}, event.get("tools")
     elif event_type == "image_generation.partial_image":
         # 渐进帧事件：中间帧不产出结果项，最终图仍由后续事件给出。
@@ -492,7 +524,7 @@ def _classify_sse_event(
 
 async def _drain_sse_complete_events(
     frames: _SSEFrameBuffer,
-    collector: _SSEItemCollector,
+    collector: _SSECollector,
     *,
     model_id: str,
     log: Logger,
@@ -520,9 +552,7 @@ async def _drain_sse_complete_events(
             elif error is not None:
                 _log_segment_parse_failure(log, error, segment_len)
             continue
-        apply_completed(
-            *_classify_sse_event(event, model_id, collector.items, log, seg_end - seg_start)
-        )
+        apply_completed(*_classify_sse_event(event, model_id, collector, log, seg_end - seg_start))
         if collector.reached_cap():
             break
     return lost_events
@@ -534,18 +564,19 @@ async def _consume_sse_chunks(
     model_id: str,
     buffer_max_size: int,
     event_truncate_threshold: int,
-    total_bytes_limit: int,
+    retained_bytes_limit: int,
     log: Logger,
     deadline: float | None,
     frames: _SSEFrameBuffer,
-    collector: _SSEItemCollector,
+    collector: _SSECollector,
     apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
 ) -> tuple[int, bool]:
-    """分帧消费阶段：逐块读取响应流，执行事件解析与字节、条目、单事件上限截断。
+    """分帧消费阶段：逐块读取响应流，执行事件解析与保留字节、条目、单事件上限截断。
 
     Returns:
         (超限或解析失败丢弃的事件数, 是否因总时长预算超限提前终止)。
     """
+    # 接收字节只驱动进度日志，上限只计 collector.retained_bytes 的保留事件字节。
     processed_bytes = 0
     last_progress_log_bytes = 0
     # 超限或解析失败丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件被丢弃」。
@@ -555,7 +586,7 @@ async def _consume_sse_chunks(
     # aiter_bytes 必须按网络交付的原始块产出：显式 chunk_size 会按该值重新分块，
     # 凑不满一块的字节被扣留到 EOF，小流量 SSE 流因此失去增量性，且 deadline 分支
     # 看不到滞留字节内的已交付事件而误判零产出并重试已计费的生成请求。分帧缓冲
-    # 本就处理任意块边界，内存由字节总量与条目上限约束。
+    # 本就处理任意块边界，内存由保留字节上限、条目上限与单事件阈值约束。
     async with StreamSession(response.aiter_bytes()) as session:
         while True:
             try:
@@ -568,24 +599,6 @@ async def _consume_sse_chunks(
                 break
 
             processed_bytes += frames.extend(chunk)
-
-            # 累计接收字节超限即终止解析并关闭响应，防止恶意或受损上游无限送数撑爆内存。
-            if processed_bytes > total_bytes_limit:
-                log.warning(
-                    "SSE 响应流总量超限: 已接收 {} 字节，上限 {} 字节",
-                    processed_bytes,
-                    total_bytes_limit,
-                )
-                await _close_stream_response(response)
-                raise SeedreamAPIError(
-                    error_text(
-                        "SSE 响应流总量超限: 已接收 {received} 字节，超过上限 {limit} 字节{hint}",
-                        received=as_plain(processed_bytes),
-                        limit=as_plain(total_bytes_limit),
-                        hint=as_plain(RESPONSE_BODY_LIMIT_HINT),
-                    )
-                )
-
             if processed_bytes - last_progress_log_bytes >= _SSE_PROGRESS_LOG_INTERVAL_BYTES:
                 last_progress_log_bytes = processed_bytes
                 log.debug("已处理 {} 字节数据", processed_bytes)
@@ -593,6 +606,12 @@ async def _consume_sse_chunks(
             truncated_events += await _drain_sse_complete_events(
                 frames, collector, model_id=model_id, log=log, apply_completed=apply_completed
             )
+
+            # 保留事件字节超限即终止解析并关闭响应：保留内容全量驻留内存，须封顶。
+            if collector.retained_bytes > retained_bytes_limit:
+                await _terminate_sse_stream_on_retained_bytes_limit(
+                    response, collector, retained_bytes_limit=retained_bytes_limit, log=log
+                )
 
             # 条目数超上限：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
             if collector.reached_cap():
@@ -655,7 +674,7 @@ def _slice_parse_tail(
 
 async def _resolve_sse_trailing_segment(
     frames: _SSEFrameBuffer,
-    collector: _SSEItemCollector,
+    collector: _SSECollector,
     *,
     model_id: str,
     log: Logger,
@@ -670,7 +689,7 @@ async def _resolve_sse_trailing_segment(
     trailing_event, lost_payload, trailing_len = await frames.parse_tail(log)
     if trailing_event is not None:
         apply_completed(
-            *_classify_sse_event(trailing_event, model_id, collector.items, log, trailing_len)
+            *_classify_sse_event(trailing_event, model_id, collector, log, trailing_len)
         )
         return 0
     if trailing_len > 0 and lost_payload:
@@ -704,7 +723,7 @@ async def parse_sse_response(
     model_id: str,
     buffer_max_size: int,
     event_truncate_threshold: int,
-    total_bytes_limit: int,
+    retained_bytes_limit: int,
     min_items: int,
     log: Logger,
     deadline: float | None = None,
@@ -720,12 +739,12 @@ async def parse_sse_response(
             增长撑爆内存的安全阀；须大于单张合法图片 base64 负载上限，避免大图事件
             被误截断而永久丢失。与 buffer_max_size 解耦，前者管单事件体积上限，
             后者管前缀回收频率。
-        total_bytes_limit: 响应流累计接收字节总量上限，含全部事件段与不完整尾部，
-            超限时终止解析并关闭响应。单事件阈值拦不住大量小事件滴流的超限流。
-            解析产物条目数另按该上限除以单条解析产物的内存开销估计派生独立硬上限，
-            防止产物内存放大。
-        min_items: 条目数下限兜底，取单请求合法满额产图数（随能力表派生），极小
-            总量上限的推导上限不得误伤合法满额批次。
+        retained_bytes_limit: 保留事件的累计字节上限，超限时终止解析并关闭响应。
+            产出图片项、完成元信息或请求级错误的事件段计入，渐进帧与未知类型事件不计。
+            单事件阈值拦不住大量小事件滴流的超限流。解析产物条目数另按该上限除以
+            单条解析产物的内存开销估计派生独立硬上限，防止产物内存放大。
+        min_items: 条目数下限兜底，取单请求合法满额产图数（随能力表派生），
+            极小保留字节上限的推导上限不得误伤合法满额批次。
         log: loguru logger 实例，用于记录进度与告警。
         deadline: 解析全程的 time.monotonic 截止时间，None 表示不施加。
             读取超时按单次读操作计时，持续滴流时永不触发，截止时间封顶每次等块，
@@ -740,8 +759,8 @@ async def parse_sse_response(
         编码，事件被丢弃或超时提前终止时 status 收敛为 partial。
 
     Raises:
-        SeedreamAPIError: 响应流累计接收字节超过 total_bytes_limit，或上游返回请求级
-            错误事件。
+        SeedreamAPIError: 保留事件累计字节超过 retained_bytes_limit，或上游返回
+            请求级错误事件。
         asyncio.TimeoutError: 提供 deadline 且超过截止时间时流中尚无已解析条目。
     """
     usage: dict[str, Any] = {}
@@ -772,14 +791,14 @@ async def parse_sse_response(
             tools = evt_tools
 
     frames = _SSEFrameBuffer()
-    collector = _SSEItemCollector(total_bytes_limit, min_items)
+    collector = _SSECollector(retained_bytes_limit, min_items)
 
     truncated_events, deadline_exceeded = await _consume_sse_chunks(
         response,
         model_id=model_id,
         buffer_max_size=buffer_max_size,
         event_truncate_threshold=event_truncate_threshold,
-        total_bytes_limit=total_bytes_limit,
+        retained_bytes_limit=retained_bytes_limit,
         log=log,
         deadline=deadline,
         frames=frames,
@@ -796,6 +815,10 @@ async def parse_sse_response(
             log=log,
             apply_completed=apply_completed,
         )
+        if collector.retained_bytes > retained_bytes_limit:
+            await _terminate_sse_stream_on_retained_bytes_limit(
+                response, collector, retained_bytes_limit=retained_bytes_limit, log=log
+            )
 
     # completed 已到即结果完整，超时仅终止了尾部连接保持，不标记部分结果
     if deadline_exceeded and status == "completed":

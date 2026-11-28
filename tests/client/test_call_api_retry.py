@@ -52,8 +52,10 @@ async def test_call_api_selects_response_callback_by_stream_flag(
 
     async with SeedreamClient(config) as client:
         monkeypatch.setattr(client, "_send_request", fake_send)
-        await client._call_api("text_to_image", {"prompt": "p"})
-        await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+        await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
+        await client._call_api(
+            "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+        )
 
         assert captured == [
             client._parse_json_success_response,
@@ -74,7 +76,7 @@ async def test_call_api_retries_on_429_then_succeeds(
             )
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        result = await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 2
     assert result["success"] is True
@@ -90,7 +92,7 @@ async def test_call_api_4xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_slee
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamAPIError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 1
 
@@ -105,7 +107,7 @@ async def test_call_api_3xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_slee
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamAPIError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 1
 
@@ -128,7 +130,7 @@ async def test_call_api_exponential_backoff_no_overflow_on_huge_retries(
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamAPIError) as excinfo:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == config.max_retries + 1
     assert "too large to convert" not in str(excinfo.value)
@@ -146,7 +148,7 @@ async def test_call_api_timeout_retried_then_mapped(
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     # max_retries=1 表示首次失败后还可重试 1 次，故共 2 次尝试
     assert send_calls() == 2
@@ -162,7 +164,7 @@ async def test_call_api_unexpected_error_not_retried(
         fake_send, send_calls = _make_send_request_fake(lambda _call: ValueError("unexpected bug"))
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(ValueError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 1
 
@@ -180,7 +182,7 @@ async def test_call_api_retries_on_5xx_then_succeeds(
             )
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        result = await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 2
     assert result["success"] is True
@@ -198,7 +200,7 @@ async def test_call_api_network_error_retries_then_mapped(
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamNetworkError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     # max_retries=1 表示首次失败后还可重试 1 次，故共 2 次尝试
     assert send_calls() == 2
@@ -224,7 +226,7 @@ async def test_call_api_429_uses_retry_after_for_backoff(
             )
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        result = await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 2
     assert result["success"] is True
@@ -251,7 +253,7 @@ async def test_call_api_429_retry_after_above_backoff_cap(
             )
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        result = await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 2
     assert result["success"] is True
@@ -291,7 +293,7 @@ async def test_call_api_429_retry_after_jitter_floors_at_nominal(
             )
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        result = await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 2
     assert result["success"] is True
@@ -320,7 +322,7 @@ async def test_call_api_no_status_code_not_retried(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="JSON 解析失败") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
         # status_code 为 None 的错误不可重试
         assert exc_info.value.status_code is None
@@ -332,11 +334,13 @@ async def test_standard_request_rejects_oversized_content_length(
 ) -> None:
     """非流式路径：Content-Length 声明超过总量上限的响应在读取前即拒绝。
 
-    上限为 b64_json 单图 base64 最坏展开（4×⌈1024/3⌉=1368 字节），此处压缩
-    auto_save_max_file_size 以便测试；伪造远超实际 body 的 Content-Length 模拟
-    被污染上游的巨型响应声明。
+    上限为 b64_json 单图投影（默认 5.5 家族单图派生约 25MB）。
+    伪造恰超投影的 Content-Length 模拟被污染上游的巨型响应声明，体本身保持最小。
     """
-    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    declared = (
+        config.effective_response_body_limit(response_format="b64_json", max_image_count=1) + 1
+    )
     attempts = 0
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -345,7 +349,7 @@ async def test_standard_request_rejects_oversized_content_length(
         attempts += 1
         return httpx.Response(
             200,
-            headers={"content-length": str(1024 * 1024)},
+            headers={"content-length": str(declared)},
             content=b"{}",
         )
 
@@ -353,7 +357,11 @@ async def test_standard_request_rejects_oversized_content_length(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p", "response_format": "b64_json"})
+            await client._call_api(
+                "text_to_image",
+                {"prompt": "p", "response_format": "b64_json"},
+                per_request_image_count=1,
+            )
 
         # 无状态码的超限错误不可重试，避免对非幂等生成 API 重复请求
         assert exc_info.value.status_code is None
@@ -369,7 +377,10 @@ async def test_standard_request_rejects_chunked_body_over_limit(
     content 传异步生成器时 httpx 不携带 Content-Length 头，模拟分块滴流的巨型响应；
     限额读取必须不依赖 Content-Length 声明，在 aiter_bytes 累计中强制执行。
     """
-    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    limit = config.effective_response_body_limit(response_format="b64_json", max_image_count=1)
+    chunk = 64 * 1024
+    chunk_count = limit // chunk + 2
     attempts = 0
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -378,9 +389,9 @@ async def test_standard_request_rejects_chunked_body_over_limit(
         attempts += 1
 
         async def _stream() -> AsyncIterator[bytes]:
-            # b64_json 单图上限 4×⌈1024/3⌉=1368 字节，共送出 144KB 确保跨过上限。
-            for _ in range(144):
-                yield b"x" * 1024
+            # 64KiB 分块送出略超 b64 单图投影的体量，确保跨过上限。
+            for _ in range(chunk_count):
+                yield b"x" * chunk
 
         return httpx.Response(200, content=_stream())
 
@@ -388,7 +399,11 @@ async def test_standard_request_rejects_chunked_body_over_limit(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p", "response_format": "b64_json"})
+            await client._call_api(
+                "text_to_image",
+                {"prompt": "p", "response_format": "b64_json"},
+                per_request_image_count=1,
+            )
 
         # 错误消息携带实际读取字节数，且无状态码不可重试
         assert "已读取" in exc_info.value.message
@@ -422,7 +437,9 @@ async def test_stream_5xx_retries_with_status_code(no_sleep: None) -> None:
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="服务器内部错误") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+            await client._call_api(
+                "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+            )
 
         # 错误链路携带状态码与上游错误码，5xx 语义重试至耗尽
         assert exc_info.value.status_code == 500
@@ -452,7 +469,9 @@ async def test_stream_429_uses_retry_after_for_backoff(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="上游返回限流") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+            await client._call_api(
+                "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+            )
 
         assert exc_info.value.status_code == 429
         assert exc_info.value.retry_after == 2.0
@@ -476,7 +495,9 @@ async def test_stream_3xx_not_retried(no_sleep: None) -> None:
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError) as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+            await client._call_api(
+                "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+            )
 
         assert exc_info.value.status_code == 302
         assert attempts == 1
@@ -498,7 +519,7 @@ async def test_call_api_exponential_backoff_sequence_locked(
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamAPIError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 10
     # attempt 0..8 的间隔：2^0..2^5 原值，2^6 起 min(2^6*1, 60) 封顶 60
@@ -521,7 +542,7 @@ async def test_call_api_retry_budget_terminates_before_exhausting_attempts(
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.00 秒不足以支撑一次完整尝试"):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 2
 
@@ -545,7 +566,7 @@ async def test_call_api_attempt_timeout_clamped_to_remaining_budget(
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.00 秒不足以支撑一次完整尝试"):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert attempt_budgets[0] == 1.0
     assert attempt_budgets[1] == pytest.approx(0.2)
@@ -568,7 +589,7 @@ async def test_call_api_retry_budget_floor_blocks_fractional_remainder(
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.08 秒不足以支撑一次完整尝试"):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert send_calls() == 1
 
@@ -592,7 +613,7 @@ async def test_call_api_retry_budget_floor_allows_remainder_above_floor(
         )
         monkeypatch.setattr(client, "_send_request", fake_send)
         with pytest.raises(SeedreamTimeoutError, match="剩余预算 0.00 秒不足以支撑一次完整尝试"):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert attempt_budgets[0] == 1.0
     assert attempt_budgets[1] == pytest.approx(0.14)

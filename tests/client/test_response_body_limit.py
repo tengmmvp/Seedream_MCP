@@ -1,10 +1,11 @@
 """上游响应体读取上限域守护测试。
 
 覆盖错误体独立上限与状态码重试语义、错误体 JSON 解析阈值分派与 message 截断、
-response_body_limit 显式配置与按请求形态投影、成功体 data 条目硬上限、SSE 截断
-阈值边界与计数透传、慢滴流与头部停滞的总预算超时、末块到点打捞的完整交付、
-持续就绪流的周期性墙钟复查、错误体读取超时与传输错误的状态码归约。网络层经
-httpx.MockTransport 模拟，不触达真实 API。
+response_body_limit 显式配置与按请求形态投影、成功体 data 条目上限、
+SSE 截断阈值边界与计数透传、SSE 渐进帧不计入读体上限、
+慢滴流与头部停滞的总预算超时、末块到点打捞的完整交付、
+持续就绪流的周期性墙钟复查、错误体读取超时与传输错误的状态码归约。
+网络层经 httpx.MockTransport 模拟，不触达真实 API。
 """
 
 from __future__ import annotations
@@ -12,26 +13,38 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
 import pytest
 
+import seedream_mcp.config._model as config_model
 from seedream_mcp.client._http import _ERROR_BODY_BYTE_LIMIT as _ERROR_BODY_CAP
 from seedream_mcp.client._http import _ERROR_JSON_PARSE_LIMIT
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.definitions.conventions import DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamTimeoutError
 
-from _lib.client_fakes import _install_mock_transport
+from _lib.client_fakes import _install_mock_transport, _partial_image_event
 from _lib.cpu_offload_spy import CpuOffloadSpy
+
+
+def _patch_single_image_bytes(monkeypatch: pytest.MonkeyPatch, single_image_bytes: int) -> None:
+    """把配置模块解析的单图最坏字节数替换为给定值，驱动 SSE 阈值推导到小量级。"""
+    monkeypatch.setattr(config_model, "max_single_image_bytes", lambda model_id: single_image_bytes)
+
+
+def _b64_single_image_limit(config: SeedreamConfig) -> int:
+    """取 b64_json 单图形态的读体上限投影，作为客户端用例的期望上限来源。"""
+    return config.effective_response_body_limit(response_format="b64_json", max_image_count=1)
 
 
 async def test_error_body_over_independent_cap_rejected(no_sleep: None) -> None:
     """非 200 的 chunked 错误体超过 4MB 独立上限时在累计读取中拦截。
 
-    请求为 b64_json 形态，本请求总量投影约 69.9MB（50MB 文件上限单图派生），
+    请求为 b64_json 形态，本请求总量投影约 25MB（默认 5.5 家族单图派生），
     5MB 错误体低于该投影，命中只能来自错误路径独立上限。
     """
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -49,7 +62,11 @@ async def test_error_body_over_independent_cap_rejected(no_sleep: None) -> None:
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p", "response_format": "b64_json"})
+            await client._call_api(
+                "text_to_image",
+                {"prompt": "p", "response_format": "b64_json"},
+                per_request_image_count=1,
+            )
 
         assert "已读取" in exc_info.value.message
         assert str(_ERROR_BODY_CAP) in exc_info.value.message
@@ -60,7 +77,7 @@ async def test_error_body_over_independent_cap_rejected(no_sleep: None) -> None:
 async def test_error_body_declared_length_over_independent_cap(no_sleep: None) -> None:
     """非 200 错误体 Content-Length 声明超过 4MB 时无需读取即拒绝。
 
-    请求为 b64_json 形态，本请求总量投影约 69.9MB（50MB 文件上限单图派生），
+    请求为 b64_json 形态，本请求总量投影约 25MB（默认 5.5 家族单图派生），
     声明的 10MB 低于该投影，拒绝只能来自错误路径独立上限。
     """
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -77,7 +94,11 @@ async def test_error_body_declared_length_over_independent_cap(no_sleep: None) -
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="Content-Length") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p", "response_format": "b64_json"})
+            await client._call_api(
+                "text_to_image",
+                {"prompt": "p", "response_format": "b64_json"},
+                per_request_image_count=1,
+            )
 
         assert str(_ERROR_BODY_CAP) in exc_info.value.message
 
@@ -100,7 +121,7 @@ async def test_error_body_hint_kept_when_explicit_limit_below_cap(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
         assert str(2 * 1024 * 1024) in exc_info.value.message
         assert "SEEDREAM_RESPONSE_BODY_LIMIT" in exc_info.value.message
@@ -123,7 +144,7 @@ async def test_error_body_small_json_parse_runs_outside_cpu_pool(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="请求参数错误"):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     spy.assert_ran_outside_cpu_pool()
 
@@ -152,7 +173,7 @@ async def test_error_body_json_parse_at_limit_runs_in_cpu_pool(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="请求参数错误"):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     spy.assert_ran_in_cpu_pool()
 
@@ -170,7 +191,7 @@ async def test_non_json_error_body_message_truncated(no_sleep: None) -> None:
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError) as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
         message = exc_info.value.message
         assert len(message) < 10 * 1024
@@ -181,12 +202,7 @@ async def test_non_json_error_body_message_truncated(no_sleep: None) -> None:
 
 async def test_response_body_limit_explicit_config_overrides_derivation(no_sleep: None) -> None:
     """显式 response_body_limit 直接生效，优先于按请求形态投影。"""
-    config = SeedreamConfig(
-        api_key="k",
-        max_retries=3,
-        auto_save_max_file_size=1024,
-        response_body_limit=8192,
-    )
+    config = SeedreamConfig(api_key="k", max_retries=3, response_body_limit=8192)
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
@@ -200,21 +216,22 @@ async def test_response_body_limit_explicit_config_overrides_derivation(no_sleep
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
         # 16KB 超过显式上限 8192 但低于缺省 url 投影 4MB，命中说明显式配置生效。
         assert str(8192) in exc_info.value.message
 
 
-async def test_response_body_limit_derived_from_file_size(no_sleep: None) -> None:
-    """未配置 response_body_limit 时 b64_json 按单图 base64 最坏展开投影生效。"""
-    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+async def test_response_body_limit_derived_from_family_pixels(no_sleep: None) -> None:
+    """未配置 response_body_limit 时 b64_json 按单图最坏展开加每图信封余量与总信封余量投影生效。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    limit = _b64_single_image_limit(config)
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
         return httpx.Response(
             200,
-            headers={"content-length": str(4 * ((1024 + 2) // 3) + 1)},
+            headers={"content-length": str(limit + 1)},
             content=b"{}",
         )
 
@@ -222,21 +239,52 @@ async def test_response_body_limit_derived_from_file_size(no_sleep: None) -> Non
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p", "response_format": "b64_json"})
+            await client._call_api(
+                "text_to_image",
+                {"prompt": "p", "response_format": "b64_json"},
+                per_request_image_count=1,
+            )
 
-        assert str(4 * ((1024 + 2) // 3)) in exc_info.value.message
+        assert str(limit) in exc_info.value.message
+
+
+async def test_b64_json_body_over_auto_save_max_file_size_accepted(no_sleep: None) -> None:
+    """auto_save_max_file_size 取 1MiB 时约 2MiB 的 b64_json 成功体照常接受。
+
+    读体上限以模型家族像素为单图基准，保存上限只约束落盘。
+    两者耦合时该体被以「响应体过大」拒绝，已计费响应随之销毁。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024 * 1024)
+    b64_chars = 2 * 1024 * 1024
+    payload = json.dumps({"data": [{"b64_json": "A" * b64_chars}], "usage": {}}).encode()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=payload, headers={"content-type": "application/json"})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+        result = await client._call_api(
+            "text_to_image",
+            {"prompt": "p", "response_format": "b64_json"},
+            per_request_image_count=1,
+        )
+
+    assert result["success"] is True
+    assert len(result["data"][0]["b64_json"]) == b64_chars
 
 
 async def test_response_body_limit_b64_scales_with_request_image_count(no_sleep: None) -> None:
-    """b64_json 投影按请求产图数上限放大：组图 max_images=2 时为单图展开的两倍。"""
-    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
-    single = 4 * ((1024 + 2) // 3)
+    """b64_json 投影按装配产图数放大：产图数 2 时为两图最坏展开加每图信封余量与总信封余量。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    limit = config.effective_response_body_limit(response_format="b64_json", max_image_count=2)
+    assert limit > _b64_single_image_limit(config)
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
         return httpx.Response(
             200,
-            headers={"content-length": str(2 * single + 1)},
+            headers={"content-length": str(limit + 1)},
             content=b"{}",
         )
 
@@ -251,14 +299,15 @@ async def test_response_body_limit_b64_scales_with_request_image_count(no_sleep:
                     "response_format": "b64_json",
                     "sequential_image_generation_options": {"max_images": 2},
                 },
+                per_request_image_count=2,
             )
 
-        assert str(2 * single) in exc_info.value.message
+        assert str(limit) in exc_info.value.message
 
 
 async def test_response_body_limit_url_format_uses_structural_cap(no_sleep: None) -> None:
-    """未配置时 url 格式取结构性固定上限，与产图数和文件大小上限无关。"""
-    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+    """未配置时 url 格式取结构性固定上限，与产图数无关。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
@@ -271,7 +320,7 @@ async def test_response_body_limit_url_format_uses_structural_cap(no_sleep: None
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
 
-        # 5MB 超过 url 结构性上限 4MB；b64 投影（单图 1368）拦不住该声明，
+        # 5MB 超过 url 结构性上限 4MB 但低于 b64 投影（满额 15 图约 375MB），
         # 命中说明 url 格式未走 b64 投影。
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
             await client._call_api(
@@ -281,6 +330,7 @@ async def test_response_body_limit_url_format_uses_structural_cap(no_sleep: None
                     "response_format": "url",
                     "sequential_image_generation_options": {"max_images": 15},
                 },
+                per_request_image_count=15,
             )
 
         assert str(4 * 1024 * 1024) in exc_info.value.message
@@ -289,15 +339,17 @@ async def test_response_body_limit_url_format_uses_structural_cap(no_sleep: None
 async def test_response_body_limit_layer_default_uses_official_server_default(
     no_sleep: None,
 ) -> None:
-    """图层拆分未显式给 max_images 时按官方服务端默认 30 投影产图数上限。"""
-    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
-    single = 4 * ((1024 + 2) // 3)
+    """拆分缺省档（官方服务端默认 30 图）按装配产图数放大读体上限投影。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    limit = config.effective_response_body_limit(
+        response_format="b64_json", max_image_count=DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES
+    )
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
         return httpx.Response(
             200,
-            headers={"content-length": str(30 * single + 1)},
+            headers={"content-length": str(limit + 1)},
             content=b"{}",
         )
 
@@ -308,18 +360,23 @@ async def test_response_body_limit_layer_default_uses_official_server_default(
             await client._call_api(
                 "image_to_image",
                 {"prompt": "p", "response_format": "b64_json", "layer_decomposition": True},
+                per_request_image_count=DEFAULT_LAYER_DECOMPOSITION_MAX_IMAGES,
             )
 
-        assert str(30 * single) in exc_info.value.message
+        assert str(limit) in exc_info.value.message
 
 
-async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) -> None:
-    """解码后恰好 n 字节且 n mod 3 = 1 的边界事件不被截断。
+async def test_stream_event_at_exact_base64_bound_not_truncated(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """解码后恰为单图最坏字节数且 n mod 3 = 1 的边界事件不被截断。
 
-    n mod 3 余 1 时旧近似式 ⌈4n/3⌉ 比真实 base64 长度 4⌈n/3⌉ 小 2 字节，
-    叠加 data: 前缀与 JSON 包络后旧阈值会误截断本用例的合法事件。
+    单事件阈值为单图 base64 精确长度 4⌈n/3⌉ 加信封余量，最坏尺寸的合法图片事件
+    连同 SSE 框架须整体落入阈值内。
     """
     n = 100_000
+    assert n % 3 == 1
+    _patch_single_image_bytes(monkeypatch, n)
     b64_len = 4 * ((n + 2) // 3)  # n 字节负载的 base64 精确长度
     event_bytes = (
         b'data: {"type":"image_generation.partial_succeeded","b64_json":"'
@@ -327,15 +384,8 @@ async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) 
         + b'"}\n\n'
         + b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n'
     )
-    # 事件总长含信封，超过旧公式阈值，证明本用例落在旧公式的误截断区间
-    assert len(event_bytes) > (n * 4 + 2) // 3
 
-    config = SeedreamConfig(
-        api_key="k",
-        max_retries=3,
-        auto_save_max_file_size=n,
-        stream_buffer_max_size=1024,
-    )
+    config = SeedreamConfig(api_key="k", max_retries=3, stream_buffer_max_size=1024)
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
@@ -348,7 +398,9 @@ async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) 
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
 
-        result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+        )
 
     # 无截断时计数 0 原样透传，results 侧按值归一渲染提示
     assert result["truncated_events"] == 0
@@ -356,18 +408,16 @@ async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) 
     assert len(result["data"][0]["b64_json"]) == b64_len
 
 
-async def test_stream_truncated_events_passed_through_in_payload(no_sleep: None) -> None:
+async def test_stream_truncated_events_passed_through_in_payload(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
     """SSE 事件因超限被丢弃时，truncated_events 计数透传进 api result payload。
 
-    单个未完成事件超过阈值即被丢弃并计数；首个分块送出 6KB 无分隔符事件，超过
-    压缩配置后的阈值触发截断，随后的 completed 事件正常解析。
+    单个未完成事件超过阈值即被丢弃并计数。单图基准替换为 1024 字节后阈值约 5.4KB，
+    首个分块送出 6KB 无分隔符事件超过阈值触发截断，随后的 completed 事件正常解析。
     """
-    config = SeedreamConfig(
-        api_key="k",
-        max_retries=3,
-        auto_save_max_file_size=1024,
-        stream_buffer_max_size=1024,
-    )
+    _patch_single_image_bytes(monkeypatch, 1024)
+    config = SeedreamConfig(api_key="k", max_retries=3, stream_buffer_max_size=1024)
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
@@ -382,7 +432,9 @@ async def test_stream_truncated_events_passed_through_in_payload(no_sleep: None)
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
 
-        result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+        )
 
     assert result["truncated_events"] == 1
     assert isinstance(result["truncated_events"], int)
@@ -392,14 +444,18 @@ async def test_stream_truncated_events_passed_through_in_payload(no_sleep: None)
 
 async def test_stream_json_over_limit_error_not_wrapped_as_parse_failure(no_sleep: None) -> None:
     """流式 JSON 响应超限时「响应体过大」原文上抛，不被 JSON 解析失败包装。"""
-    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    limit = _b64_single_image_limit(config)
+    chunk = 64 * 1024
+    chunk_count = limit // chunk + 2
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
 
         async def _stream() -> AsyncIterator[bytes]:
-            for _ in range(144):  # 144KB，超过 b64 单图投影 1368
-                yield b"x" * 1024
+            # 64KiB 分块送出略超 b64 单图投影的体量，确保跨过上限。
+            for _ in range(chunk_count):
+                yield b"x" * chunk
 
         return httpx.Response(200, content=_stream(), headers={"content-type": "application/json"})
 
@@ -408,12 +464,114 @@ async def test_stream_json_over_limit_error_not_wrapped_as_parse_failure(no_slee
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
             await client._call_api(
-                "text_to_image", {"prompt": "p", "stream": True, "response_format": "b64_json"}
+                "text_to_image",
+                {"prompt": "p", "stream": True, "response_format": "b64_json"},
+                per_request_image_count=1,
             )
 
         assert "JSON 解析失败" not in exc_info.value.message
         assert "已读取" in exc_info.value.message
         assert exc_info.value.status_code is None
+
+
+def _sse_event(payload: dict[str, Any]) -> bytes:
+    """把事件对象编码为单条 SSE 事件段。"""
+    return b"data: " + json.dumps(payload).encode() + b"\n\n"
+
+
+def _progressive_frame_handler(
+    retained_events: list[bytes], attempts: list[int]
+) -> Callable[[httpx.Request], httpx.Response]:
+    """构造先发 3 个各 1.5MiB 渐进帧、再发 retained_events 与 completed、[DONE] 的 SSE 处理函数。
+
+    每次请求向 attempts 追加一项，供调用方断言尝试次数。
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        attempts.append(1)
+
+        async def _stream() -> AsyncIterator[bytes]:
+            for _ in range(3):
+                yield _partial_image_event(3 * 512 * 1024)
+            for event in retained_events:
+                yield event
+            yield _sse_event(
+                {"type": "image_generation.completed", "usage": {"generated_images": 15}}
+            )
+            yield b"data: [DONE]\n\n"
+
+        return httpx.Response(200, content=_stream(), headers={"content-type": "text/event-stream"})
+
+    return _handler
+
+
+async def test_stream_url_progressive_frames_exempt_from_body_limit(no_sleep: None) -> None:
+    """stream=True 落 url 格式时渐进帧不计入读体上限，15 图组图流完整返回且只尝试一次。
+
+    url 投影为 4MB 结构性上限，3 个各 1.5MiB 的渐进帧按线路字节计即越限，
+    以无状态码错误丢掉全部已计费图片且不重试。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3, model_id="doubao-seedream-5.0")
+    attempts: list[int] = []
+    urls = [f"http://x/{index}.png" for index in range(15)]
+    handler = _progressive_frame_handler(
+        [_sse_event({"type": "image_generation.partial_succeeded", "url": url}) for url in urls],
+        attempts,
+    )
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, handler)
+        result = await client._call_api(
+            "sequential_generation",
+            {
+                "prompt": "p",
+                "stream": True,
+                "sequential_image_generation_options": {"max_images": 15},
+            },
+            per_request_image_count=15,
+        )
+
+    assert len(attempts) == 1
+    assert result["success"] is True
+    assert result["status"] == "completed"
+    assert [item["url"] for item in result["data"]] == urls
+    assert result["truncated_events"] == 0
+
+
+async def test_stream_b64_json_progressive_frames_exempt_from_body_limit(no_sleep: None) -> None:
+    """stream=True 且 b64_json 时渐进帧同样不计入读体上限，15 张 b64 图全部返回。
+
+    显式 2MB 上限下 3 个各 1.5MiB 的渐进帧按线路字节计即越限，
+    保留事件合计约 1MB 低于上限。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3, response_body_limit=2 * 1024 * 1024)
+    attempts: list[int] = []
+    b64_chars = 64 * 1024
+    handler = _progressive_frame_handler(
+        [_sse_event({"type": "image_generation.partial_succeeded", "b64_json": "A" * b64_chars})]
+        * 15,
+        attempts,
+    )
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, handler)
+        result = await client._call_api(
+            "sequential_generation",
+            {
+                "prompt": "p",
+                "stream": True,
+                "response_format": "b64_json",
+                "sequential_image_generation_options": {"max_images": 15},
+            },
+            per_request_image_count=15,
+        )
+
+    assert len(attempts) == 1
+    assert result["success"] is True
+    assert result["status"] == "completed"
+    assert [len(item["b64_json"]) for item in result["data"]] == [b64_chars] * 15
+    assert result["truncated_events"] == 0
 
 
 async def test_success_body_large_json_parses_from_bytearray(
@@ -424,7 +582,7 @@ async def test_success_body_large_json_parses_from_bytearray(
     读体不再有 chunks 列表与 join 合并，大响应体无双重驻留与合并阻塞。
     """
     config = SeedreamConfig(api_key="k", max_retries=3)
-    # 9MB 成功 JSON 体，低于 b64 单图投影（50MB 文件上限派生约 69.9MB）
+    # 9MB 成功 JSON 体，低于 b64 单图投影（默认 5.5 家族单图派生约 25MB）
     payload = b'{"x":"' + b"a" * (9 * 1024 * 1024) + b'"}'
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -434,7 +592,9 @@ async def test_success_body_large_json_parses_from_bytearray(
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
         result = await client._call_api(
-            "text_to_image", {"prompt": "p", "response_format": "b64_json"}
+            "text_to_image",
+            {"prompt": "p", "response_format": "b64_json"},
+            per_request_image_count=1,
         )
 
     assert result["success"] is True
@@ -443,7 +603,7 @@ async def test_success_body_large_json_parses_from_bytearray(
 async def test_success_json_data_items_over_cap_rejected(no_sleep: None) -> None:
     """成功 JSON 体的 data 条目数超过按总量限额推导的上限时拒绝该响应。
 
-    大量小条目在字节未超限时仍可放大解析产物内存，与 SSE 条目硬上限经
+    大量小条目在字节未超限时仍可放大解析产物内存，与 SSE 条目上限经
     items_limit_for 同口径推导；显式上限 137216 派生 306，307 项即超上限。无状态码
     即不可重试，避免对非幂等生成 API 重复请求。
     """
@@ -464,7 +624,7 @@ async def test_success_json_data_items_over_cap_rejected(no_sleep: None) -> None
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应条目数过多") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
         assert exc_info.value.status_code is None
         assert attempts == 1
@@ -484,7 +644,7 @@ async def test_success_json_data_items_at_cap_accepted(no_sleep: None) -> None:
 
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        result = await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert result["success"] is True
     assert len(result["data"]) == 306
@@ -537,7 +697,9 @@ async def test_sse_slow_drip_over_total_budget_times_out_and_retries(no_sleep: N
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamTimeoutError, match="API 调用超时"):
-            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+            await client._call_api(
+                "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+            )
 
     assert attempts == config.max_retries + 1
 
@@ -577,7 +739,9 @@ async def test_sse_slow_drip_with_partial_results_terminates_gracefully(
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
 
-        result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+        result = await client._call_api(
+            "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+        )
 
     assert attempts == 1
     assert result["deadline_exceeded"] is True
@@ -605,7 +769,7 @@ async def test_standard_slow_drip_json_over_total_budget_times_out(no_sleep: Non
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamTimeoutError, match="API 调用超时"):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert attempts == config.max_retries + 1
 
@@ -687,7 +851,9 @@ async def test_stream_header_stall_over_api_timeout_times_out(no_sleep: None) ->
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamTimeoutError, match="API 调用超时"):
-            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+            await client._call_api(
+                "text_to_image", {"prompt": "p", "stream": True}, per_request_image_count=1
+            )
 
     assert attempts == config.max_retries + 1
 
@@ -708,7 +874,7 @@ async def test_standard_header_stall_over_api_timeout_times_out(no_sleep: None) 
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamTimeoutError, match="API 调用超时"):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert attempts == config.max_retries + 1
 
@@ -758,12 +924,12 @@ async def test_malformed_content_length_degrades_to_streamed_read(no_sleep: None
 
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        result = await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert result["success"] is True
 
 
-# 前四形态曾获裸 int() 宽松解析、预检值 1048576 超上限 137216 致旧口径误报超限；
+# 前四形态若回退成裸 int() 宽松解析，显式上限 64KiB 下预检值 1048576 会误报超限。
 # 超长数字串两种口径一致跳过，此处锁定归 None 不抛 ValueError。
 _LENIENT_INT_DECLARED_FORMS = [
     pytest.param(" 1048576", id="leading-space"),
@@ -779,7 +945,7 @@ async def test_lenient_int_content_length_forms_skip_precheck(
     declared: str, no_sleep: None
 ) -> None:
     """畸形 Content-Length 声明按未申报跳过预检，流式累计兜底读取，不误报超限。"""
-    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+    config = SeedreamConfig(api_key="k", max_retries=3, response_body_limit=64 * 1024)
     body = json.dumps({"data": [], "usage": {}, "status": "completed"}).encode()
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -788,7 +954,7 @@ async def test_lenient_int_content_length_forms_skip_precheck(
 
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        result = await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
     assert result["success"] is True
 
@@ -853,7 +1019,7 @@ async def test_error_body_read_transport_error_keeps_4xx_status_no_retry(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="读取错误响应体失败（状态码 400）") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
         assert exc_info.value.status_code == 400
         assert attempts == 1
@@ -881,7 +1047,7 @@ async def test_error_body_read_transport_error_keeps_5xx_retry_semantics(
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="读取错误响应体失败（状态码 500）") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
         assert exc_info.value.status_code == 500
         assert attempts == config.max_retries + 1
@@ -911,7 +1077,7 @@ async def test_5xx_oversized_error_body_retries_by_status_code(no_sleep: None) -
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="Content-Length") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
         assert exc_info.value.status_code == 500
         # 5xx 可重试语义保留：尝试次数为 max_retries + 1
@@ -936,7 +1102,7 @@ async def test_4xx_oversized_error_body_fails_fast(no_sleep: None) -> None:
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="Content-Length") as exc_info:
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p"}, per_request_image_count=1)
 
         assert exc_info.value.status_code == 400
         # 4xx 非可重试：仅尝试一次

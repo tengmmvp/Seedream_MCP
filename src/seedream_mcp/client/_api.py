@@ -29,7 +29,7 @@ from ..utils.core.logs import get_logger
 from ..utils.core.safety import resolve_safety_identifier
 from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-    get_model_capabilities,
+    layer_decomposition_image_count,
     layer_decomposition_layer_limits_text,
     layer_decomposition_presets_text,
     limited_reference_families_annotation,
@@ -169,16 +169,13 @@ class SeedreamClient(_ClientHTTPMixin):
         request_data: dict[str, Any] = {
             "model": self.config.model_id,
         }
-        # 仅能力声明支持的家族附加，避免向其余模型发参被 API 拒绝。
-        safety_identifier = resolve_safety_identifier(
+        safety_identifier_decision = resolve_safety_identifier(
             enabled=self.config.safety_identifier_enabled,
+            model_id=self.config.model_id,
             explicit_identifier=self.config.safety_identifier,
         )
-        if (
-            safety_identifier
-            and get_model_capabilities(self.config.model_id).supports_safety_identifier
-        ):
-            request_data["safety_identifier"] = safety_identifier
+        if safety_identifier_decision.value is not None:
+            request_data["safety_identifier"] = safety_identifier_decision.value
         if validated.prompt is not None:
             request_data["prompt"] = validated.prompt
         if validated.optimize_prompt_options:
@@ -269,7 +266,9 @@ class SeedreamClient(_ClientHTTPMixin):
                 _ACTIVE_REQUEST_PLAN.get(), TEXT_TO_IMAGE_TOOL_NAME, _build_request
             )
 
-            response = await self._call_api(TEXT_TO_IMAGE_TOOL_NAME, request_data)
+            response = await self._call_api(
+                TEXT_TO_IMAGE_TOOL_NAME, request_data, per_request_image_count=1
+            )
 
             self._log_task_outcome("文生图", response)
             return response
@@ -354,15 +353,31 @@ class SeedreamClient(_ClientHTTPMixin):
             self.config.model_id,
             layer_decomposition=resolved_layer_decomposition,
         )
+        layer_options = resolved_layer_options or {}
+        # 产图数在装配点声明并随调用链直传读体上限投影，不自请求体反推。
+        if resolved_layer_decomposition:
+            request_image_count = layer_decomposition_image_count(
+                layer_options.get("max_images"), self.config.model_id
+            )
+        else:
+            request_image_count = 1
 
         # 图层拆分复用本方法请求流，任务标签按场景取值，日志归因不与图文生图混流。
         task_label = "图层拆分" if resolved_layer_decomposition else "图文生图"
-        self.logger.opt(lazy=True).info(
-            "开始{}任务: prompt_meta={}, size={}",
-            lambda: task_label,
-            lambda: self._summarize_prompt(validated.prompt),
-            lambda: validated.size,
-        )
+        if resolved_layer_decomposition:
+            self.logger.opt(lazy=True).info(
+                "开始图层拆分任务: prompt_meta={}, max_images={}, text_recognition={}, size={}",
+                lambda: self._summarize_prompt(validated.prompt),
+                lambda: layer_options.get("max_images"),
+                lambda: layer_options.get("text_recognition"),
+                lambda: validated.size,
+            )
+        else:
+            self.logger.opt(lazy=True).info(
+                "开始图文生图任务: prompt_meta={}, size={}",
+                lambda: self._summarize_prompt(validated.prompt),
+                lambda: validated.size,
+            )
 
         async def _build_request() -> dict[str, Any]:
             image_data = await self._prepare_image_input(image)
@@ -380,7 +395,11 @@ class SeedreamClient(_ClientHTTPMixin):
                 _ACTIVE_REQUEST_PLAN.get(), IMAGE_TO_IMAGE_TOOL_NAME, _build_request
             )
 
-            response = await self._call_api(IMAGE_TO_IMAGE_TOOL_NAME, request_data)
+            response = await self._call_api(
+                IMAGE_TO_IMAGE_TOOL_NAME,
+                request_data,
+                per_request_image_count=request_image_count,
+            )
 
             self._log_task_outcome(task_label, response)
             return response
@@ -469,7 +488,9 @@ class SeedreamClient(_ClientHTTPMixin):
                 _ACTIVE_REQUEST_PLAN.get(), MULTI_IMAGE_FUSION_TOOL_NAME, _build_request
             )
 
-            response = await self._call_api(MULTI_IMAGE_FUSION_TOOL_NAME, request_data)
+            response = await self._call_api(
+                MULTI_IMAGE_FUSION_TOOL_NAME, request_data, per_request_image_count=1
+            )
 
             self._log_task_outcome("多图融合", response)
             return response
@@ -597,7 +618,11 @@ class SeedreamClient(_ClientHTTPMixin):
                 _ACTIVE_REQUEST_PLAN.get(), SEQUENTIAL_GENERATION_TOOL_NAME, _build_request
             )
 
-            response = await self._call_api(SEQUENTIAL_GENERATION_TOOL_NAME, request_data)
+            response = await self._call_api(
+                SEQUENTIAL_GENERATION_TOOL_NAME,
+                request_data,
+                per_request_image_count=resolved_max_images,
+            )
 
             self._log_task_outcome("组图输出", response)
             return response

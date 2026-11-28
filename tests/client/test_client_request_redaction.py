@@ -1,12 +1,13 @@
 """SeedreamClient 请求日志脱敏与 image 字段摘要的单元测试。
 
 覆盖 _summarize_image_field 的 URL / data URI / 本地路径 / list 截断 / 非字符串摘要，
-与 _sanitize_request_for_logging 的 prompt 脱敏、image 替换、其余字段引用不变、
-不 mutate 原始 dict。
+与 _sanitize_request_for_logging 的 prompt 与 safety_identifier 脱敏、image 替换、
+其余字段引用不变、不 mutate 原始 dict，以及请求数据 debug 日志经脱敏副本输出。
 """
 
 import pytest
 
+from _lib.log_fakes import RecordingLogger
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 
@@ -145,8 +146,14 @@ def test_sanitize_redacts_image_list(client: SeedreamClient) -> None:
     assert safe["image"]["count"] == 2
 
 
+def test_sanitize_redacts_safety_identifier(client: SeedreamClient) -> None:
+    """safety_identifier 与 prompt 同形态替换为长度占位标记。"""
+    safe = client._sanitize_request_for_logging({"safety_identifier": "deploy-a"})
+    assert safe["safety_identifier"] == "<redacted:8 chars>"
+
+
 def test_sanitize_preserves_other_fields(client: SeedreamClient) -> None:
-    """prompt/image 以外的字段原样引用。"""
+    """prompt、safety_identifier 与 image 以外的字段原样引用。"""
     data = {"model": "m", "watermark": False, "size": "1K"}
     safe = client._sanitize_request_for_logging(data)
     assert safe["model"] == "m"
@@ -156,9 +163,10 @@ def test_sanitize_preserves_other_fields(client: SeedreamClient) -> None:
 
 def test_sanitize_does_not_mutate_original(client: SeedreamClient) -> None:
     """脱敏返回浅拷贝，不修改原始 dict。"""
-    data = {"prompt": "secret", "image": "https://x/y.png"}
+    data = {"prompt": "secret", "safety_identifier": "deploy-a", "image": "https://x/y.png"}
     _ = client._sanitize_request_for_logging(data)
     assert data["prompt"] == "secret"
+    assert data["safety_identifier"] == "deploy-a"
     assert data["image"] == "https://x/y.png"
 
 
@@ -180,3 +188,29 @@ def test_sanitize_prompt_empty_string(client: SeedreamClient) -> None:
     """空 prompt 记为 0 字符。"""
     safe = client._sanitize_request_for_logging({"prompt": ""})
     assert safe["prompt"] == "<redacted:0 chars>"
+
+
+# ==================== _log_request_attempt ====================
+
+
+def test_request_attempt_log_redacts_safety_identifier(
+    client: SeedreamClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """请求数据 debug 日志输出脱敏副本，safety_identifier 明文不进入日志。"""
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+
+    client._log_request_attempt(
+        endpoint="multi_image_fusion",
+        attempt=0,
+        total_attempts=1,
+        url="https://ark.example/api/v3/images/generations",
+        request_data={"prompt": "p", "safety_identifier": "deploy-a", "size": "2K"},
+    )
+
+    request_lines = [
+        message for message in fake_logger.debug_messages if message.startswith("请求数据:")
+    ]
+    assert len(request_lines) == 1
+    assert "<redacted:8 chars>" in request_lines[0]
+    assert "deploy-a" not in request_lines[0]
