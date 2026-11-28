@@ -218,9 +218,10 @@ def test_cli_main_logs_effective_response_body_limit(
 
     effective_lines = [message for message in messages if "生成链路生效值" in message]
     assert effective_lines, "启动日志缺少「生成链路生效值」行"
+    # 默认模型 5.5 家族单图锚点：像素上限 4624220 乘 4 字节加 1/16 余量后的 base64 最坏展开。
     expected = (
         f"response_body_limit=auto(url={4 * 1024 * 1024},"
-        f"b64_json={4 * ((50 * 1024 * 1024 + 2) // 3)}×N)"
+        f"b64_json=({26203916}+{4 * 1024})×N+{4 * 1024})"
     )
     assert expected in effective_lines[0]
 

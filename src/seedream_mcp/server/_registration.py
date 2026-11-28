@@ -30,7 +30,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.resolve import ListRoots, Resolve
@@ -97,6 +97,8 @@ from ..tools.schemas import (
     FORMAT_FILTER_MAX_ITEMS,
     GenerationTool,
     IMAGE_TO_IMAGE_PROMPT_DESCRIPTION,
+    IntegerType,
+    LAYER_DECOMPOSE_IMAGE_DESCRIPTION,
     LAYER_DECOMPOSE_PROMPT_DESCRIPTION,
     LAYER_DECOMPOSITION_OPTIONS_DESCRIPTION,
     LayerDecompositionOptions,
@@ -110,6 +112,7 @@ from ..tools.schemas import (
     MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION,
     MultiImageType,
     NON_BLANK_PATTERN as _NON_BLANK_PATTERN,
+    NullableIntegerType,
     OFFSET_DESCRIPTION,
     OFFSET_MAX,
     OFFSET_MIN,
@@ -227,13 +230,13 @@ _RESPONSE_FORMAT_FIELD: ResponseFormat = Field(
     default=ResponseFormat.URL, description=RESPONSE_FORMAT_DESCRIPTION
 )
 _STREAM_FIELD: bool = Field(default=False, description=STREAM_DESCRIPTION)
-_REQUEST_COUNT_FIELD: int = Field(
+_REQUEST_COUNT_FIELD: IntegerType = Field(
     default=1,
     ge=REQUEST_COUNT_MIN,
     le=MAX_PARALLEL_REQUEST_COUNT,
     description=REQUEST_COUNT_DESCRIPTION,
 )
-_PARALLELISM_FIELD: int | None = Field(
+_PARALLELISM_FIELD: NullableIntegerType = Field(
     default=None,
     ge=PARALLELISM_MIN,
     le=MAX_PARALLEL_REQUEST_COUNT,
@@ -414,8 +417,8 @@ async def text_to_image(
     output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
     response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
     stream: bool = _STREAM_FIELD,
-    request_count: int = _REQUEST_COUNT_FIELD,
-    parallelism: int | None = _PARALLELISM_FIELD,
+    request_count: IntegerType = _REQUEST_COUNT_FIELD,
+    parallelism: NullableIntegerType = _PARALLELISM_FIELD,
     auto_save: bool | None = _AUTO_SAVE_FIELD,
     save_path: str | None = _SAVE_PATH_FIELD,
     custom_name: str | None = _CUSTOM_NAME_FIELD,
@@ -463,8 +466,8 @@ async def image_to_image(
     output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
     response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
     stream: bool = _STREAM_FIELD,
-    request_count: int = _REQUEST_COUNT_FIELD,
-    parallelism: int | None = _PARALLELISM_FIELD,
+    request_count: IntegerType = _REQUEST_COUNT_FIELD,
+    parallelism: NullableIntegerType = _PARALLELISM_FIELD,
     auto_save: bool | None = _AUTO_SAVE_FIELD,
     save_path: str | None = _SAVE_PATH_FIELD,
     custom_name: str | None = _CUSTOM_NAME_FIELD,
@@ -511,8 +514,8 @@ async def multi_image_fusion(
     output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
     response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
     stream: bool = _STREAM_FIELD,
-    request_count: int = _REQUEST_COUNT_FIELD,
-    parallelism: int | None = _PARALLELISM_FIELD,
+    request_count: IntegerType = _REQUEST_COUNT_FIELD,
+    parallelism: NullableIntegerType = _PARALLELISM_FIELD,
     auto_save: bool | None = _AUTO_SAVE_FIELD,
     save_path: str | None = _SAVE_PATH_FIELD,
     custom_name: str | None = _CUSTOM_NAME_FIELD,
@@ -563,13 +566,13 @@ async def sequential_generation(
     output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
     response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
     stream: bool = _STREAM_FIELD,
-    request_count: int = Field(
+    request_count: IntegerType = Field(
         default=1,
         ge=REQUEST_COUNT_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
         description=REQUEST_COUNT_SEQUENTIAL_DESCRIPTION,
     ),
-    parallelism: int | None = _PARALLELISM_FIELD,
+    parallelism: NullableIntegerType = _PARALLELISM_FIELD,
     auto_save: bool | None = _AUTO_SAVE_FIELD,
     save_path: str | None = _SAVE_PATH_FIELD,
     custom_name: str | None = _CUSTOM_NAME_FIELD,
@@ -610,7 +613,7 @@ async def layer_decompose(
     optimize_prompt_options: OptimizePromptOptions | None = _OPTIMIZE_PROMPT_OPTIONS_FIELD,
     image: str = Field(
         pattern=_NON_BLANK_PATTERN,
-        description=SINGLE_IMAGE_DESCRIPTION,
+        description=LAYER_DECOMPOSE_IMAGE_DESCRIPTION,
     ),
     layer_decomposition_options: LayerDecompositionOptions | None = Field(
         default=None,
@@ -625,13 +628,13 @@ async def layer_decompose(
     output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
     response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
     stream: bool = _STREAM_FIELD,
-    request_count: int = Field(
+    request_count: IntegerType = Field(
         default=1,
         ge=REQUEST_COUNT_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
         description=REQUEST_COUNT_LAYER_DESCRIPTION,
     ),
-    parallelism: int | None = _PARALLELISM_FIELD,
+    parallelism: NullableIntegerType = _PARALLELISM_FIELD,
     auto_save: bool | None = _AUTO_SAVE_FIELD,
     save_path: str | None = _SAVE_PATH_FIELD,
     custom_name: str | None = _CUSTOM_NAME_FIELD,
@@ -673,19 +676,19 @@ async def browse_images(
         default=BrowseImagesInput.DEFAULT_RECURSIVE,
         description=RECURSIVE_DESCRIPTION,
     ),
-    max_depth: int = Field(
+    max_depth: IntegerType = Field(
         default=BrowseImagesInput.DEFAULT_MAX_DEPTH,
         ge=MAX_DEPTH_MIN,
         le=MAX_DEPTH_MAX,
         description=MAX_DEPTH_DESCRIPTION,
     ),
-    limit: int = Field(
+    limit: IntegerType = Field(
         default=BrowseImagesInput.DEFAULT_LIMIT,
         ge=LIMIT_MIN,
         le=LIMIT_MAX,
         description=LIMIT_DESCRIPTION,
     ),
-    offset: int = Field(
+    offset: IntegerType = Field(
         default=BrowseImagesInput.DEFAULT_OFFSET,
         ge=OFFSET_MIN,
         le=OFFSET_MAX,
@@ -735,7 +738,7 @@ async def get_model_info(
 
     返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、透明通道取值、尺寸档位与像素区间，
     以及图层拆分、图层拆分配置与富文本 OCR、透明背景、透明通道全形态、输出格式、流式输出、联网搜索、组图生成与终端用户标识的支持情况。
-    生成工具的模型相关参数是否可用以本工具结果为准；不支持时生成工具会报错并附支持该能力的模型清单。
+    生成工具的模型相关参数是否可用以本工具结果为准。不支持时生成工具会报错并附支持该能力的模型清单。终端用户标识由服务器自动附加，不支持时不附加。
     模型由服务器配置决定，更换模型请告知用户调整服务器配置。
     """
     # 工具描述唯一来源是注册处的 description= 派生文本，显式传入时 SDK 不读 docstring。
@@ -886,6 +889,20 @@ async def server_info_resource() -> str:
     )
 
 
+def _models_info_entries() -> list[dict[str, object]]:
+    """能力清单投影为资源的线上形状。
+
+    background_forms_by_mode 换出为 transparent 形态白名单的平铺投影键 allowed_background_forms。
+    """
+    entries: list[dict[str, object]] = []
+    for entry in model_payloads():
+        payload = dict(entry)
+        forms_by_mode = cast("dict[str, list[str]]", payload.pop("background_forms_by_mode"))
+        payload["allowed_background_forms"] = forms_by_mode.get("transparent", [])
+        entries.append(payload)
+    return entries
+
+
 # models/info 资源的静态载荷缓存：MODEL_ALIASES 与能力表均为进程级静态数据，
 # 首次读取时构建 JSON 后缓存，重复 resources/read 不再重复载荷派生与序列化。
 _models_info_payload: str | None = None
@@ -901,10 +918,10 @@ async def models_info_resource() -> str:
     """各模型别名与能力声明，供客户端按尺寸档位、工具、流式等选择合适模型。"""
     global _models_info_payload
     if _models_info_payload is None:
-        # 载荷派生收敛到 capabilities 的公共 builder，与 Web 模型清单同源；
+        # 载荷派生收敛到 capabilities 的公共 builder，与 Web 模型清单同源。
         # ModelCapabilities 新增字段自动出现在本资源，无需手工同步。
         _models_info_payload = json.dumps(
-            {"models": model_payloads()}, ensure_ascii=False, indent=2
+            {"models": _models_info_entries()}, ensure_ascii=False, indent=2
         )
     return _models_info_payload
 

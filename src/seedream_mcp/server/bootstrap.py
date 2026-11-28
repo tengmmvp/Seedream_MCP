@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 from .cli import (
@@ -11,7 +12,7 @@ from .cli import (
     validate_http_security,
     validate_transport_args,
 )
-from ..config import drain_pending_build_warnings, set_active_config
+from ..config import SeedreamConfig, drain_pending_build_warnings, set_active_config
 from .runtime import (
     SERVER_NAME,
     SERVER_VERSION,
@@ -27,6 +28,7 @@ from .transport import (
 )
 from ..utils.core.errors import SeedreamConfigError, format_error_for_user
 from ..utils.core.logs import get_logger, setup_logging
+from ..utils.core.safety import resolve_safety_identifier
 from ..utils.io.path import drain_pending_start_messages, resolve_log_file_path
 
 logger = get_logger()
@@ -39,15 +41,8 @@ def _drain_pending_warnings() -> None:
     drain_pending_import_time_warnings()
 
 
-def cli_main() -> int:
-    """执行命令行主流程：解析参数、构建配置、初始化日志并按传输方式启动服务器。
-
-    Returns:
-        进程退出码，0 为正常退出，1 为配置错误或运行异常。
-    """
-    parser = build_arg_parser()
-    args = parser.parse_args()
-
+def _init_config_and_logging(args: argparse.Namespace) -> SeedreamConfig | None:
+    """构建并注入活动配置、初始化日志。任一早退经 stderr 输出并返回 None。"""
     # 日志初始化前的任何退出都冲刷缓冲告警（drain 幂等）：日志就绪前经默认
     # stderr 通道，就绪后经配置日志通道输出，新增早退分支不再各自补调。
     try:
@@ -55,7 +50,7 @@ def cli_main() -> int:
             config = build_config_from_args(args)
         except SeedreamConfigError as exc:
             print(f"配置错误: {exc.message}", file=sys.stderr)
-            return 1
+            return None
 
         # 注入活动配置，server 与 path 经 get_active_config 共用此实例。
         set_active_config(config)
@@ -74,12 +69,28 @@ def cli_main() -> int:
             )
         except SeedreamConfigError as exc:
             print(f"日志目录推导失败: {exc.message}", file=sys.stderr)
-            return 1
+            return None
         except OSError:
             print("日志系统初始化失败（请检查日志目录权限或磁盘空间）", file=sys.stderr)
-            return 1
+            return None
     finally:
         _drain_pending_warnings()
+
+    return config
+
+
+def cli_main() -> int:
+    """执行命令行主流程：解析参数、构建配置、初始化日志并按传输方式启动服务器。
+
+    Returns:
+        进程退出码，0 为正常退出，1 为配置错误或运行异常。
+    """
+    parser = build_arg_parser()
+    args = parser.parse_args()
+
+    config = _init_config_and_logging(args)
+    if config is None:
+        return 1
 
     # 按最终活动配置重绑导入期固化的密钥环，使 --config-file 携带的密钥生效；
     # 置于日志系统就绪后，探测失败的 ERROR 落入文件通道；失败不阻断启动。
@@ -90,14 +101,21 @@ def cli_main() -> int:
         SERVER_NAME,
         SERVER_VERSION,
     )
+    # safety_identifier 启动期解析顺带预热派生缓存，只记来源不记值，与请求日志脱敏口径一致。
+    safety_identifier_decision = resolve_safety_identifier(
+        enabled=config.safety_identifier_enabled,
+        model_id=config.model_id,
+        explicit_identifier=config.safety_identifier,
+    )
     # 生成链路生效值随启动落日志：事故排障时无需按环境变量与推导规则反推阈值。
     logger.info(
         "生成链路生效值: generate_concurrency={}, stream_buffer_max_size={}, "
-        "sse_event_max_size={}, response_body_limit={}",
+        "sse_event_max_size={}, response_body_limit={}, safety_identifier={}",
         config.generate_concurrency,
         config.stream_buffer_max_size,
         config.effective_sse_event_max_size(),
         config.response_body_limit_log_text(),
+        safety_identifier_decision.source,
     )
 
     try:

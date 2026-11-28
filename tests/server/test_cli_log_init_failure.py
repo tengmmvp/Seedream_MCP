@@ -26,8 +26,8 @@ from _lib.log_fakes import capture_loguru_messages, preserved_loguru_globals
 def cli_startup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """cli_main 启动前导装配，yield 预期日志文件路径。
 
-    注入密钥与临时工作区根、固定 argv、快照活动配置、空运行桩替换 mcp.run。
-    用例体在 preserved_loguru_globals 包裹下执行。差异化补丁（含覆盖 run 桩）由用例在调用 cli_main 前施加。
+    注入密钥与临时工作区根、固定 argv、快照活动配置、空运行替身替换 mcp.run。
+    用例体在 preserved_loguru_globals 包裹下执行。差异化补丁（含覆盖 run 替身）由用例在调用 cli_main 前施加。
     """
     monkeypatch.setenv("ARK_API_KEY", "test-key")
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
@@ -98,7 +98,11 @@ def test_cli_main_hoisting_drift_warning_reaches_file_channel(
 
 
 def test_cli_main_hoisting_drain_stays_silent_when_chain_intact(cli_startup: Path) -> None:
-    """链序完好时导入期缓冲为空，启动不产生前移漂移告警。"""
+    """链序完好时重建服务器的前移不进导入期缓冲，启动不产生前移漂移告警。"""
+    # autouse 夹具已清空导入期缓冲，重建服务器复现导入期前移。
+    runtime_module._create_mcp_server()
+    assert runtime_module._IMPORT_TIME_WARNINGS.snapshot() == []
+
     exit_code = bootstrap_module.cli_main()
 
     log_text = cli_startup.read_text(encoding="utf-8")

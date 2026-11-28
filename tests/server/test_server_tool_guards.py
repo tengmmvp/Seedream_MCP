@@ -18,17 +18,15 @@ import seedream_mcp.server as server
 
 # lifespan 复位 fixture reset_lifespan_singletons
 
-# 六个带参工具各触发一次校验错误的输入：text_to_image、multi_image_fusion、
-# sequential_generation、layer_decompose 用 parallelism 大于 request_count 的
-# 跨字段规则，image_to_image 用透明背景与 jpeg 输出格式的互斥规则，
-# 浏览工具用平铺签名不拦截的空白 format_filter 条目。
+# 六个带参工具各触发一次校验错误的输入。
+# 生成工具用 parallelism 大于 request_count 的跨字段规则，浏览工具用空白 format_filter 条目。
 _CROSS_FIELD_INVALID_ARGS: dict[str, dict[str, Any]] = {
     "text_to_image": {"prompt": "一只猫", "request_count": 1, "parallelism": 2},
     "image_to_image": {
         "prompt": "改图",
         "image": "https://example.com/a.png",
-        "background": "transparent",
-        "output_format": "jpeg",
+        "request_count": 1,
+        "parallelism": 2,
     },
     "multi_image_fusion": {
         "prompt": "融合两张图",

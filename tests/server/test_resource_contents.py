@@ -71,7 +71,7 @@ async def test_models_info_resource_matches_capability_table() -> None:
     """每条目完整携带能力声明字段，且取值与 get_model_capabilities 全等。"""
     data = json.loads(await models_info_resource())
 
-    # 绑定映射换出为既有 allowed_background_forms 呈现键，与 model_payloads 同契约。
+    # 资源的线上形状保持平铺投影键 allowed_background_forms，不下发绑定映射本体。
     expected_fields = (
         set(model_capabilities.ModelCapabilities.__dataclass_fields__)
         - {"background_forms_by_mode"}
