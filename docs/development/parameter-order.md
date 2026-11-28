@@ -2,7 +2,7 @@
 
 | 项             | 值                                                                                                                                   |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| **版本**       | v1.0                                                                                                                                 |
+| **版本**       | v1.1                                                                                                                                 |
 | **适用范围**   | MCP 工具参数顺序及其派生场合                                                                                                         |
 | **行文**       | 遵循 `docs/development/writing-guide.md`                                                                                             |
 | **规范关键词** | 须＝强制；禁止＝强制不做；仅允许＝封闭集合；应当＝无充分理由须遵守；可以＝可选                                                       |
@@ -153,6 +153,7 @@ G2 两参数每工具至多一个。`browse_images` 见 O6；`get_model_info` �
 - `client` 生成方法签名参数序（`client/_api.py`，落点见 `sync-points.md`；除首参 `prompt` 可位置传入外全部 keyword-only，位置错绑即刻 TypeError）
 - 公共参数校验通道参数序（`utils/core/validators.py` 与 `client/_api.py`，四处联动，落点见 `sync-points.md`）
 - validators 多参校验与合成函数签名序（`utils/core/validators.py`，输入派生参数随规范投影，非输入包装字段位置不管辖；落点见 `sync-points.md`）
+- 产图数投影函数签名序（`tools/schemas.py` 的 `per_request_image_count`，输入派生键随规范投影——G1 图像派生键 `image_count` 先于 G2 选项派生键，非输入包装字段位置不管辖；落点见 `sync-points.md`）
 - `structuredContent` 回显参数序（`tools/outputs/__init__.py` 输出模型字段序与 `tools/pipeline/results.py` 装配清单序）
 - 生成与浏览开始日志字段序（`tools/handlers/_metadata.py` 与 `client/_api.py` 各生成方法的开始日志随输入派生参数序；`tools/handlers/browse_images.py` 的浏览开始日志随 O6 段序）
 - 校验错误消息参数提及序（`utils/core/validators.py`，随规范投影；参数描述文本以被描述参数为主体先行，不属本条）
@@ -168,3 +169,4 @@ G2 两参数每工具至多一个。`browse_images` 见 O6；`get_model_info` �
 | 版本 | 日期       | 要点                                                                                                                              |
 | ---- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | v1.0 | 2026-11-17 | 初版：确立 G1–G7 规范序与 O1–O8 条款；组图输出挂入 background 参数；记载 client 生成方法签名契约（除首参 prompt 外 keyword-only） |
+| v1.1 | 2026-11-19 | 附录 B 增补产图数投影函数签名序（`tools/schemas.py` 的 `per_request_image_count`） |
