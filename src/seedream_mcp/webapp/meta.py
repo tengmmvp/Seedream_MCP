@@ -23,11 +23,10 @@ from ..utils.core.sanitizers import CONTROL_CHARS_PATTERN
 from ..utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
 from ..utils.core.json_envelope import SECURE_JSON_HEADERS
 from ..utils.core.logs import get_logger
-from ..utils.core.validators import classify_background_form
 from ..utils.io.files import SymlinkRejectedError, open_packaged_read
 from ..utils.model.capabilities import (
-    MODEL_CAPABILITIES,
     MODEL_FAMILY_UNKNOWN,
+    background_forms_by_mode_lists,
     get_model_capabilities,
     model_payloads,
     preset_numeric_sort_key,
@@ -57,36 +56,15 @@ def _upload_budget_chars(max_body_size: int) -> int:
 
 
 # 未知模型回退声明：取 unknown 家族的能力声明，与后端放行口径同源。
-_FALLBACK_PRESETS = sorted(
-    get_model_capabilities(MODEL_FAMILY_UNKNOWN).allowed_presets,
-    key=preset_numeric_sort_key,
-)
-_FALLBACK_BACKGROUND_MODES = sorted(
-    get_model_capabilities(MODEL_FAMILY_UNKNOWN).allowed_background_modes
-)
-_FALLBACK_BACKGROUND_FORMS = sorted(
-    get_model_capabilities(MODEL_FAMILY_UNKNOWN).allowed_background_forms
-)
-_FALLBACK_MAX_REFERENCE_IMAGES = get_model_capabilities(MODEL_FAMILY_UNKNOWN).max_reference_images
-
-
-# 形态→参考图张数上界表：classify_background_form 在扫描域（能力表各家族参考图
-# 上限的最大值，覆盖前端可产生的全部张数）内逐点求值单源派生，域尾形态越域
-# 不限记 None；经 config-info 下发，前端查表判形态不做手工镜像。
-def _background_form_image_limits() -> dict[str, int | None]:
-    scan_bound = max(caps.max_reference_images for caps in MODEL_CAPABILITIES.values())
-    limits: dict[str, int | None] = {}
-    for image_count in range(scan_bound + 1):
-        limits[classify_background_form(image_count)] = image_count
-    limits[classify_background_form(scan_bound)] = None
-    return limits
-
-
-_BACKGROUND_FORM_IMAGE_LIMITS = _background_form_image_limits()
+_FALLBACK_CAPS = get_model_capabilities(MODEL_FAMILY_UNKNOWN)
+_FALLBACK_PRESETS = sorted(_FALLBACK_CAPS.allowed_presets, key=preset_numeric_sort_key)
+_FALLBACK_BACKGROUND_MODES = sorted(_FALLBACK_CAPS.allowed_background_modes)
+_FALLBACK_BACKGROUND_FORMS_BY_MODE = background_forms_by_mode_lists(_FALLBACK_CAPS)
+_FALLBACK_MAX_REFERENCE_IMAGES = _FALLBACK_CAPS.max_reference_images
 
 
 def _models_payload() -> list[dict[str, object]]:
-    """构建模型能力清单。"""
+    """返回模型能力清单。"""
     global _MODELS_PAYLOAD
     if _MODELS_PAYLOAD is None:
         _MODELS_PAYLOAD = model_payloads()
@@ -259,13 +237,10 @@ async def web_root_redirect(_request: Request) -> Response:
 async def web_config_info(_request: Request) -> Response:
     """返回前端所需的模型能力、默认值与图片目录可用性。
 
-    图片目录解析经 _responses.resolve_web_images_root 与图库、生成端点同契约；
-    仅回传可用性布尔，不向浏览器泄露服务器绝对路径；
-    不可用时前端在图库区给出配置指引。
-    unknown_max_reference_images 与 upload_budget_chars 使前端的未知模型参考图上限和上传预算预检与后端配置单一来源；
-    background_form_image_limits 下发 background 调用形态的参考图张数上界表，
-    前端 transparent 形态判定与 classify_background_form 单源；
-    generate_fallback_timeout_ms 下发满档等待预算作前端 preflight 失败的兜底；
+    图片目录解析经 _responses.resolve_web_images_root 与图库、生成端点同契约，
+    仅回传可用性布尔，不向浏览器泄露服务器绝对路径，不可用时前端在图库区给出配置指引。
+    unknown_max_reference_images 与 upload_budget_chars 使前端的未知模型参考图上限和上传预算预检与后端配置单一来源。
+    generate_fallback_timeout_ms 下发满档等待预算作前端 preflight 失败的兜底。
     响应附 cache-control: no-store，兼作鉴权探测端点的状态不落代理缓存。
     """
     config = get_active_config()
@@ -279,8 +254,7 @@ async def web_config_info(_request: Request) -> Response:
             "models": _models_payload(),
             "fallback_presets": _FALLBACK_PRESETS,
             "fallback_background_modes": _FALLBACK_BACKGROUND_MODES,
-            "fallback_background_forms": _FALLBACK_BACKGROUND_FORMS,
-            "background_form_image_limits": _BACKGROUND_FORM_IMAGE_LIMITS,
+            "fallback_background_forms_by_mode": _FALLBACK_BACKGROUND_FORMS_BY_MODE,
             "unknown_max_reference_images": _FALLBACK_MAX_REFERENCE_IMAGES,
             "upload_budget_chars": _upload_budget_chars(config.http_max_body_size),
             "supported_extensions": list(SUPPORTED_IMAGE_EXTENSIONS_ORDERED),

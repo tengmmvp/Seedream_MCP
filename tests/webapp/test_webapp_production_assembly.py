@@ -41,7 +41,7 @@ from seedream_mcp.webapp.constants import (
 )
 from seedream_mcp.webapp.generate import _preflight_timeout_ms
 from seedream_mcp.webapp.meta import (
-    _FALLBACK_BACKGROUND_FORMS,
+    _FALLBACK_BACKGROUND_FORMS_BY_MODE,
     _FALLBACK_BACKGROUND_MODES,
     _FALLBACK_MAX_REFERENCE_IMAGES,
     _FALLBACK_PRESETS,
@@ -71,13 +71,45 @@ def test_upload_budget_derivation_floors_at_zero() -> None:
 
 
 def test_fallback_fields_match_unknown_family() -> None:
-    """回退声明统一取 unknown 家族：档位按数值序、background 取值与形态按字典序、参考图上限直取。"""
+    """回退声明的模块常量对账 unknown 家族的能力声明。"""
     unknown = get_model_capabilities(MODEL_FAMILY_UNKNOWN)
 
     assert _FALLBACK_PRESETS == sorted(unknown.allowed_presets, key=preset_numeric_sort_key)
     assert _FALLBACK_BACKGROUND_MODES == sorted(unknown.allowed_background_modes)
-    assert _FALLBACK_BACKGROUND_FORMS == sorted(unknown.allowed_background_forms)
+    assert _FALLBACK_BACKGROUND_FORMS_BY_MODE == {
+        mode: sorted(forms) for mode, forms in unknown.background_forms_by_mode.items()
+    }
     assert _FALLBACK_MAX_REFERENCE_IMAGES == unknown.max_reference_images
+
+
+async def test_config_info_models_deliver_background_forms_per_mode(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """模型清单的 background 形态白名单按取值下发。
+
+    各取值的形态白名单归一为字典，值为排序列表，
+    逐模型与能力表的 background_forms_by_mode 一致。平铺投影键不进载荷。
+    """
+    write_workspace_config(tmp_path)
+    app = _build_streamable_app("127.0.0.1", False, "", True)
+
+    async with web_asgi_client(app) as client:
+        info = (await client.get("/web/api/config-info")).json()
+
+    assert "fallback_background_forms" not in info
+    assert info["models"]
+    for entry in info["models"]:
+        caps = get_model_capabilities(entry["model_id"])
+        assert "allowed_background_forms" not in entry, entry["alias"]
+        assert entry["background_forms_by_mode"] == {
+            mode: sorted(forms) for mode, forms in caps.background_forms_by_mode.items()
+        }, entry["alias"]
+    # 取值受限家族按取值分表：5.0 Pro 的 transparent 仅单参考图可用，opaque 不限形态。
+    pro = next(e for e in info["models"] if e["alias"] == "doubao-seedream-5.0-pro")
+    assert pro["background_forms_by_mode"] == {
+        "opaque": ["multi", "single", "text"],
+        "transparent": ["single"],
+    }
 
 
 async def test_production_app_serves_web_console(
@@ -99,13 +131,17 @@ async def test_production_app_serves_web_console(
     assert api_response.status_code == 200
     info = api_response.json()
     assert info["images_root_available"] is True
-    # 前端派生所需的字段齐备：未知模型档位与参考图上限与后端 unknown 家族同源，
-    # 数值上限与后端常量同源，上传预算与请求体上限同源，水印默认值与配置同源；
-    # 满档等待预算兜底与生成端点 preflight 的同投影推导一致（经真实预检入口
-    # 复算），预算本体仍由 preflight 按输入单源推导。
+    # 前端派生所需的字段齐备：未知模型回退声明与后端 unknown 家族同源，
+    # 数值上限与后端常量同源，上传预算与请求体上限同源，水印默认值与配置同源。
+    # 满档等待预算兜底与生成端点 preflight 的同投影推导一致，
+    # 预算本体仍由 preflight 按输入单源推导。
     assert info["fallback_presets"] == ["1K", "1.5K", "2K", "3K", "4K"]
     assert info["fallback_background_modes"] == ["auto", "opaque", "transparent"]
-    assert info["fallback_background_forms"] == ["multi", "single", "text"]
+    assert info["fallback_background_forms_by_mode"] == {
+        "auto": ["multi", "single", "text"],
+        "opaque": ["multi", "single", "text"],
+        "transparent": ["multi", "single", "text"],
+    }
     assert info["unknown_max_reference_images"] == 14
     assert info["upload_budget_chars"] == 61 * 1024 * 1024
     assert info["max_request_count"] == 10
@@ -148,6 +184,7 @@ async def test_config_info_drops_generate_timeout_materials(
         "auto_save_max_concurrent",
         "layer_decomposition_max_images",
         "generate_max_images_per_request",
+        "background_form_image_limits",
     ):
         assert removed not in info
 

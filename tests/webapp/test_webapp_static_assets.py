@@ -40,10 +40,7 @@ from seedream_mcp.definitions.conventions import (
 )
 from seedream_mcp.utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS_ORDERED
 from seedream_mcp.utils.core.validators import classify_background_form
-from seedream_mcp.utils.model.capabilities import (
-    MODEL_CAPABILITIES,
-    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-)
+from seedream_mcp.utils.model.capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 from seedream_mcp.webapp.constants import (
     STATIC_DIR,
     WEB_API_BROWSE,
@@ -179,8 +176,8 @@ def test_bearer_token_uses_session_storage_only() -> None:
 def test_url_reference_goes_through_add_reference() -> None:
     """URL 手输参考图经 addReference 汇聚，不得绕过其上限与容量防护。
 
-    无 JS 运行时测试基建，以稳定结构锚点为契约：消费侧调用形态存在、消费侧
-    无直写 state.refs 的绕过、refs.js 保有汇聚实现。
+    本用例以稳定结构锚点为契约：消费侧调用形态存在、消费侧无直写 state.refs 的绕过、
+    refs.js 保有汇聚实现。
     """
     main_js = read_js_module_source("main.js")
     refs_js = read_js_module_source("refs.js")
@@ -420,9 +417,9 @@ def test_generate_config_rerender_resets_paging_via_gallery_domain() -> None:
 def test_size_select_restores_pre_layer_choice_on_exit() -> None:
     """尺寸下拉离开拆分工具恢复进入前记忆：非拆分分支消费 preferred。
 
-    无 JS 运行时测试基建，以稳定结构锚点为契约（局限：锁源码形态不执行
-    行为）。离开拆分时 preferred 接管记忆值，非拆分分支的条件与赋值若回退
-    消费 previous，拆分期被替换为 auto 的选择丢失，默认档覆写用户选择。
+    本用例以稳定结构锚点为契约（局限：锁源码形态不执行行为）。
+    离开拆分时 preferred 接管记忆值，非拆分分支的条件与赋值若回退消费 previous，
+    拆分期被替换为 auto 的选择丢失，默认档覆写用户选择。
     """
     render = function_body(
         read_js_module_source("generate.js"), r"function renderSizeOptions\(.*?^}"
@@ -448,22 +445,19 @@ def test_size_select_restores_pre_layer_choice_on_exit() -> None:
     assert "sizeSelect.value = previous;" not in else_block, "非拆分分支残留 previous 赋值"
 
 
-async def test_background_control_mirrors_backend_capability_gates(
-    tmp_path: Path,
-    clean_web_routes: None,
-    reset_http_app_state: None,
-) -> None:
-    """背景控件镜像后端 background 门控：取值白名单过滤与调用形态三态判定。
+def test_background_control_mirrors_backend_capability_gates() -> None:
+    """背景控件镜像后端 background 门控：取值白名单与各取值形态白名单的双重过滤。
 
-    无 JS 运行时测试基建，以稳定结构锚点为契约：取值项按 config-info 当前模型声明的
-    allowed_background_modes 过滤，transparent 的调用形态查 config-info 下发的
-    background_form_image_limits 界限表判定（服务端由 classify_background_form
-    逐点求值单源派生，表与分类器逐输入一致经数据通道断言，前端不再手工镜像）；
-    先前选择不在重建后的选项集时回落空值，空值整体省略 body.background 键。
-    图层拆分无该参数、字段随工具与模型能力折叠，提交读值与展示折叠共用可用性
-    判定（折叠旧值不随请求）；参考图增删与工具切换经 refs 域渲染咽喉的唯一
-    回调槽触发选项复核；未知模型回退白名单经 config-info 下发（与后端 unknown
-    家族同源），前端不再私有镜像；静态直出项与标签表等值。
+    本用例以稳定结构锚点为契约。
+    取值项按 config-info 当前模型声明的 allowed_background_modes 与 background_forms_by_mode 过滤，
+    当前调用形态由 classifyBackgroundForm 判定，过滤与后端 validate_background 同口径，
+    形态三分支与后端 classify_background_form 成对锁定。
+    每个取值同一判定。先前选择不在重建后的选项集时回落空值，
+    空值整体省略 body.background 键。图层拆分无该参数，字段随工具与模型能力折叠，
+    不可用时选项不重建，提交读值与展示折叠共用可用性判定，折叠旧值不随请求。
+    参考图增删与工具切换经 refs 域渲染咽喉的唯一回调槽触发选项复核。
+    未知模型回退白名单经 config-info 下发，与后端 unknown 家族同源，前端无私有镜像，
+    平铺投影键不进前端。静态直出项与标签表等值。
     """
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     select = re.search(r'<select id="background">(.*?)</select>', html, re.DOTALL)
@@ -485,50 +479,41 @@ async def test_background_control_mirrors_backend_capability_gates(
         'const backgroundMode = $("background").value;'
     ), "可用性判定未罩住背景下拉读值"
 
-    # 形态判定数据化：界限表经 config-info 单源下发，按「覆盖张数的最小上界、
-    # 无界兜底」解释须与后端分类器逐输入一致；扫描域越前端可达上限两张，覆盖
-    # 无界尾形态的判定。
-    write_workspace_config(tmp_path)
-    app = build_web_app()
-    response = await web_get(app, WEB_API_CONFIG_INFO)
-    assert response.status_code == 200
-    info = response.json()
-    assert "background_form_image_limits" in info, "config-info 缺形态界限表键"
-    limits: dict[str, int | None] = info["background_form_image_limits"]
-
-    def table_form(image_count: int) -> str | None:
-        bounded = [
-            (limit, form)
-            for form, limit in limits.items()
-            if limit is not None and image_count <= limit
-        ]
-        if bounded:
-            return min(bounded)[1]
-        return next((form for form, limit in limits.items() if limit is None), None)
-
-    scan_domain = max(caps.max_reference_images for caps in MODEL_CAPABILITIES.values()) + 2
-    for image_count in range(scan_domain):
-        assert table_form(image_count) == classify_background_form(
-            image_count
-        ), f"形态界限表在 {image_count} 张参考图处与后端分类器不一致"
+    # 形态判定纯按参考图数量，前端不引用形态界限表。
+    assert "background_form_image_limits" not in generate_js, "前端残留形态界限表引用"
 
     classify = _js_code_without_comments(
         function_body(generate_js, r"function classifyBackgroundForm\(.*?^}")
     )
-    assert "background_form_image_limits" in classify, "形态判定未消费 config-info 下发的界限表"
-    for literal in ('"text"', '"single"', '"multi"'):
-        assert literal not in classify, f"形态判定回归手写形态字面量: {literal}"
+    for statement in (
+        'if (imageCount <= 0) return "text";',
+        'if (imageCount === 1) return "single";',
+        'return "multi";',
+    ):
+        assert statement in classify, f"形态三分支与服务端语义不一致: {statement}"
+    # 三分支与服务端分类器逐输入配对：后端边界漂移时此处红灯，JS 不静默过期。
+    for image_count, form in ((0, "text"), (1, "single"), (2, "multi")):
+        assert (
+            classify_background_form(image_count) == form
+        ), f"{image_count} 张参考图的服务端形态非 {form}，JS 三分支须同步"
 
     render = _js_code_without_comments(
         function_body(generate_js, r"function renderBackgroundOptions\(.*?^}")
     )
     for literal in (
-        "modes.includes",
-        "forms.includes(classifyBackgroundForm(state.refs.length))",
+        "if (!backgroundFieldAvailable()) return;",
+        "const form = classifyBackgroundForm(state.refs.length);",
+        "if (!modes.includes(mode)) continue;",
+        "if (!Array.isArray(allowedForms) || !allowedForms.includes(form)) continue;",
         'empty.textContent = "跟随服务器";',
         "if (available.includes(previous)) select.value = previous;",
     ):
         assert literal in render, f"背景下拉重建缺要素: {literal}"
+    # 门控次序同后端：先取值白名单，再该取值的形态白名单。
+    assert render.index("if (!modes.includes(mode)) continue;") < render.index(
+        "!allowedForms.includes(form)"
+    ), "形态判定未在取值白名单之后"
+    assert 'mode === "transparent"' not in render, "transparent 残留专属门控分支"
     assert render.index("available.push(mode);") < render.index(
         "if (available.includes(previous))"
     ), "保留判定未以重建后的选项集为准"
@@ -543,8 +528,10 @@ async def test_background_control_mirrors_backend_capability_gates(
     visibility = _js_code_without_comments(
         function_body(generate_js, r"function syncBackgroundFieldVisibility\(.*?^}")
     )
-    assert (
-        'classList.toggle("collapsed", !backgroundFieldAvailable())' in visibility
+    assert re.search(
+        r'setRegionCollapsed\(\s*\$\("background"\)\.closest\("\.field"\),\s*'
+        r"!backgroundFieldAvailable\(\),?\s*\)",
+        visibility,
     ), "展示折叠未消费共享可用性判定"
 
     # 工具切换的选项重建经 convergeRefsToTool 的渲染咽喉回调触发，不直呼。
@@ -571,20 +558,28 @@ async def test_background_control_mirrors_backend_capability_gates(
     assert "refsChangedCallback();" in render_refs, "参考图渲染咽喉未触发回调槽"
     assert "onRefsChanged" not in refs_js, "参考图变更回归多订阅 pub-sub"
 
-    # 回退白名单经 config-info 单点下发：前端不再私有镜像，消费锚定 info.fallback_*。
+    # 回退白名单经 config-info 单点下发：前端无私有镜像，消费锚定 info.fallback_*。
+    # 形态白名单按取值消费绑定表，平铺投影键不进前端。
     assert "FALLBACK_BACKGROUND_MODES" not in generate_js, "背景回退取值回归 JS 私有镜像"
     assert "FALLBACK_BACKGROUND_FORMS" not in generate_js, "背景回退形态回归 JS 私有镜像"
+    _assert_imported_from_api(generate_js, "capabilityList", "capabilityMapping")
     capabilities_body = _js_code_without_comments(
         function_body(generate_js, r"function backgroundCapabilities\(.*?^}")
     )
-    for allowed_key, fallback_key in (
-        ("allowed_background_modes", "fallback_background_modes"),
-        ("allowed_background_forms", "fallback_background_forms"),
+    for helper, allowed_key, fallback_key in (
+        ("capabilityList", "allowed_background_modes", "fallback_background_modes"),
+        (
+            "capabilityMapping",
+            "background_forms_by_mode",
+            "fallback_background_forms_by_mode",
+        ),
     ):
         assert re.search(
-            rf'capabilityList\(\s*"{allowed_key}",\s*"{fallback_key}",?\s*\)',
+            rf'{helper}\(\s*"{allowed_key}",\s*"{fallback_key}",?\s*\)',
             capabilities_body,
         ), f"背景回退白名单未消费 {allowed_key}"
+    for retired_key in ("allowed_background_forms", "fallback_background_forms"):
+        assert f'"{retired_key}"' not in generate_js, f"平铺形态投影键残留: {retired_key}"
 
     # 静态直出项与标签表等值：config-info 未就绪时静态项即生效选项集。
     static_entries = dict(re.findall(r'<option value="([a-z]+)">([^<]*)</option>', select.group(1)))
@@ -592,6 +587,110 @@ async def test_background_control_mirrors_backend_capability_gates(
     assert labels, "标签表常量形态改变，守护需同步"
     label_entries = dict(re.findall(r'\["([a-z]+)", "([^"]*)"\]', labels.group(1)))
     assert static_entries == label_entries, "静态直出项与重建标签表分叉"
+
+
+def test_capability_helpers_share_unknown_fallback_chain() -> None:
+    """能力取值助手的回退链单源：清单与映射两形态共用 capabilityValue。
+
+    尺寸档位与 background 取值走清单，background 各取值的形态白名单走映射，
+    两者仅形态归一边界不同。各持一份回退链会使「当前模型声明优先、未知模型回退」的规则漂移成两套。
+    """
+    api_js = read_js_module_source("api.js")
+    chain = _js_code_without_comments(function_body(api_js, r"function capabilityValue\(.*?^}"))
+    assert "currentModel()" in chain, "回退链未取当前模型声明"
+    assert "state.configInfo?.[fallbackKey]" in chain, "回退链未取 config-info 的 unknown 声明"
+    for helper, shape_guard, empty_value in (
+        ("capabilityList", "Array.isArray(value)", "[]"),
+        ("capabilityMapping", "!Array.isArray(value)", "{}"),
+    ):
+        body = _js_code_without_comments(
+            function_body(api_js, rf"export function {helper}\(.*?^}}")
+        )
+        assert "capabilityValue(modelField, fallbackKey)" in body, f"{helper} 绕开共享回退链"
+        assert shape_guard in body, f"{helper} 缺形态归一守卫"
+        assert f": {empty_value};" in body, f"{helper} 形态不符未归 {empty_value}"
+
+
+def test_collapse_regions_route_through_shared_helper() -> None:
+    """折叠区收展统一经 setRegionCollapsed：折叠时禁用其中表单控件，展开只恢复自己禁用的控件。
+
+    仅隐藏不禁用时，折叠区内残留的越界值仍参与表单约束校验，
+    浏览器因控件不可聚焦而静默拦截 submit，生成按钮无提示失效。
+    散落的 collapsed 切换一旦回流，该区即逃过禁用。
+    """
+    generate_js = read_js_module_source("generate.js")
+    helper = _js_code_without_comments(
+        function_body(generate_js, r"function setRegionCollapsed\(.*?^}")
+    )
+    assert 'region.classList.toggle("collapsed", collapsed);' in helper
+    assert 'region.querySelectorAll("input, select, textarea")' in helper
+    # 展开不误启用因其他原因禁用的控件。
+    assert "collapseDisabledControls = new WeakSet();" in generate_js
+    branches = re.search(
+        r"if \(collapsed && !control\.disabled\) \{(?P<disable>[^}]*)\}\s*"
+        r"else if \(!collapsed && collapseDisabledControls\.has\(control\)\) \{(?P<restore>[^}]*)\}",
+        helper,
+    )
+    assert branches is not None, "setRegionCollapsed 的禁用与恢复分支结构改变，守护需同步"
+    assert "control.disabled = true;" in branches["disable"]
+    assert "collapseDisabledControls.add(control);" in branches["disable"]
+    assert "control.disabled = false;" in branches["restore"]
+    assert "collapseDisabledControls.delete(control);" in branches["restore"]
+    # collapsed 类仅经助手切换：全部模块的 toggle、add、remove 合计恰一处。
+    switches = [
+        (path.name, match.group(0))
+        for path in sorted((STATIC_DIR / _JS_DIR).glob("*.js"))
+        for match in re.finditer(
+            r'classList\.(?:toggle|add|remove)\(\s*"collapsed"',
+            _js_code_without_comments(read_js_module_source(path.name)),
+        )
+    ]
+    assert [name for name, _ in switches] == ["generate.js"], switches
+    # 折叠区均经助手收展。
+    for region_id in (
+        "reference-section",
+        "max-images-field",
+        "layer-options-field",
+        "custom-size-field",
+    ):
+        assert re.search(
+            rf'setRegionCollapsed\(\s*\$\("{region_id}"\)', generate_js
+        ), f"折叠区未经助手收展: {region_id}"
+    for control_id in ("output-format", "background"):
+        assert re.search(
+            rf'setRegionCollapsed\(\s*\$\("{control_id}"\)\.closest\("\.field"\),',
+            generate_js,
+        ), f"折叠区未经助手收展: {control_id}"
+
+
+def test_collapse_collapsed_leaves_layout_via_discrete_display_transition() -> None:
+    """折叠态脱离布局且收展动画保留：display: none 配离散过渡与起步样式。
+
+    仅以 grid-template-rows: 0fr 收起时折叠字段仍是网格项，默认视图的参数区留下空白行距。
+    display 的离散过渡撑住动画全程，@starting-style 为首次渲染与展开补足起步值，
+    不支持的环境丢弃该过渡声明，退化为直接显隐。
+    """
+    css = (STATIC_DIR / "css" / "style.css").read_text(encoding="utf-8")
+    collapsed = re.search(r"\.collapse\.collapsed \{([^}]*)\}", css)
+    assert collapsed, "缺折叠态规则"
+    assert "display: none;" in collapsed.group(1), "折叠态未脱离布局"
+    assert "grid-template-rows: 0fr;" in collapsed.group(1), "收起过渡缺终值"
+    # 脱离布局不依赖动效偏好：reduce 下无过渡也得立即收起。
+    motion_open = css.index("{", css.index("@media (prefers-reduced-motion: no-preference)"))
+    assert css.index(".collapse.collapsed {") < motion_open
+    transition = re.search(r"\.collapse \{[^}]*transition:([^;]*);", css)
+    assert transition, "折叠区缺过渡声明"
+    assert "display" in transition.group(1) and "allow-discrete" in transition.group(1)
+    _, motion_end = _balanced_brace_block(css, motion_open)
+    starting_at = css.index("@starting-style {")
+    assert starting_at < motion_end, "起步样式须与过渡同处动效偏好分支"
+    starting, _ = _balanced_brace_block(css, css.index("{", starting_at))
+    assert re.search(
+        r"\.collapse:not\(\.collapsed\)\s*\{[^}]*grid-template-rows: 0fr;", starting
+    ), "首次渲染与展开缺行高起步值"
+    assert re.search(
+        r"\.collapse:not\(\.collapsed\) \.collapse-inner\s*\{[^}]*opacity: 0;", starting
+    ), "首次渲染与展开缺内容透明度起步值"
 
 
 def test_gallery_js_parse_contract() -> None:

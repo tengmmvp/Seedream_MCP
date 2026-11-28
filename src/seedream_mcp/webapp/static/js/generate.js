@@ -8,6 +8,7 @@
 import {
   $,
   capabilityList,
+  capabilityMapping,
   currentModel,
   fetchBlobUrl,
   fetchExternalBlobUrl,
@@ -60,6 +61,26 @@ async function fetchConfigInfo(signal) {
   preflightCache.clear();
 }
 
+const collapseDisabledControls = new WeakSet();
+
+/**
+ * 切换折叠区收展态：折叠时禁用其中表单控件并保留旧值，展开只恢复自己禁用的控件。
+ * 仅隐藏不禁用时，残留的越界值仍参与约束校验，
+ * 浏览器因控件不可聚焦而静默拦截提交。
+ */
+function setRegionCollapsed(region, collapsed) {
+  region.classList.toggle("collapsed", collapsed);
+  for (const control of region.querySelectorAll("input, select, textarea")) {
+    if (collapsed && !control.disabled) {
+      control.disabled = true;
+      collapseDisabledControls.add(control);
+    } else if (!collapsed && collapseDisabledControls.has(control)) {
+      control.disabled = false;
+      collapseDisabledControls.delete(control);
+    }
+  }
+}
+
 /** 将 state.configInfo 渲染进界面：尺寸档位、格式过滤、派生上限与能力开关。 */
 function renderConfigInfo() {
   const info = state.configInfo;
@@ -104,12 +125,10 @@ function renderConfigInfo() {
 
   // 输出格式字段随模型能力显隐，未知模型按 unknown 家族放行，二次加载能力翻转
   // 可双向切换。
-  $("output-format")
-    .closest(".field")
-    .classList.toggle(
-      "collapsed",
-      current ? !current.supports_output_format : false,
-    );
+  setRegionCollapsed(
+    $("output-format").closest(".field"),
+    !outputFormatAllowed(),
+  );
 
   // 背景字段同随模型能力显隐，选项集按能力白名单重建。
   syncBackgroundFieldVisibility();
@@ -147,12 +166,15 @@ function layerOptionsAllowed() {
   return model ? model.supports_layer_decomposition_options : true;
 }
 
+/** 输出格式能力判定：未知模型（Endpoint ID 部署）默认放行，展示折叠与提交读值共用。 */
+function outputFormatAllowed() {
+  const model = currentModel();
+  return model ? model.supports_output_format : true;
+}
+
 /** 自定义尺寸输入区随尺寸选择折叠。 */
 export function syncCustomSizeField() {
-  $("custom-size-field").classList.toggle(
-    "collapsed",
-    $("size").value !== "custom",
-  );
+  setRegionCollapsed($("custom-size-field"), $("size").value !== "custom");
 }
 
 /**
@@ -216,42 +238,25 @@ const BACKGROUND_MODE_LABELS = new Map([
   ["auto", "自动"],
 ]);
 
-/** 当前模型的 background 白名单，未知模型回退取 config-info 下发的 unknown 家族声明。 */
+/** 当前模型的 background 白名单：取值白名单与各取值的形态白名单，未知模型回退 unknown 家族声明。 */
 function backgroundCapabilities() {
   return {
     modes: capabilityList(
       "allowed_background_modes",
       "fallback_background_modes",
     ),
-    forms: capabilityList(
-      "allowed_background_forms",
-      "fallback_background_forms",
+    formsByMode: capabilityMapping(
+      "background_forms_by_mode",
+      "fallback_background_forms_by_mode",
     ),
   };
 }
 
-/**
- * 按参考图数量判 background 调用形态：查 config-info 下发的形态→张数上界表
- * （服务端经 classify_background_form 单源派生），取覆盖该数量的最小上界形态，
- * 无界形态兜底；表缺失返回 null，transparent 随之判不可用。
- */
+/** 按参考图数量判调用形态（0 文生 / 1 单图 / 多张多图），与服务端 classify_background_form 同口径。 */
 function classifyBackgroundForm(imageCount) {
-  const limits =
-    state.configInfo && state.configInfo.background_form_image_limits;
-  if (!limits) return null;
-  let boundedForm = null;
-  let boundedLimit = Infinity;
-  let unboundedForm = null;
-  for (const form in limits) {
-    const limit = limits[form];
-    if (limit === null) {
-      unboundedForm = form;
-    } else if (imageCount <= limit && limit < boundedLimit) {
-      boundedForm = form;
-      boundedLimit = limit;
-    }
-  }
-  return boundedForm || unboundedForm;
+  if (imageCount <= 0) return "text";
+  if (imageCount === 1) return "single";
+  return "multi";
 }
 
 /** 背景字段可用性：图层拆分无该参数，模型不支持时不可用，未知模型放行。 */
@@ -262,23 +267,22 @@ function backgroundFieldAvailable() {
 
 /** 背景字段随可用性折叠，提交读值同判定（折叠旧值不随请求）。 */
 function syncBackgroundFieldVisibility() {
-  $("background")
-    .closest(".field")
-    .classList.toggle("collapsed", !backgroundFieldAvailable());
+  setRegionCollapsed(
+    $("background").closest(".field"),
+    !backgroundFieldAvailable(),
+  );
 }
 
 /**
- * 重建背景下拉：取值项按模型白名单过滤，transparent 另按当前调用形态与
- * 形态白名单求交去留；先前选择在新选项集中不存在（如形态变化后 transparent
- * 不可用）时回落空值。
+ * 重建背景下拉：取值项须在取值白名单内，且当前调用形态在该取值的形态白名单内，
+ * 与服务端 validate_background 同口径。先前选择在新选项集中不存在时回落空值。
  */
 function renderBackgroundOptions() {
+  if (!backgroundFieldAvailable()) return;
   const select = $("background");
   const previous = select.value;
-  const { modes, forms } = backgroundCapabilities();
-  const transparentAllowed =
-    modes.includes("transparent") &&
-    forms.includes(classifyBackgroundForm(state.refs.length));
+  const { modes, formsByMode } = backgroundCapabilities();
+  const form = classifyBackgroundForm(state.refs.length);
   select.innerHTML = "";
   const empty = document.createElement("option");
   empty.value = "";
@@ -286,9 +290,9 @@ function renderBackgroundOptions() {
   select.appendChild(empty);
   const available = [""];
   for (const [mode, label] of BACKGROUND_MODE_LABELS) {
-    const allowed =
-      mode === "transparent" ? transparentAllowed : modes.includes(mode);
-    if (!allowed) continue;
+    if (!modes.includes(mode)) continue;
+    const allowedForms = formsByMode[mode];
+    if (!Array.isArray(allowedForms) || !allowedForms.includes(form)) continue;
     const option = document.createElement("option");
     option.value = mode;
     option.textContent = label;
@@ -301,25 +305,22 @@ function renderBackgroundOptions() {
 // 参考图增删与工具切换改变调用形态：占 refs 域渲染咽喉的唯一回调槽触发选项复核。
 setOnRefsChanged(renderBackgroundOptions);
 
-/**
- * 当前模型能力下各表单区的显隐与提示词必填态；提示词可留空的说明仅图层
- * 拆分工具提及。
- */
+/** 当前模型能力下各表单区的显隐与提示词必填态；提示词可留空的说明仅图层拆分工具提及。 */
 export function applyToolUI() {
   const config = toolConfig(state.tool);
   renderSizeOptions();
-  $("reference-section").classList.toggle("collapsed", !config.refs);
+  setRegionCollapsed($("reference-section"), !config.refs);
   $("prompt-hint").textContent = config.promptOptional
     ? "图层拆分意图可留空，由模型自动识别；建议不超过 300 字。"
     : "建议不超过 300 字。";
-  $("max-images-field").classList.toggle(
-    "collapsed",
+  setRegionCollapsed(
+    $("max-images-field"),
     state.tool !== TOOL_SEQUENTIAL_GENERATION,
   );
-  // 拆分配置仅 5.5 家族支持，其余拆分家族（5.0 Pro / 5.0 Flash）折叠；折叠时
-  // 旧值保留表单（切回支持模型恢复生效），提交同判定不携带，免遭能力门控拒绝。
-  $("layer-options-field").classList.toggle(
-    "collapsed",
+  // 拆分配置仅 5.5 家族支持，5.0 Pro 与 5.0 Flash 折叠，未知模型放行。
+  // 提交读值走同一判定，不携带旧值，免遭能力门控拒绝。
+  setRegionCollapsed(
+    $("layer-options-field"),
     state.tool !== TOOL_LAYER_DECOMPOSE || !layerOptionsAllowed(),
   );
   syncBackgroundFieldVisibility();
@@ -392,14 +393,18 @@ export function buildRequestBody() {
       maxImages === undefined ? undefined : { max_images: maxImages };
   }
   if (layerDecompositionActive() && layerOptionsAllowed()) {
-    // max_images 仅显式给定进请求体；text_recognition 随勾选态显式携带，
-    // 未勾选以显式 false 表达，不退化为键缺省。
-    const options = { text_recognition: $("text-recognition").checked };
+    // 子字段仅显式给定进请求体，留空与未勾选由 API 按官方默认取值。
+    const options = {};
+    if ($("text-recognition").checked) {
+      options.text_recognition = true;
+    }
     const layerMax = parseOptionalNumber("layer-max-images");
     if (layerMax !== undefined) {
       options.max_images = layerMax;
     }
-    body.layer_decomposition_options = options;
+    if (Object.keys(options).length > 0) {
+      body.layer_decomposition_options = options;
+    }
   }
 
   const sizeValue = $("size").value;
@@ -411,7 +416,7 @@ export function buildRequestBody() {
     body.size = sizeValue;
   }
 
-  // 折叠态（图层拆分、不支持模型）旧值不随请求，判定与展示折叠共用。
+  // 折叠态旧值不随请求：背景与输出格式的读值判定与展示折叠共用。
   if (backgroundFieldAvailable()) {
     const backgroundMode = $("background").value;
     if (backgroundMode) body.background = backgroundMode;
@@ -419,8 +424,10 @@ export function buildRequestBody() {
 
   body.watermark = $("watermark").checked;
 
-  const outputFormat = $("output-format").value;
-  if (outputFormat) body.output_format = outputFormat;
+  if (outputFormatAllowed()) {
+    const outputFormat = $("output-format").value;
+    if (outputFormat) body.output_format = outputFormat;
+  }
 
   // 调用数取 generateApiCalls 单一来源，值为 1 即后端缺省，省略键。
   const requestCount = generateApiCalls();

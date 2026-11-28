@@ -113,15 +113,24 @@ export function currentModel() {
   );
 }
 
-/**
- * 取当前模型的能力清单字段，未知模型回退 config-info 下发的 unknown 家族
- * 声明，回退缺失时空数组（尺寸档位与 background 白名单共用本回退链）。
- */
-export function capabilityList(modelField, fallbackKey) {
+/** 当前模型的能力字段值，未知模型回退 config-info 下发的 unknown 家族声明。 */
+function capabilityValue(modelField, fallbackKey) {
   const current = currentModel();
-  if (current && Array.isArray(current[modelField])) return current[modelField];
-  const fallback = state.configInfo?.[fallbackKey];
-  return Array.isArray(fallback) ? fallback : [];
+  return (current && current[modelField]) ?? state.configInfo?.[fallbackKey];
+}
+
+/** 取当前模型的能力清单字段，取值非数组时归空数组。 */
+export function capabilityList(modelField, fallbackKey) {
+  const value = capabilityValue(modelField, fallbackKey);
+  return Array.isArray(value) ? value : [];
+}
+
+/** 取当前模型的能力映射字段，取值非普通对象时归空对象。 */
+export function capabilityMapping(modelField, fallbackKey) {
+  const value = capabilityValue(modelField, fallbackKey);
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value
+    : {};
 }
 
 /** 切换活动工具并同步高亮、选中态与焦点序。 */

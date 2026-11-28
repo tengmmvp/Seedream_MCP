@@ -768,13 +768,14 @@ select:focus {
 
 /* ==================== 过渡与动效 ==================== */
 
-/* 形态折叠区 */
+/* 表单折叠区：收起态脱离布局，不占网格位。 */
 .collapse {
   display: grid;
   grid-template-rows: 1fr;
 }
 
 .collapse.collapsed {
+  display: none;
   grid-template-rows: 0fr;
 }
 
@@ -784,7 +785,6 @@ select:focus {
 }
 
 .collapse.collapsed .collapse-inner {
-  visibility: hidden;
   opacity: 0;
 }
 
@@ -839,17 +839,29 @@ img.developing.thumb-error {
     --motion-develop: cubic-bezier(0.165, 0.84, 0.44, 1);
   }
 
+  /* display 的离散过渡撑住收展全程，行高与内容渐变得以走完。 */
   .collapse {
-    transition: grid-template-rows 200ms var(--motion-enter);
+    transition: grid-template-rows 200ms var(--motion-enter),
+      display 200ms allow-discrete;
   }
 
   .collapse-inner {
     transition: opacity 160ms var(--motion-enter);
   }
 
-  /* 收起时可见性延迟到高度收缩完成，内容随盒渐隐不瞬隐。 */
   .collapse.collapsed .collapse-inner {
-    transition: opacity 200ms var(--motion-enter), visibility 0s linear 200ms;
+    transition: opacity 200ms var(--motion-enter);
+  }
+
+  /* 首次渲染与展开均无前值，起步样式补足过渡起点。 */
+  @starting-style {
+    .collapse:not(.collapsed) {
+      grid-template-rows: 0fr;
+    }
+
+    .collapse:not(.collapsed) .collapse-inner {
+      opacity: 0;
+    }
   }
 
   img.developing {

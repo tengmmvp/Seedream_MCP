@@ -173,8 +173,8 @@ def test_per_request_image_count_metadata_matches_pipeline_shape() -> None:
             ), f"{model.__name__} 不应有组图生效上限"
         assert (
             input_cls.per_request_image_count(
-                max_images=None,
                 image_count=0,
+                max_images=None,
                 model_id=config.model_id,
             )
             == expected
@@ -182,16 +182,16 @@ def test_per_request_image_count_metadata_matches_pipeline_shape() -> None:
     # 拆分投影键（layer_max_images）缺省按官方默认、显式按投影值，与能力表满额对账。
     assert (
         LayerDecomposeInput.per_request_image_count(
-            max_images=None,
             image_count=0,
+            max_images=None,
             model_id="doubao-seedream-5-5-261028",
         )
         == 30
     ), "5.5 拆分缺省产图数元数据偏离官方默认 30"
     assert (
         LayerDecomposeInput.per_request_image_count(
-            max_images=None,
             image_count=0,
+            max_images=None,
             model_id="doubao-seedream-5-5-261028",
             layer_max_images=100,
         )
@@ -199,8 +199,8 @@ def test_per_request_image_count_metadata_matches_pipeline_shape() -> None:
     ), "5.5 拆分显式产图数元数据偏离投影值"
     assert (
         LayerDecomposeInput.per_request_image_count(
-            max_images=None,
             image_count=0,
+            max_images=None,
             model_id="doubao-seedream-5-0-pro-260628",
         )
         == 17
@@ -219,8 +219,8 @@ def test_per_request_image_count_metadata_matches_pipeline_shape() -> None:
             )
             context = build_generation_context(params, config)
             assert SequentialGenerationInput.per_request_image_count(
-                max_images=max_images,
                 image_count=image_count,
+                max_images=max_images,
                 model_id=config.model_id,
             ) == (context.sequential_image_generation_options or {}).get(
                 "max_images"

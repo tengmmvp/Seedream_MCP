@@ -235,11 +235,11 @@ def _preflight_timeout_ms(
         config,
         request_count=request_count,
         per_request_images=model_cls.per_request_image_count(
-            max_images=_parse_clamped_query_int(
-                query.get("max_images"), MAX_IMAGES_MIN, MAX_SEQUENTIAL_TOTAL_IMAGES
-            ),
             image_count=_parse_clamped_query_int(
                 query.get("image_count"), 0, SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES, default=0
+            ),
+            max_images=_parse_clamped_query_int(
+                query.get("max_images"), MAX_IMAGES_MIN, MAX_SEQUENTIAL_TOTAL_IMAGES
             ),
             model_id=config.model_id,
             layer_max_images=_parse_clamped_query_int(
