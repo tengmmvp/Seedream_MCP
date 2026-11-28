@@ -519,7 +519,7 @@ def _resolve_size_token(
         layer_decomposition: 是否处于图层拆分场景，true 时额外接受按输入图
             尺寸自适应的 "auto" 且拒绝宽高像素值。
         model_id: 模型标识符，图层拆分场景拒绝像素值时按该模型能力声明的档位
-            白名单生成错误文案；缺省时按未知家族的全集档位表述。
+            白名单生成错误文案；缺省时按未识别家族的全集档位表述。
 
     Returns:
         分辨率档位的大写字符串、图层拆分场景的小写 "auto" 或像素规格的
@@ -804,10 +804,10 @@ def classify_background_form(image_count: int) -> BackgroundForm:
 def validate_background(
     background: Any,
     model_id: str,
-    output_format: str | None = None,
     *,
-    layer_decomposition: bool,
     image_count: int,
+    output_format: str | None = None,
+    layer_decomposition: bool,
 ) -> str | None:
     """验证图片透明通道参数与模型及调用形态的兼容性。
 
