@@ -23,8 +23,8 @@ jobs:
       - name: ⚡ Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          # uv 版本四处同钉：Dockerfile 的 UV_VERSION 与 reusable-checks.yml、audit.yml、release.yml 的 setup-uv，升版须全部同步。
-          version: 0.12.19
+          # uv 版本五处同钉：Dockerfile 的 UV_VERSION、reusable-checks.yml、audit.yml、release.yml 的 setup-uv 与 pyproject.toml 的 required-version，升版须全部同步。
+          version: 0.13.7
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 

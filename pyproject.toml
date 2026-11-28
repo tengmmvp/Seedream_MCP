@@ -69,6 +69,10 @@ Repository = "https://github.com/tengmmvp/Seedream_MCP.git"
 [project.scripts]
 seedream-image-mcp = "seedream_mcp.server:cli_main"
 
+[tool.uv]
+# 固定 uv 版本，防止版本不符的 uv 改写 uv.lock 的 revision。
+required-version = "==0.13.7"
+
 [tool.hatch.version]
 path = "src/seedream_mcp/version.py"
 
