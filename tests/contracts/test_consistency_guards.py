@@ -1256,42 +1256,54 @@ def test_style_prompt_prefix_names_registered_tools() -> None:
     assert named <= declared, f"文案点名了未注册的工具: {sorted(named - declared)}"
 
 
-def test_context_probe_keys_match_schema_fields() -> None:
-    """context 的工具特有探测键须为某输入模型的真字段或声明的 property/ClassVar。"""
-    from typing import ClassVar, get_origin, get_type_hints
+def _name_probing_references(tree: ast.Module) -> list[str]:
+    """按行号排序返回 getattr/hasattr 的引用站点，裸名、属性访问与 import 别名同面提取。"""
+    sites: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            name = node.id
+        elif isinstance(node, ast.Attribute):
+            name = node.attr
+        elif isinstance(node, ast.alias):
+            name = node.name
+        else:
+            continue
+        if name in {"getattr", "hasattr"}:
+            sites.append((node.lineno, ast.unparse(node)))
+    return [f"第 {lineno} 行 {text}" for lineno, text in sorted(sites)]
 
-    from seedream_mcp.tools.pipeline import context as context_module
-    from seedream_mcp.tools.schemas import (
-        ImageToImageInput,
-        LayerDecomposeInput,
-        MultiImageFusionInput,
-        SequentialGenerationInput,
-        TextToImageInput,
-    )
 
-    source = Path(context_module.__file__).read_text(encoding="utf-8")
-    # 字段名嗅探已按类声明派发消除；探测点重现时守护继续校验键的合法性。
-    probed = set(re.findall(r'(?:getattr|hasattr)\(params, "([a-z_]+)"', source))
-
-    declared: set[str] = set()
-    for model in (
-        TextToImageInput,
-        ImageToImageInput,
-        MultiImageFusionInput,
-        SequentialGenerationInput,
-        LayerDecomposeInput,
-    ):
-        declared |= set(model.model_fields)
-        declared |= {name for name, member in vars(model).items() if isinstance(member, property)}
-        declared |= {
-            name
-            for name, annotation in get_type_hints(model).items()
-            if get_origin(annotation) is ClassVar
-        }
+def test_context_dispatches_by_class_without_name_probing() -> None:
+    """context 不得引用 getattr 或 hasattr，字段一律按输入类声明派发取值。"""
+    tree = _cached_parse(_SRC_ROOT / "tools" / "pipeline" / "context.py")
+    references = _name_probing_references(tree)
 
     assert (
-        not probed - declared
-    ), f"context 探测键不在任何输入模型字段或访问器中: {sorted(probed - declared)}"
+        not references
+    ), f"context 引用了 getattr/hasattr，字段须按输入类声明派发取值: {references}"
+
+
+def test_context_name_probing_extraction_covers_reference_forms() -> None:
+    """调用、变量转存、partial、属性访问与 import 别名入提取面，dunder 定义与字符串提及不入。"""
+    source = (
+        "from builtins import getattr as probe\n"
+        "value = probe(params, 'background')\n"
+        "size = getattr(params, 'size')\n"
+        "probe = hasattr\n"
+        "p = functools.partial(getattr, params)\n"
+        "present = builtins.hasattr(params, 'tools')\n"
+        "def __getattr__(self, name):\n"
+        "    return None\n"
+        "note = '不做 getattr 嗅探'\n"
+    )
+
+    assert _name_probing_references(ast.parse(source)) == [
+        "第 1 行 getattr as probe",
+        "第 3 行 getattr",
+        "第 4 行 hasattr",
+        "第 5 行 getattr",
+        "第 6 行 builtins.hasattr",
+    ]
 
 
 def _opens_call_id_scope(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:

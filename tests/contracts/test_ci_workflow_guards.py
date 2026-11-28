@@ -1,19 +1,30 @@
-"""CI 工作流结构守护：锁定可复用工作流引用关系、触发器范围、并发分组与关键门禁步骤。
+"""CI 工作流结构守护：锁定可复用工作流引用关系、触发器范围、并发分组与关键门禁步骤，
+以及跑测作业对 node 运行时的依赖。
 
 轻量文本断言 .github/workflows 下 YAML 的结构契约，不引入 pyyaml 依赖：
 ci.yml 与 release.yml 的公共步骤必须经 reusable-checks.yml 复用，cspell 版本
-与静态检查命令单源维护；下界作业拆至 sdk-lower-bound.yml 并按代码路径触发。
+与静态检查命令单源维护。下界作业拆至 sdk-lower-bound.yml 并按代码路径触发。
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import tomllib
 from pathlib import Path
+
+import pytest
 
 from _lib.docker_uid import chown_owner_pair
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
+
+
+def _workflow_paths() -> list[Path]:
+    """按文件名排序返回全部工作流文件，.yml 与 .yaml 扩展名 GitHub 均接受。"""
+    return sorted(path for path in _WORKFLOWS_DIR.iterdir() if path.suffix in {".yml", ".yaml"})
 
 
 def _workflow_text(name: str) -> str:
@@ -181,6 +192,27 @@ def test_js_syntax_check_covers_all_modules() -> None:
     assert list(js_dir.glob("*.js")), "webapp 静态目录必须存在 JS 模块"
 
 
+def test_node_behavior_tests_share_syntax_check_node_runtime() -> None:
+    """跑测作业与 JS 语法检查同依赖运行器预装的 node：语法检查步骤在位，CI 缺 node 即红。
+
+    tests/webapp/test_webapp_frontend_request_body.py 经 tests/_lib/frontend_harness.mjs
+    调 node 执行真实 generate.js，本地缺 node 整段跳过。工作流不单独安装 node，
+    运行器预装是唯一来源，语法检查步骤是该依赖在工作流内的显式锚。跑测换到
+    无 node 的运行器后行为测试在 CI 静默跳过。
+    """
+    reusable = _workflow_text("reusable-checks.yml")
+    test_jobs = [
+        block for block in _job_blocks(reusable).values() if "uv run --no-sync pytest -q" in block
+    ]
+    assert test_jobs, "reusable-checks.yml 缺跑测步骤"
+    for block in test_jobs:
+        assert (
+            "node --input-type=module --check" in block
+        ), "跑测作业缺 JS 语法检查步骤，前端行为测试的 node 依赖失去显式锚"
+    if os.environ.get("CI"):
+        assert shutil.which("node") is not None, "CI 运行器缺 node，前端行为测试将静默跳过"
+
+
 def test_per_file_coverage_floor_step_exists_and_gated() -> None:
     """单文件覆盖率下限步骤须绑定非降级跑测门，json 生成与脚本消费同步骤存在。
 
@@ -286,32 +318,356 @@ def test_ci_setup_actions_sha_single_sourced() -> None:
     assert ci.count("actions/checkout@") == 1
 
 
-def test_setup_uv_version_pinned_to_dockerfile() -> None:
-    """全部 setup-uv 步骤钉版与 Dockerfile 的 UV_VERSION 一致，两处策略不得漂移。"""
-    dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    pin = re.search(r"^ARG UV_VERSION=([0-9][0-9A-Za-z.-]*)$", dockerfile, re.MULTILINE)
-    assert pin is not None, "Dockerfile 必须钉 UV_VERSION"
-    for name in ("reusable-checks.yml", "release.yml", "audit.yml"):
-        text = _workflow_text(name)
-        assert "astral-sh/setup-uv@" in text, f"{name} 应经 setup-uv 安装 uv"
-        assert (
-            f"version: {pin.group(1)}" in text
-        ), f"{name} 的 setup-uv 须钉 version: {pin.group(1)}，与 Dockerfile UV_VERSION 同源"
+# uv 版本字面量形态：数字开头，其后为字母、数字、点与连字符。
+_UV_VERSION_TOKEN = r"[0-9][0-9A-Za-z.-]*"
+
+# Dockerfile 的全部 ARG UV_VERSION 声明行，捕获等号后的整行余量，合法形态由钉版值形态单独判定。
+_DOCKERFILE_UV_VERSION_DECLARATION_PATTERN = re.compile(r"^ARG UV_VERSION=(.*)$", re.MULTILINE)
+
+# Dockerfile 合法钉版值形态：<版本> 后仅允许行尾空白。
+# Docker 把行首以外的 # 视为参数，行尾注释会混入版本值。
+_DOCKERFILE_UV_VERSION_VALUE_PATTERN = re.compile(rf"(?P<version>{_UV_VERSION_TOKEN})[ \t]*")
+
+# setup-uv 步骤的 uses 行，动作名可带单引号或双引号。
+# 列表项短横线与 uses 同行，或在 uses 之前的某一行。其间可夹同级键。
+_SETUP_UV_USES_PATTERN = re.compile(r"""(?:-\s+)?uses:\s*['"]?astral-sh/setup-uv@""")
+
+# with: 行形态，允许行尾注释。
+_WITH_KEY_PATTERN = re.compile(r"with:(?: +#.*)?")
+
+# setup-uv 钉版行形态：version: <版本>，允许引号与行尾注释。
+_WORKFLOW_UV_VERSION_PATTERN = re.compile(
+    rf"""version: +(?P<quote>['"]?)(?P<version>{_UV_VERSION_TOKEN})(?P=quote)(?: +#.*)?"""
+)
+
+# 缩进列数与去首尾空白的行文本。
+_IndentedLine = tuple[int, str]
 
 
-# uses 行的 action 钉版引用形态：owner/action@40 位十六进制 SHA，本地复用工作流无 @ref 不计入。
-_ACTION_SHA_USE_PATTERN = re.compile(r"uses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})")
+def _dockerfile_uv_pin(dockerfile: str) -> str:
+    """提取 Dockerfile 的 uv 钉版值，钉版值形态不合法或取值不唯一即断言失败。"""
+    declared = _DOCKERFILE_UV_VERSION_DECLARATION_PATTERN.findall(dockerfile)
+    assert declared, "Dockerfile 未在行首以大写声明 ARG UV_VERSION=<版本>"
+    pins: list[str] = []
+    for value in declared:
+        pin = _DOCKERFILE_UV_VERSION_VALUE_PATTERN.fullmatch(value)
+        assert pin is not None, (
+            f"Dockerfile 的 ARG UV_VERSION 行不是合法钉版行，"
+            f"须为 <版本> 后接至多行尾空白，实际 ARG UV_VERSION={value}"
+        )
+        pins.append(pin.group("version"))
+    unique_pins = sorted(set(pins))
+    assert len(unique_pins) == 1, f"Dockerfile 的 ARG UV_VERSION 声明须唯一，实际 {unique_pins}"
+    return unique_pins[0]
+
+
+def _content_lines(text: str) -> list[_IndentedLine]:
+    """把文本的非空非注释行整理为带缩进的行列表。"""
+    content: list[_IndentedLine] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            content.append((len(line) - len(line.lstrip()), stripped))
+    return content
+
+
+def _step_version_pins(block: list[_IndentedLine]) -> list[str]:
+    """提取步骤块内 with: 直接子键 version 的取值，嵌套更深的键与块标量文本不计入。"""
+    with_index = next(
+        (index for index, (_, line) in enumerate(block) if _WITH_KEY_PATTERN.fullmatch(line)),
+        None,
+    )
+    if with_index is None:
+        return []
+    with_indent = block[with_index][0]
+    pins: list[str] = []
+    child_indent: int | None = None
+    for indent, line in block[with_index + 1 :]:
+        if indent <= with_indent:
+            break
+        if child_indent is None:
+            child_indent = indent
+        if indent == child_indent and (pin := _WORKFLOW_UV_VERSION_PATTERN.fullmatch(line)):
+            pins.append(pin.group("version"))
+    return pins
+
+
+def _setup_uv_step_pins(text: str) -> list[list[str]]:
+    """按文件顺序逐个 setup-uv 步骤提取 version 钉版取值。
+
+    步骤块自 uses 行的下一行起，止于首个更浅缩进的行或不深于 uses 行的列表项。
+    空行、注释行与同级兄弟键不结束块。
+    """
+    content = _content_lines(text)
+    pins_per_step: list[list[str]] = []
+    for index, (uses_indent, uses_line) in enumerate(content):
+        if _SETUP_UV_USES_PATTERN.match(uses_line) is None:
+            continue
+        block: list[_IndentedLine] = []
+        for indent, line in content[index + 1 :]:
+            is_list_item = line == "-" or line.startswith("- ")
+            if indent < uses_indent or (is_list_item and indent <= uses_indent):
+                break
+            block.append((indent, line))
+        pins_per_step.append(_step_version_pins(block))
+    return pins_per_step
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "      - name: Install uv\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          version: 0.13.7\n",
+            [["0.13.7"]],
+            id="name-then-uses",
+        ),
+        pytest.param(
+            "      - uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          version: 0.13.7\n",
+            [["0.13.7"]],
+            id="dash-on-uses",
+        ),
+        pytest.param(
+            "      - name: Install uv\n"
+            '        uses: "astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567"\n'
+            "        with:\n"
+            "          version: 0.13.7\n",
+            [["0.13.7"]],
+            id="double-quoted-uses",
+        ),
+        pytest.param(
+            "      - name: Install uv\n"
+            "        uses: 'astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567'\n"
+            "        with:\n"
+            "          version: 0.13.7\n",
+            [["0.13.7"]],
+            id="single-quoted-uses",
+        ),
+        pytest.param(
+            "      - name: Install uv\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "\n"
+            "        with:\n"
+            "          version: 0.13.7\n",
+            [["0.13.7"]],
+            id="blank-line-in-step",
+        ),
+        pytest.param(
+            "      - name: Install uv\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with: # 钉版输入\n"
+            "            # 注释行的缩进不参与确定子行缩进。\n"
+            "          version: 0.13.7 # 与 Dockerfile 同源\n",
+            [["0.13.7"]],
+            id="comments",
+        ),
+        pytest.param(
+            "      - name: Install uv\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            '          version: "0.13.7"\n'
+            "      - uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          version: '0.13.7'\n",
+            [["0.13.7"], ["0.13.7"]],
+            id="quoted-version-values",
+        ),
+        pytest.param(
+            "      - name: Install uv\r\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\r\n"
+            "        with:\r\n"
+            "          version: 0.13.7\r\n",
+            [["0.13.7"]],
+            id="crlf",
+        ),
+    ],
+)
+def test_setup_uv_step_pins_reads_step_writing_forms(text: str, expected: list[list[str]]) -> None:
+    """步骤写法变化不影响钉版识别。
+
+    列表项短横线的位置、uses 与版本值的引号、注释、空行与 CRLF 行尾均不改变解析结果。
+    with: 下的注释行不是内容行，不参与确定子行缩进。
+    """
+    assert _setup_uv_step_pins(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "      - name: Install uv\n"
+            "        if: ${{ inputs.static-checks }}\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        env:\n"
+            "          version: 9.9.9\n"
+            "        with:\n"
+            "          version: 0.13.7\n"
+            "\n"
+            "      - name: Install uv again\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          version: 0.13.7\n"
+            "        env:\n"
+            "          version: 9.9.8\n"
+            "        if: ${{ always() }}\n",
+            [["0.13.7"], ["0.13.7"]],
+            id="sibling-keys-around-with",
+        ),
+        pytest.param(
+            "      - name: Install uv\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        run: |\n"
+            "          version: 9.9.9\n"
+            "        with:\n"
+            "          version: 0.13.7\n"
+            "      - name: Print uv version\n"
+            "        run: |\n"
+            "          uv --version\n"
+            "          version: 9.9.8\n",
+            [["0.13.7"]],
+            id="block-scalar-versions",
+        ),
+        pytest.param(
+            "      - name: Install uv\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          version: 0.13.7\n"
+            "          cache-suffix:\n"
+            "            version: 9.9.9\n",
+            [["0.13.7"]],
+            id="deeper-nested-key-under-with",
+        ),
+    ],
+)
+def test_setup_uv_step_pins_excludes_versions_outside_with_inputs(
+    text: str, expected: list[list[str]]
+) -> None:
+    """with: 输入以外的 version 不计入钉版。
+
+    同级兄弟键下的嵌套键、run: 块标量正文与 with: 下嵌套更深的键均在排除之列。
+    """
+    assert _setup_uv_step_pins(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "      - name: Install uv\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          version: 0.13.7\n"
+            "      - name: Install uv again\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          version: 0.13.6\n",
+            [["0.13.7"], ["0.13.6"]],
+            id="ordered-steps",
+        ),
+        pytest.param(
+            "      - uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "      - name: Checkout\n"
+            "        uses: actions/checkout@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          version: 9.9.9\n"
+            "      - name: Install uv\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          enable-cache: true\n",
+            [[], []],
+            id="unpinned-steps-before-sibling-inputs",
+        ),
+        pytest.param(
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: Install uv\n"
+            "        uses: astral-sh/setup-uv@0123456789abcdef0123456789abcdef01234567\n"
+            "  checks:\n"
+            "    uses: ./.github/workflows/reusable-checks.yml\n"
+            "    with:\n"
+            "      version: 9.9.9\n",
+            [[]],
+            id="unpinned-last-step-before-caller-job",
+        ),
+        pytest.param(
+            "      - name: Checkout\n"
+            "        uses: actions/checkout@0123456789abcdef0123456789abcdef01234567\n"
+            "        with:\n"
+            "          version: 9.9.9\n",
+            [],
+            id="no-setup-uv-step",
+        ),
+    ],
+)
+def test_setup_uv_step_pins_reports_each_step_in_order(
+    text: str, expected: list[list[str]]
+) -> None:
+    """setup-uv 步骤按文件顺序逐个上报。
+
+    缺 version 的步骤得到空列表，不拾取其后兄弟步骤与调用作业的 with: 输入。
+    """
+    assert _setup_uv_step_pins(text) == expected
+
+
+def test_uv_version_pinned_to_dockerfile() -> None:
+    """uv 版本五处同钉，任一漂移即失败。
+
+    五处为 Dockerfile 的 UV_VERSION、三个工作流的 setup-uv 与 pyproject 的 required-version。
+    """
+    pinned = _dockerfile_uv_pin((_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8"))
+    setup_uv_pins = {
+        workflow.name: step_pins
+        for workflow in _workflow_paths()
+        if (step_pins := _setup_uv_step_pins(_workflow_text(workflow.name)))
+    }
+    assert len(setup_uv_pins) >= 3, (
+        f"setup-uv 跨不少于三个工作流重复钉版是本守护的目标形态，"
+        f"实际 {len(setup_uv_pins)} 个: {list(setup_uv_pins)}"
+    )
+    for name, step_pins in setup_uv_pins.items():
+        for ordinal, pins in enumerate(step_pins, start=1):
+            assert pins, f"{name} 第 {ordinal} 个 setup-uv 步骤未钉 version"
+            assert pins == [pinned], (
+                f"{name} 第 {ordinal} 个 setup-uv 步骤须恰钉一处 version: {pinned}，"
+                f"与 Dockerfile UV_VERSION 同源，实际 {pins}"
+            )
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    required_version = pyproject.get("tool", {}).get("uv", {}).get("required-version")
+    assert (
+        required_version == f"=={pinned}"
+    ), f"pyproject 的 [tool.uv] required-version 须为 =={pinned}，与 Dockerfile UV_VERSION 同源"
+
+
+# uses 行的 action 钉版引用形态：owner/action@40 位十六进制 SHA，动作名可带单引号或双引号，
+# 本地复用工作流无 @ref 不计入。
+_ACTION_SHA_USE_PATTERN = re.compile(
+    r"""uses:\s*['"]?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})"""
+)
+
+
+@pytest.mark.parametrize("quote", ["", '"', "'"], ids=["bare", "double-quoted", "single-quoted"])
+def test_action_sha_pattern_reads_quoted_uses(quote: str) -> None:
+    """SHA 守护的 uses 模式对动作名无引号、单引号与双引号三种写法解析出同一 action 与 SHA。"""
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    uses_line = f"        uses: {quote}astral-sh/setup-uv@{sha}{quote} # v10.3.3\n"
+    assert _ACTION_SHA_USE_PATTERN.findall(uses_line) == [("astral-sh/setup-uv", sha)]
 
 
 def test_action_sha_pins_single_sourced_across_workflows() -> None:
     """同一 action 名跨全部工作流的 SHA 钉版唯一，升级漏改任一文件即失败。
 
     checkout 在 ci/release/audit/reusable-checks 多处重复钉版、setup-uv 在
-    reusable-checks/release/audit 三处重复；部分 bump 时 merge gate
+    reusable-checks/release/audit 三处重复。部分 bump 时 merge gate
     验证的动作版本与 release/audit 实际执行的版本分叉且无其他报警。
     """
     pins: dict[str, list[str]] = {}
-    for workflow in sorted(_WORKFLOWS_DIR.glob("*.yml")):
+    for workflow in _workflow_paths():
         for action, sha in _ACTION_SHA_USE_PATTERN.findall(_workflow_text(workflow.name)):
             pins.setdefault(action, []).append(sha)
     assert pins, ".github/workflows 未解析到任何 SHA 钉版的 action 引用，解析失效"
