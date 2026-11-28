@@ -81,10 +81,17 @@ def spawn_detached_task(
 ) -> "asyncio.Task[_InflightResultT]":
     """创建与创建者调用归因脱钩的后台 task。
 
-    task 可服务多个调用方、可存活到创建者结束之后。任务体内的日志回到占位符、
-    不归因创建者调用，等待结果的调用方日志仍持各自的 ID。
+    task 在清除调用关联 ID 的上下文副本中运行，其余请求级 ContextVar 照常继承。
+    task 可服务多个调用方、可存活到创建者结束之后。
+    等待结果的调用方日志仍持各自的 ID。
+    事件循环的 task factory 须接受 context 关键字，不接受者使创建抛 TypeError。
+    创建失败时关闭协程后上抛，不留悬空协程。
     """
-    return asyncio.create_task(coro, context=cleared_call_id_context())
+    try:
+        return asyncio.create_task(coro, context=cleared_call_id_context())
+    except BaseException:
+        coro.close()
+        raise
 
 
 class TransientInflightError(Exception):

@@ -9,18 +9,33 @@ observed，Exception 与 BaseException 族均不误发孤儿日志；
 外部注入的 BaseException 与转发异常身份不符
 （含转发写入后、消费者恢复前的窗口期），
 不置 observed，孤儿日志保留。
+
+spawn_detached_task 的特征化用例锁定 context 关键字经 task factory 传入的约定，
+以及创建失败（含 BaseException）时协程由 spawn_detached_task 关闭、异常原样上抛。
 """
 
 import asyncio
 import gc
+import inspect
 import traceback
-from typing import NoReturn
+import warnings
+from collections.abc import Callable, Coroutine
+from contextvars import Context, ContextVar
+from typing import Any, NoReturn, TypeVar
 
 import pytest
 
 from seedream_mcp.utils.core import inflight
-from seedream_mcp.utils.core.inflight import InflightEntry, InflightTaskCancelledError
+from seedream_mcp.utils.core.inflight import (
+    InflightEntry,
+    InflightTaskCancelledError,
+    spawn_detached_task,
+)
+from seedream_mcp.utils.core.logs import CALL_ID_PLACEHOLDER, call_id_scope, current_call_id
 from seedream_mcp.utils.core.settle import await_settled_op
+
+# 泛型签名使 factory 对任意结果类型的协程保持精确类型，并匹配 set_task_factory 的类型协议。
+_FactoryResultT = TypeVar("_FactoryResultT")
 
 
 async def _pending_leader(started: asyncio.Event) -> "asyncio.Task[str]":
@@ -358,3 +373,103 @@ async def test_non_copyable_leader_failure_falls_back_to_shared_object() -> None
     assert original is not None
     assert all(outcome is original for outcome in outcomes)
     assert all(isinstance(outcome, _NonCopyableError) for outcome in outcomes)
+
+
+async def test_spawn_detached_task_hands_cleared_context_to_task_factory() -> None:
+    """接受 context 关键字的 task factory 收到脱钩上下文：call_id 已清除，其余 ContextVar 继承。
+
+    asyncio.create_task 经 context= 把上下文交给事件循环的 task factory。
+    本用例锁定该传递形态，供 Python 升级时复测。
+    """
+    factory_contexts: list[Context | None] = []
+
+    def _factory(
+        loop: asyncio.AbstractEventLoop,
+        coro: Coroutine[Any, Any, _FactoryResultT],
+        *,
+        name: str | None = None,
+        context: Context | None = None,
+    ) -> asyncio.Task[_FactoryResultT]:
+        factory_contexts.append(context)
+        return asyncio.Task(coro, loop=loop, name=name, context=context)
+
+    request_marker: ContextVar[str] = ContextVar("request_marker", default="unset")
+
+    async def _probe() -> tuple[str, str]:
+        return current_call_id(), request_marker.get()
+
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    loop.set_task_factory(_factory)
+    marker_token = request_marker.set("inherited")
+    try:
+        with call_id_scope():
+            task = spawn_detached_task(_probe())
+            assert await task == (CALL_ID_PLACEHOLDER, "inherited")
+    finally:
+        request_marker.reset(marker_token)
+        loop.set_task_factory(previous_factory)
+
+    assert len(factory_contexts) == 1
+    received = factory_contexts[0]
+    assert received is not None
+    assert received.run(current_call_id) == CALL_ID_PLACEHOLDER
+    assert received.run(request_marker.get) == "inherited"
+
+
+async def _assert_spawn_failure_closes_coroutine(
+    expected_error: type[BaseException],
+    factory: Callable[[asyncio.AbstractEventLoop, Coroutine[Any, Any, Any]], asyncio.Task[Any]],
+) -> None:
+    """安装 task factory 后断言 spawn_detached_task 抛出指定异常、协程已关闭且不留悬空告警。
+
+    创建失败时协程无 task 接管，由 spawn_detached_task 关闭，不产生 "was never awaited" 告警。
+    """
+
+    async def _probe() -> None:
+        return None
+
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    loop.set_task_factory(factory)
+    coro = _probe()
+    try:
+        with pytest.raises(expected_error):
+            spawn_detached_task(coro)
+    finally:
+        loop.set_task_factory(previous_factory)
+
+    assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        del coro
+        gc.collect()
+    assert not [entry for entry in caught if "was never awaited" in str(entry.message)]
+
+
+async def test_spawn_detached_task_raises_type_error_for_factory_without_context_keyword() -> None:
+    """不接受 context 关键字的 task factory 使 spawn_detached_task 抛 TypeError。"""
+
+    def _legacy_factory(
+        loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, _FactoryResultT]
+    ) -> asyncio.Task[_FactoryResultT]:
+        return asyncio.Task(coro, loop=loop)
+
+    await _assert_spawn_failure_closes_coroutine(TypeError, _legacy_factory)
+
+
+async def test_spawn_detached_task_closes_coroutine_when_factory_raises_base_exception() -> None:
+    """task factory 抛 CancelledError 时 spawn_detached_task 原样上抛并关闭协程。
+
+    捕获边界为 BaseException，收窄到 Exception 会使协程悬空。
+    """
+
+    def _cancelling_factory(
+        loop: asyncio.AbstractEventLoop,
+        coro: Coroutine[Any, Any, _FactoryResultT],
+        *,
+        context: Context | None = None,
+    ) -> asyncio.Task[_FactoryResultT]:
+        raise asyncio.CancelledError
+
+    await _assert_spawn_failure_closes_coroutine(asyncio.CancelledError, _cancelling_factory)

@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import inspect
 from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
@@ -433,6 +434,46 @@ async def test_register_if_absent_leader_detaches_creator_call_id() -> None:
         assert created is True
         assert await entry.consume() == "done"
     assert seen == [CALL_ID_PLACEHOLDER]
+
+
+async def test_register_if_absent_spawn_failure_leaves_no_state_behind() -> None:
+    """不接受 context 关键字的 task factory 使 register_if_absent 投递失败后不残留任何状态。
+
+    抛 TypeError、工厂产出的协程已关闭、键未登记。恢复 task factory 后同键可正常创建 leader。
+    """
+    produced: list[Coroutine[Any, Any, str]] = []
+
+    async def _pending() -> str:
+        return "fresh"
+
+    def _producing_factory() -> Coroutine[Any, Any, str]:
+        coro = _pending()
+        produced.append(coro)
+        return coro
+
+    def _legacy_factory(
+        loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, Any]
+    ) -> asyncio.Task[Any]:
+        return asyncio.Task(coro, loop=loop)
+
+    registry: LoopKeyedInflight[str, str] = LoopKeyedInflight()
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    loop.set_task_factory(_legacy_factory)
+    try:
+        with pytest.raises(TypeError):
+            registry.register_if_absent("blocked", _producing_factory)
+    finally:
+        loop.set_task_factory(previous_factory)
+
+    assert len(produced) == 1
+    assert inspect.getcoroutinestate(produced[0]) == inspect.CORO_CLOSED
+    assert registry.peek("blocked") is None
+    assert len(registry) == 0
+
+    entry, created = registry.register_if_absent("blocked", _pending)
+    assert created is True
+    assert await entry.consume() == "fresh"
 
 
 def test_loop_keyed_inflight_public_registration_entrypoint_unique() -> None:

@@ -7,12 +7,14 @@
 import asyncio
 import os
 import sys
+from collections.abc import Coroutine
+from contextvars import Context
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from seedream_mcp.utils.core.inflight import InflightTaskCancelledError
+from seedream_mcp.utils.core.inflight import InflightTaskCancelledError, spawn_detached_task
 from seedream_mcp.utils.io.save import AutoSaveError, AutoSaveManager, AutoSaveResult
 from seedream_mcp.utils.io.download import (
     DownloadError,
@@ -28,6 +30,7 @@ from _lib.download_fakes import (
     _patch_download_network,
     _png_success_response,
 )
+from _lib.log_fakes import capture_loguru_records
 from _lib.os_fakes import _install_fsync_counter
 from _lib.path_helpers import FORM_VIOLATION_CASES, form_violation_params
 from _lib.time_fakes import _assert_due_flips_at_window_edges, _install_dual_clock
@@ -559,6 +562,142 @@ async def test_close_does_not_wait_for_background_cleanup(
     release.set()
     await auto_save_module.drain_background_cleanup_tasks()
     assert not auto_save_module._cleanup_tasks
+
+
+async def test_maybe_cleanup_holds_cleanup_lock_across_check_spawn_and_mark(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """到期检查、清理任务投递与清理门推进依序同在 _cleanup_lock 临界区内完成。
+
+    三步之间无 await 点，并发行为无法暴露锁外投递，故在各步调用时刻观测锁的持有状态。
+    """
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+    lock = auto_save_module._cleanup_lock
+    gate = auto_save_module._cleanup_gate
+    lock_held_at: list[tuple[str, bool]] = []
+    real_due = gate.due
+    real_mark = gate.mark
+
+    def recording_due(key: str) -> bool:
+        lock_held_at.append(("due", lock.locked()))
+        return real_due(key)
+
+    def recording_spawn(coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        lock_held_at.append(("spawn", lock.locked()))
+        return spawn_detached_task(coro)
+
+    def recording_mark(key: str, interval: float) -> None:
+        lock_held_at.append(("mark", lock.locked()))
+        real_mark(key, interval)
+
+    monkeypatch.setattr(gate, "due", recording_due)
+    monkeypatch.setattr(auto_save_module, "spawn_detached_task", recording_spawn)
+    monkeypatch.setattr(gate, "mark", recording_mark)
+
+    async def noop_cleanup(cleanup_key: str) -> None:
+        del cleanup_key
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        monkeypatch.setattr(manager, "_run_cleanup_in_background", noop_cleanup)
+        await manager._maybe_cleanup()
+        await auto_save_module.drain_background_cleanup_tasks()
+        assert lock_held_at == [("due", True), ("spawn", True), ("mark", True)]
+    finally:
+        await manager.close()
+
+
+async def test_maybe_cleanup_spawn_failure_leaves_gate_due(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """清理任务投递失败不抛、不推进清理门：门保持到期、无在途清理任务，下次保存重试。
+
+    清理是旁路，投递失败不得把已落盘的保存结果报成保存失败，只记带堆栈的 warning。
+    两参 task factory 不接受 context 关键字使投递抛 TypeError。
+    """
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+    cleanup_calls: list[int] = []
+
+    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        cleanup_calls.append(days)
+        return {"deleted_files": 0, "deleted_size": 0, "errors": []}
+
+    def _legacy_factory(
+        loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, Any]
+    ) -> asyncio.Task[Any]:
+        return asyncio.Task(coro, loop=loop)
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        assert manager._cleanup_file_manager is not None
+        monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
+        cleanup_key = str(manager._cleanup_file_manager.base_dir)
+
+        loop = asyncio.get_running_loop()
+        previous_factory = loop.get_task_factory()
+        loop.set_task_factory(_legacy_factory)
+        log_records: list[dict[str, Any]] = []
+        try:
+            with capture_loguru_records(log_records, level="WARNING"):
+                await manager._maybe_cleanup()
+        finally:
+            loop.set_task_factory(previous_factory)
+
+        spawn_failures = [r for r in log_records if "自动清理任务投递失败" in r["message"]]
+        assert len(spawn_failures) == 1
+        assert spawn_failures[0]["exception"] is not None
+        assert auto_save_module._cleanup_gate.due(cleanup_key)
+        assert not auto_save_module._cleanup_tasks
+
+        await manager._maybe_cleanup()
+        await auto_save_module.drain_background_cleanup_tasks()
+        assert cleanup_calls == [30]
+        assert not auto_save_module._cleanup_gate.due(cleanup_key)
+    finally:
+        await manager.close()
+
+
+async def test_maybe_cleanup_lets_process_level_signals_propagate(tmp_path: Path) -> None:
+    """task factory 抛 KeyboardInterrupt 时 _maybe_cleanup 原样上抛，不降级为投递失败。
+
+    隔离边界是 Exception，吞掉进程级信号会延误关停。
+    清理门保持到期、无在途清理任务。
+    """
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    auto_save_module.reset_cleanup_state()
+
+    def _interrupting_factory(
+        loop: asyncio.AbstractEventLoop,
+        coro: Coroutine[Any, Any, Any],
+        *,
+        context: Context | None = None,
+    ) -> asyncio.Task[Any]:
+        raise KeyboardInterrupt
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    try:
+        assert manager._cleanup_file_manager is not None
+        cleanup_key = str(manager._cleanup_file_manager.base_dir)
+
+        loop = asyncio.get_running_loop()
+        previous_factory = loop.get_task_factory()
+        loop.set_task_factory(_interrupting_factory)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                await manager._maybe_cleanup()
+        finally:
+            loop.set_task_factory(previous_factory)
+
+        assert auto_save_module._cleanup_gate.due(cleanup_key)
+        assert not auto_save_module._cleanup_tasks
+        assert not auto_save_module._cleanup_lock.locked()
+    finally:
+        await manager.close()
 
 
 async def test_save_base64_image_rejects_non_image_bytes(tmp_path: Path) -> None:

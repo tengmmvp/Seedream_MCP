@@ -147,9 +147,9 @@ class LoopKeyedInflight(Generic[_RegistryKeyT, _ResultT]):
         """键空闲时经工厂取协程创建 leader task 登记返回 (新条目, True)，被占用返回 (既有条目, False)。
 
         命中检查与登记在单次同步调用内完成，调用方无法在两步之间插入 await 点，
-        无需约定即不会顶替仍在途的条目；工厂仅在空闲时被调用，未调用的工厂
-        不产生悬空协程。leader 统一经 spawn_detached_task 创建，
-        与创建者调用归因脱钩，调用点无法绕过。
+        无需约定即不会顶替仍在途的条目。工厂仅在空闲时被调用，未调用的工厂不产生悬空协程。
+        工厂已调用而投递失败时协程由 spawn_detached_task 关闭。
+        leader 统一经 spawn_detached_task 创建，与创建者调用归因脱钩，调用点无法绕过。
         """
         entry = self.peek(key)
         if entry is not None:

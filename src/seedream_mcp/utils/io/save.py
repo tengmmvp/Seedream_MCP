@@ -513,8 +513,9 @@ class AutoSaveManager:
         两项清理策略均显式关闭的部署下遗留临时文件同样被回收；按天清理与配额驱逐
         仍按各自开关门控。清理边界不可用（_cleanup_file_manager 为 None）时整体
         跳过。节流与失败退避状态收敛于 _cleanup_gate 单一门结构，经 due/mark 查门
-        与推进，失败改写为退避到期（首败最短、连续失败按次放大）；锁内完成检查与
-        占位，并发请求不会同时进入清理。
+        与推进，失败改写为退避到期（首败最短、连续失败按次放大）。
+        锁内完成检查、投递与清理门推进，并发请求不会同时进入清理。
+        投递失败只记录不推进清理门，下次保存重试。
         """
         if self._cleanup_file_manager is None:
             return
@@ -522,11 +523,16 @@ class AutoSaveManager:
         async with _cleanup_lock:
             if not _cleanup_gate.due(cleanup_key):
                 return
+            # 后台执行清理，不阻塞当前请求返回。清理失败改写退避到期供下次重试。
+            try:
+                task = spawn_detached_task(self._run_cleanup_in_background(cleanup_key))
+            except Exception as exc:
+                # 清理是旁路，投递失败不牵连已落盘的保存结果。
+                logger.opt(exception=True).warning("自动清理任务投递失败: {}", exc)
+                return
+            _cleanup_tasks.add(task)
+            task.add_done_callback(_cleanup_tasks.discard)
             _cleanup_gate.mark(cleanup_key, _CLEANUP_MIN_INTERVAL_SECONDS)
-        # 后台执行清理，不阻塞当前请求返回；失败改写退避到期供下次重试。
-        task = spawn_detached_task(self._run_cleanup_in_background(cleanup_key))
-        _cleanup_tasks.add(task)
-        task.add_done_callback(_cleanup_tasks.discard)
 
     async def _run_cleanup_in_background(self, cleanup_key: str) -> None:
         """在后台线程执行清理，失败时改写为退避到期，无错误时清零失败计数。
