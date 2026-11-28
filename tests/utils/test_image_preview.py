@@ -22,6 +22,7 @@ from mcp.types import ImageContent, TextContent
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig, set_active_config
+from seedream_mcp.definitions.conventions import MAX_IMAGE_PIXELS
 from seedream_mcp.tools.schemas import TextToImageInput
 from seedream_mcp.tools.runners import run_text_to_image
 from seedream_mcp.utils.core.logs import CALL_ID_PLACEHOLDER, call_id_scope
@@ -252,14 +253,17 @@ def test_build_thumbnail_outcome_returns_none_for_invalid_input(tmp_path: Path) 
 def test_build_thumbnail_outcome_rejects_pixels_between_limit_and_double(
     tmp_path: Path,
 ) -> None:
-    """声明像素介于 36M 与两倍之间的源图被显式拒绝，不依赖 PIL 告警区间放行。"""
+    """声明像素介于 36M 与两倍之间的源图被显式拒绝，拒绝原因随结果带给调用方。"""
     from seedream_mcp.utils.core.formats import ensure_image_decoders_ready
 
     ensure_image_decoders_ready()
     declared = tmp_path / "declared-big.png"
     declared.write_bytes(forged_png_bytes(6_100, 6_100))
 
-    assert _build_thumbnail_outcome(declared).data is None
+    outcome = _build_thumbnail_outcome(declared)
+
+    assert outcome.data is None
+    assert outcome.failure_reason == f"源图像素 6100x6100 超过上限 {MAX_IMAGE_PIXELS}"
 
 
 def test_build_thumbnail_outcome_applies_exif_orientation_after_draft(tmp_path: Path) -> None:
@@ -917,10 +921,22 @@ async def test_cached_thumbnail_bytes_sinks_leader_cancel_to_none(
         await _reap_if_pending(caller)
 
 
+@pytest.mark.parametrize(
+    ("message", "reason"),
+    [("外部瞬态失败", "外部瞬态失败"), ("", "_ExternalTransientError")],
+    ids=["with-message", "empty-message"],
+)
 async def test_cached_thumbnail_bytes_sinks_transient_marker_beyond_cancellation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warning_records: list[Any]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    warning_records: list[Any],
+    message: str,
+    reason: str,
 ) -> None:
-    """非取消的瞬态标记携带者同样降级 None：获取层按标记而非具体类型分类。"""
+    """非取消的瞬态标记携带者同样降级 None：获取层按标记而非具体类型分类。
+
+    message 为空串时跳过行以异常类型名描述原因，不留悬空箭头。
+    """
     from seedream_mcp.utils.core.inflight import TransientInflightError
     from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
@@ -933,17 +949,17 @@ async def test_cached_thumbnail_bytes_sinks_transient_marker_beyond_cancellation
 
     async def _failing_limited(path: Path) -> thumbnail_module._DecodeOutcome:
         del path
-        raise _ExternalTransientError("外部瞬态失败")
+        raise _ExternalTransientError(message)
 
     monkeypatch.setattr(thumbnail_module, "_build_thumbnail_outcome_limited", _failing_limited)
 
     assert await thumbnail_module.cached_thumbnail_bytes(image, images_root) is None
     assert len(thumbnail_module._thumb_inflight) == 0
-    # 瞬态失败无解码原因，跳过告警不带原因尾。
+    # 瞬态失败源头不留记录，跳过行是其唯一留痕，须携带原因。
     skip_messages = [
         record["message"] for record in warning_records if "缩略图生成失败" in record["message"]
     ]
-    assert skip_messages == ["缩略图生成失败，跳过该张预览: src.png"]
+    assert skip_messages == [f"缩略图生成失败，跳过该张预览: src.png -> {reason}"]
 
 
 async def _late_waiter_shared_failure_scenario(
@@ -952,14 +968,11 @@ async def _late_waiter_shared_failure_scenario(
     warning_records: list[Any],
     *,
     payload: bytes,
-    source_keyword: str,
-    skip_has_reason: bool,
 ) -> str:
-    """创建者调用取消退出后，等待者共享同一在途解码并收获失败的通用场景。
+    """创建者调用取消退出后，等待者共享同一在途解码并收获失败，返回等待者调用 ID。
 
-    写入 payload 经 threading.Event 门控真实解码，源级行恰一条且渲染占位符。
-    跳过告警恰一条并归因到等待者，
-    skip_has_reason 区分解码异常与像素超限的原因携带，返回创建者调用 ID 供独有断言复用。
+    写入 payload 经 threading.Event 门控真实解码，放行时刻在等待者挂上之后。
+    跳过告警恰一条，归因到等待者并携带原因。全部缩略图告警不携带已退出的创建者 ID。
     """
     from seedream_mcp.utils.images import thumbnail as thumbnail_module
 
@@ -1011,14 +1024,14 @@ async def _late_waiter_shared_failure_scenario(
             await _reap_if_pending(waiter)
 
     assert creator_id != waiter_id
-    assert stage_call_ids(warning_records, source_keyword) == [CALL_ID_PLACEHOLDER]
     assert stage_call_ids(warning_records, "缩略图生成失败") == [waiter_id]
     skip_message = next(
         record["message"] for record in warning_records if "缩略图生成失败" in record["message"]
     )
     assert "src.png" in skip_message
-    assert (" -> " in skip_message) is skip_has_reason
-    return creator_id
+    assert " -> " in skip_message
+    assert creator_id not in stage_call_ids(warning_records, "缩略图")
+    return waiter_id
 
 
 async def test_thumbnail_failure_detail_decoupled_at_source(
@@ -1051,36 +1064,88 @@ async def test_thumbnail_failure_detail_decoupled_at_source(
     assert " -> " in skip_message
 
 
-@pytest.mark.parametrize(
-    ("payload", "source_keyword", "skip_has_reason"),
-    [
-        pytest.param(b"not an image at all", "缩略图解码失败", True, id="decode-failure"),
-        pytest.param(forged_png_bytes(6_100, 6_100), "缩略图源图像素", False, id="pixel-overlimit"),
-    ],
-)
-async def test_thumbnail_source_warning_decoupled_and_skip_attributed_to_waiter(
+async def test_thumbnail_decode_failure_detail_decoupled_and_skip_attributed_to_waiter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     warning_records: list[Any],
-    payload: bytes,
-    source_keyword: str,
-    skip_has_reason: bool,
 ) -> None:
-    """创建者调用取消退出后共享解码照常完成：源级行只一条渲染占位符，跳过行归因到等待者。
-
-    真实解码经门控延迟到等待者挂上后放行，源级告警（解码失败详情或像素超限）随之产生。
-    跳过行原因携带随失败形态区分：解码异常带原因尾，像素超限不带。
-    全部缩略图告警不携带已退出的创建者 ID。
-    """
-    creator_id = await _late_waiter_shared_failure_scenario(
-        monkeypatch,
-        tmp_path,
-        warning_records,
-        payload=payload,
-        source_keyword=source_keyword,
-        skip_has_reason=skip_has_reason,
+    """创建者调用取消退出后共享解码照常失败：源级行只一条渲染占位符，跳过行归因到等待者。"""
+    await _late_waiter_shared_failure_scenario(
+        monkeypatch, tmp_path, warning_records, payload=b"not an image at all"
     )
-    assert creator_id not in stage_call_ids(warning_records, "缩略图")
+
+    assert stage_call_ids(warning_records, "缩略图解码失败") == [CALL_ID_PLACEHOLDER]
+    assert len(stage_call_ids(warning_records, "缩略图")) == 2
+
+
+async def test_thumbnail_pixel_overlimit_skipped_with_reason_attributed_to_waiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    warning_records: list[Any],
+) -> None:
+    """像素超限不留源级行：唯一告警是归因到等待者并携带超限原因的跳过行。"""
+    waiter_id = await _late_waiter_shared_failure_scenario(
+        monkeypatch, tmp_path, warning_records, payload=forged_png_bytes(6_100, 6_100)
+    )
+
+    skip_message = next(
+        record["message"] for record in warning_records if "缩略图生成失败" in record["message"]
+    )
+    assert skip_message.endswith(f"源图像素 6100x6100 超过上限 {MAX_IMAGE_PIXELS}")
+    assert stage_call_ids(warning_records, "缩略图") == [waiter_id]
+
+
+async def test_build_preview_contents_reports_pixel_overlimit_with_reason(
+    tmp_path: Path, warning_records: list[Any]
+) -> None:
+    """无缓存直解路径的像素超限同样只留一条带原因的跳过告警，归因当前调用。"""
+    forged = tmp_path / "forged.png"
+    forged.write_bytes(forged_png_bytes(6_100, 6_100))
+
+    with call_id_scope() as call_id:
+        assert await build_preview_contents([forged]) == []
+
+    skip_messages = [
+        record["message"] for record in warning_records if "缩略图" in record["message"]
+    ]
+    assert skip_messages == [
+        f"缩略图生成失败，跳过该张预览: forged.png -> 源图像素 6100x6100 超过上限 {MAX_IMAGE_PIXELS}"
+    ]
+    assert stage_call_ids(warning_records, "缩略图") == [call_id]
+
+
+@pytest.mark.parametrize("message", ["", " \t\n"], ids=["empty", "whitespace-only"])
+async def test_thumbnail_missing_message_exception_described_by_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    warning_records: list[Any],
+    message: str,
+) -> None:
+    """解码异常 message 为空串或纯空白时，源级行与跳过行以异常类型名描述，不留悬空箭头。"""
+    from seedream_mcp.utils.images import thumbnail as thumbnail_module
+
+    class _SilentError(Exception):
+        """message 缺失的解码异常替身。"""
+
+    def _raising_flatten(image: Image.Image) -> Image.Image:
+        raise _SilentError(message)
+
+    monkeypatch.setattr(thumbnail_module, "_flatten_to_rgb", _raising_flatten)
+    source = _write_png(tmp_path / "silent.png", (64, 64))
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+
+    with call_id_scope() as call_id:
+        assert await cached_thumbnail_bytes(source, images_root) is None
+
+    assert [
+        record["message"] for record in warning_records if "缩略图解码失败" in record["message"]
+    ] == ["缩略图解码失败: silent.png -> _SilentError"]
+    assert stage_call_ids(warning_records, "缩略图解码失败") == [CALL_ID_PLACEHOLDER]
+    assert [
+        record["message"] for record in warning_records if "缩略图生成失败" in record["message"]
+    ] == ["缩略图生成失败，跳过该张预览: silent.png -> _SilentError"]
+    assert stage_call_ids(warning_records, "缩略图生成失败") == [call_id]
 
 
 def test_thumbnail_sweep_evicts_oldest_beyond_cap(

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from mcp.types import ImageContent
 
 from ...definitions.conventions import MAX_IMAGE_PIXELS
+from ..core.errors import as_plain, has_message_value, raw_error_text
 from ..core.executors import CPU_OFFLOAD_DECODE_SLOTS, run_in_cpu_pool
 from ..core.inflight import TransientInflightError
 from ..core.logs import get_logger
@@ -85,14 +86,27 @@ def _flatten_to_rgb(image: Image.Image) -> Image.Image:
 
 
 class _DecodeOutcome(NamedTuple):
-    """单次缩略图解码的结果与失败原因，供调用方跳过告警携带原因。"""
+    """单次缩略图解码的结果与失败原因，供调用方跳过告警携带原因。
+
+    data 与 failure_reason 恰一为 None，调用方以 failure_reason 判失败。
+    """
 
     data: bytes | None
     failure_reason: str | None
 
 
+def _describe_exception(exc: BaseException) -> str:
+    """返回异常的描述文本，message 缺失时回退到类型名，避免日志出现空描述。"""
+    message = str(exc)
+    return message if has_message_value(message) else type(exc).__name__
+
+
 def _build_thumbnail_outcome(image_path: Path) -> _DecodeOutcome:
-    """解码单张源图生成缩略图，失败在源头留痕并把原因带给调用方。
+    """解码单张源图生成缩略图，失败原因带给调用方。
+
+    解码异常在源头留一条记录，使无人等待时也有迹可循。
+    显式头尺寸校验拒绝的像素超限源头不留记录，
+    只由等待者记一条带原因与归因的跳过告警，无人等待时不产生。
 
     Raises:
         FileNotFoundError: 源图缺失，与生成失败分档供调用方映射。
@@ -112,14 +126,15 @@ def _build_thumbnail_outcome(image_path: Path) -> _DecodeOutcome:
             # 区间只告警，本路径与参考图校验同口径显式拒绝，不依赖落盘侧防线。
             width, height = image.size
             if width * height > MAX_IMAGE_PIXELS:
-                logger.warning(
-                    "缩略图源图像素 {}x{} 超过上限 {}，跳过: {}",
-                    width,
-                    height,
-                    MAX_IMAGE_PIXELS,
-                    image_path.name,
+                return _DecodeOutcome(
+                    None,
+                    raw_error_text(
+                        "源图像素 {width}x{height} 超过上限 {limit}",
+                        width=as_plain(width),
+                        height=as_plain(height),
+                        limit=as_plain(MAX_IMAGE_PIXELS),
+                    ),
                 )
-                return _DecodeOutcome(None, None)
             # JPEG 先请求 draft 缩尺解码：解码器按请求尺寸缩减采样，只解码必要
             # 分辨率的像素，解码量下降约 4 至 16 倍；请求尺寸取上限的两倍，为后续
             # 缩放保留质量余量。draft 须在像素数据加载前调用才生效，对非 JPEG
@@ -149,8 +164,9 @@ def _build_thumbnail_outcome(image_path: Path) -> _DecodeOutcome:
         # 源图缺失上抛与生成失败分档，供调用方区分静默跳过与失败告警。
         raise
     except Exception as exc:
-        logger.warning("缩略图解码失败: {} -> {}", image_path.name, exc)
-        return _DecodeOutcome(None, str(exc))
+        failure_reason = _describe_exception(exc)
+        logger.warning("缩略图解码失败: {} -> {}", image_path.name, failure_reason)
+        return _DecodeOutcome(None, failure_reason)
 
 
 async def _build_thumbnail_outcome_limited(image_path: Path) -> _DecodeOutcome:
@@ -251,11 +267,8 @@ def reset_thumb_sweep_gate() -> None:
 _thumb_inflight: LoopKeyedInflight[Path, _DecodeOutcome] = LoopKeyedInflight()
 
 
-def _log_thumbnail_skip(image_name: str, reason: str | None) -> None:
-    """记录单张预览跳过告警：缓存等待侧与无缓存直解共用，归因调用方上下文。"""
-    if reason is None:
-        logger.warning("缩略图生成失败，跳过该张预览: {}", image_name)
-        return
+def _log_thumbnail_skip(image_name: str, reason: str) -> None:
+    """记录单张预览跳过告警，缓存等待侧与无缓存直解共用，归因调用方上下文。"""
     logger.warning("缩略图生成失败，跳过该张预览: {} -> {}", image_name, reason)
 
 
@@ -301,16 +314,16 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
     if cached:
         return cached
 
-    # 失败详情在 task 体内源头记录（渲染占位符），无人等待时不产生跳过告警。
+    # 跳过告警归等待者自身的调用方上下文，无人等待时不产生。
     try:
         result = await _thumb_inflight.consume_shared(
             thumb, lambda: _decode_and_cache_thumbnail(image_path, thumb, thumbs_root)
         )
-    except TransientInflightError:
+    except TransientInflightError as exc:
         # 共享在途瞬态失败（标记混入）归生成失败降级为 None，其余异常原样上抛。
-        _log_thumbnail_skip(image_path.name, None)
+        _log_thumbnail_skip(image_path.name, _describe_exception(exc))
         return None
-    if result.data is None:
+    if result.failure_reason is not None:
         _log_thumbnail_skip(image_path.name, result.failure_reason)
         return None
     return result.data
@@ -357,7 +370,7 @@ async def build_preview_contents(
         except OSError:
             # 源图缺失与 stat 瞬时失败跳过该张。
             return None
-        if outcome.data is None:
+        if outcome.failure_reason is not None:
             _log_thumbnail_skip(path.name, outcome.failure_reason)
         return outcome.data
 
